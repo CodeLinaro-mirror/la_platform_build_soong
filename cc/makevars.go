@@ -43,6 +43,7 @@ func makeVarsProvider(ctx android.MakeVarsContext) {
 	ctx.Strict("RS_LLVM_PREBUILTS_VERSION", "${config.RSClangVersion}")
 	ctx.Strict("RS_LLVM_PREBUILTS_BASE", "${config.RSClangBase}")
 	ctx.Strict("RS_LLVM_PREBUILTS_PATH", "${config.RSLLVMPrebuiltsPath}")
+	ctx.Strict("RS_LLVM_INCLUDES", "${config.RSIncludePath}")
 	ctx.Strict("RS_CLANG", "${config.RSLLVMPrebuiltsPath}/clang")
 	ctx.Strict("RS_LLVM_AS", "${config.RSLLVMPrebuiltsPath}/llvm-as")
 	ctx.Strict("RS_LLVM_LINK", "${config.RSLLVMPrebuiltsPath}/llvm-link")
@@ -59,12 +60,14 @@ func makeVarsProvider(ctx android.MakeVarsContext) {
 		ctx.Strict("BOARD_VNDK_VERSION", "")
 	}
 
-	ctx.Strict("ADDRESS_SANITIZER_CONFIG_EXTRA_CFLAGS", asanCflags)
-	ctx.Strict("ADDRESS_SANITIZER_CONFIG_EXTRA_LDFLAGS", asanLdflags)
-	ctx.Strict("ADDRESS_SANITIZER_CONFIG_EXTRA_STATIC_LIBRARIES", asanLibs)
+	ctx.Strict("ADDRESS_SANITIZER_CONFIG_EXTRA_CFLAGS", strings.Join(asanCflags, " "))
+	ctx.Strict("ADDRESS_SANITIZER_CONFIG_EXTRA_LDFLAGS", strings.Join(asanLdflags, " "))
+	ctx.Strict("ADDRESS_SANITIZER_CONFIG_EXTRA_STATIC_LIBRARIES", strings.Join(asanLibs, " "))
 
-	ctx.Strict("CFI_EXTRA_CFLAGS", cfiCflags)
-	ctx.Strict("CFI_EXTRA_LDFLAGS", cfiLdflags)
+	ctx.Strict("CFI_EXTRA_CFLAGS", strings.Join(cfiCflags, " "))
+	ctx.Strict("CFI_EXTRA_LDFLAGS", strings.Join(cfiLdflags, " "))
+
+	ctx.Strict("INTEGER_OVERFLOW_EXTRA_CFLAGS", strings.Join(intOverflowCflags, " "))
 
 	ctx.Strict("DEFAULT_C_STD_VERSION", config.CStdVersion)
 	ctx.Strict("DEFAULT_CPP_STD_VERSION", config.CppStdVersion)
@@ -78,7 +81,9 @@ func makeVarsProvider(ctx android.MakeVarsContext) {
 
 	ctx.Strict("AIDL_CPP", "${aidlCmd}")
 
-	includeFlags, err := ctx.Eval("${config.CommonGlobalIncludes} ${config.CommonGlobalSystemIncludes}")
+	ctx.Strict("RS_GLOBAL_INCLUDES", "${config.RsGlobalIncludes}")
+
+	includeFlags, err := ctx.Eval("${config.CommonGlobalIncludes}")
 	if err != nil {
 		panic(err)
 	}
@@ -113,7 +118,9 @@ func makeVarsProvider(ctx android.MakeVarsContext) {
 		ctx.Strict("SDCLANG", strconv.FormatBool(config.SDClang))
 	}
 	ctx.Strict("SDCLANG_PATH", "${config.SDClangBin}")
+	ctx.Strict("SDCLANG_PATH_2", "${config.SDClangBin2}")
 	ctx.Strict("SDCLANG_COMMON_FLAGS", "${config.SDClangFlags}")
+	ctx.Strict("SDCLANG_COMMON_FLAGS_2", "${config.SDClangFlags2}")
 }
 
 func makeVarsToolchain(ctx android.MakeVarsContext, secondPrefix string,
@@ -215,6 +222,7 @@ func makeVarsToolchain(ctx android.MakeVarsContext, secondPrefix string,
 		if target.Os.Class == android.Device {
 			ctx.Strict(secondPrefix+"ADDRESS_SANITIZER_RUNTIME_LIBRARY", strings.TrimSuffix(config.AddressSanitizerRuntimeLibrary(toolchain), ".so"))
 			ctx.Strict(secondPrefix+"UBSAN_RUNTIME_LIBRARY", strings.TrimSuffix(config.UndefinedBehaviorSanitizerRuntimeLibrary(toolchain), ".so"))
+			ctx.Strict(secondPrefix+"TSAN_RUNTIME_LIBRARY", strings.TrimSuffix(config.ThreadSanitizerRuntimeLibrary(toolchain), ".so"))
 		}
 
 		// This is used by external/gentoo/...

@@ -25,9 +25,9 @@ import (
 	"android/soong/android"
 )
 
-// Flags used by lots of devices.  Putting them in package static variables will save bytes in
-// build.ninja so they aren't repeated for every file
 var (
+	// Flags used by lots of devices.  Putting them in package static variables
+	// will save bytes in build.ninja so they aren't repeated for every file
 	commonGlobalCflags = []string{
 		"-DANDROID",
 		"-fmessage-length=0",
@@ -76,6 +76,13 @@ var (
 	ExperimentalCStdVersion   = "gnu11"
 	ExperimentalCppStdVersion = "gnu++1z"
 	SDClang                   = false
+
+	NdkMaxPrebuiltVersionInt = 24
+
+	// prebuilts/clang default settings.
+	ClangDefaultBase         = "prebuilts/clang/host"
+	ClangDefaultVersion      = "clang-4053586"
+	ClangDefaultShortVersion = "5.0"
 )
 
 var pctx = android.NewPackageContext("android/soong/cc/config")
@@ -107,7 +114,7 @@ func init() {
 
 	// Everything in these lists is a crime against abstraction and dependency tracking.
 	// Do not add anything to this list.
-	pctx.PrefixedPathsForOptionalSourceVariable("CommonGlobalIncludes", "-I",
+	pctx.PrefixedExistentPathsForSourcesVariable("CommonGlobalIncludes", "-I",
 		[]string{
 			"system/core/include",
 			"system/media/audio/include",
@@ -117,17 +124,14 @@ func init() {
 			"libnativehelper/include",
 			"frameworks/native/include",
 			"frameworks/native/opengl/include",
-		})
-	pctx.PrefixedPathsForOptionalSourceVariable("CommonGlobalSystemIncludes", "-isystem ",
-		[]string{
 			"frameworks/av/include",
 		})
 	// This is used by non-NDK modules to get jni.h. export_include_dirs doesn't help
 	// with this, since there is no associated library.
-	pctx.PrefixedPathsForOptionalSourceVariable("CommonNativehelperInclude", "-I",
+	pctx.PrefixedExistentPathsForSourcesVariable("CommonNativehelperInclude", "-I",
 		[]string{"libnativehelper/include/nativehelper"})
 
-	pctx.SourcePathVariable("ClangDefaultBase", "prebuilts/clang/host")
+	pctx.SourcePathVariable("ClangDefaultBase", ClangDefaultBase)
 	pctx.VariableFunc("ClangBase", func(config interface{}) (string, error) {
 		if override := config.(android.Config).Getenv("LLVM_PREBUILTS_BASE"); override != "" {
 			return override, nil
@@ -138,7 +142,7 @@ func init() {
 		if override := config.(android.Config).Getenv("LLVM_PREBUILTS_VERSION"); override != "" {
 			return override, nil
 		}
-		return "clang-3859424", nil
+		return ClangDefaultVersion, nil
 	})
 	pctx.StaticVariable("ClangPath", "${ClangBase}/${HostPrebuiltTag}/${ClangVersion}")
 	pctx.StaticVariable("ClangBin", "${ClangPath}/bin")
@@ -147,7 +151,7 @@ func init() {
 		if override := config.(android.Config).Getenv("LLVM_RELEASE_VERSION"); override != "" {
 			return override, nil
 		}
-		return "4.0", nil
+		return ClangDefaultShortVersion, nil
 	})
 	pctx.StaticVariable("ClangAsanLibDir", "${ClangPath}/lib64/clang/${ClangShortVersion}/lib/linux")
 
@@ -158,6 +162,12 @@ func init() {
 	pctx.SourcePathVariable("RSReleaseVersion", "3.8")
 	pctx.StaticVariable("RSLLVMPrebuiltsPath", "${RSClangBase}/${HostPrebuiltTag}/${RSClangVersion}/bin")
 	pctx.StaticVariable("RSIncludePath", "${RSLLVMPrebuiltsPath}/../lib64/clang/${RSReleaseVersion}/include")
+
+	pctx.PrefixedExistentPathsForSourcesVariable("RsGlobalIncludes", "-I",
+		[]string{
+			"external/clang/lib/Headers",
+			"frameworks/rs/script_api/include",
+		})
 
 	pctx.VariableFunc("CcWrapper", func(config interface{}) (string, error) {
 		if override := config.(android.Config).Getenv("CC_WRAPPER"); override != "" {
@@ -171,8 +181,10 @@ func init() {
 
 func setSdclangVars() {
 	sdclangPath := ""
+	sdclangPath2 := ""
 	sdclangAEFlag := ""
 	sdclangFlags := ""
+	sdclangFlags2 := ""
 
 	product := os.Getenv("TARGET_PRODUCT")
 	androidRoot := os.Getenv("ANDROID_BUILD_TOP")
@@ -216,9 +228,19 @@ func setSdclangVars() {
 				} else {
 					panic("SDCLANG_PATH is required in the default block")
 				}
+				// SDCLANG_PATH_2 is required in the default block
+				if _, ok := devConfig["SDCLANG_PATH_2"]; ok {
+					sdclangPath2 = devConfig["SDCLANG_PATH_2"].(string)
+				} else {
+					panic("SDCLANG_PATH_2 is required in the default block")
+				}
 				// SDCLANG_FLAGS is optional in the default block
 				if _, ok := devConfig["SDCLANG_FLAGS"]; ok {
 					sdclangFlags = devConfig["SDCLANG_FLAGS"].(string)
+				}
+				// SDCLANG_FLAGS_2 is optional in the default block
+				if _, ok := devConfig["SDCLANG_FLAGS_2"]; ok {
+					sdclangFlags2 = devConfig["SDCLANG_FLAGS_2"].(string)
 				}
 			} else {
 				panic("Default block is required in the SD Clang config file")
@@ -234,9 +256,17 @@ func setSdclangVars() {
 				if _, ok := devConfig["SDCLANG_PATH"]; ok {
 					sdclangPath = devConfig["SDCLANG_PATH"].(string)
 				}
+				// SDCLANG_PATH_2 is optional in the device specific block
+				if _, ok := devConfig["SDCLANG_PATH_2"]; ok {
+					sdclangPath2 = devConfig["SDCLANG_PATH_2"].(string)
+				}
 				// SDCLANG_FLAGS is optional in the device specific block
 				if _, ok := devConfig["SDCLANG_FLAGS"]; ok {
 					sdclangFlags = devConfig["SDCLANG_FLAGS"].(string)
+				}
+				// SDCLANG_FLAGS_2 is optional in the device specific block
+				if _, ok := devConfig["SDCLANG_FLAGS_2"]; ok {
+					sdclangFlags2 = devConfig["SDCLANG_FLAGS_2"].(string)
 				}
 			}
 		} else {
@@ -258,6 +288,11 @@ func setSdclangVars() {
 		panic("SDCLANG_PATH can not be empty")
 	}
 
+	// Sanity check SDCLANG_PATH_2
+	if envPath := os.Getenv("SDCLANG_PATH_2"); sdclangPath2 == "" && envPath == "" {
+		panic("SDCLANG_PATH_2 can not be empty")
+	}
+
 	// Override SDCLANG_PATH if the variable is set in the environment
 	pctx.VariableFunc("SDClangBin", func(config interface{}) (string, error) {
 		if override := config.(android.Config).Getenv("SDCLANG_PATH"); override != "" {
@@ -266,12 +301,28 @@ func setSdclangVars() {
 		return sdclangPath, nil
 	})
 
+	// Override SDCLANG_PATH_2 if the variable is set in the environment
+	pctx.VariableFunc("SDClangBin2", func(config interface{}) (string, error) {
+		if override := config.(android.Config).Getenv("SDCLANG_PATH_2"); override != "" {
+			return override, nil
+		}
+		return sdclangPath2, nil
+	})
+
 	// Override SDCLANG_COMMON_FLAGS if the variable is set in the environment
 	pctx.VariableFunc("SDClangFlags", func(config interface{}) (string, error) {
 		if override := config.(android.Config).Getenv("SDCLANG_COMMON_FLAGS"); override != "" {
 			return override, nil
 		}
 		return sdclangAEFlag + " " + sdclangFlags, nil
+	})
+
+	// Override SDCLANG_COMMON_FLAGS_2 if the variable is set in the environment
+	pctx.VariableFunc("SDClangFlags2", func(config interface{}) (string, error) {
+		if override := config.(android.Config).Getenv("SDCLANG_COMMON_FLAGS_2"); override != "" {
+			return override, nil
+		}
+		return sdclangAEFlag + " " + sdclangFlags2, nil
 	})
 }
 
@@ -283,6 +334,7 @@ func bionicHeaders(bionicArch, kernelArch string) string {
 		"-isystem bionic/libc/include",
 		"-isystem bionic/libc/kernel/uapi",
 		"-isystem bionic/libc/kernel/uapi/asm-" + kernelArch,
+		"-isystem bionic/libc/kernel/android/scsi",
 		"-isystem bionic/libc/kernel/android/uapi",
 	}, " ")
 }
@@ -295,5 +347,12 @@ func VndkLibraries() []string {
 // [vendor]
 // namespace.default.link.system.shared_libs
 func LLndkLibraries() []string {
-	return []string{"libc", "libm", "libdl", "liblog", "libandroid_net", "ld-android"}
+	return []string{"libc", "libm", "libdl", "liblog", "libandroid_net", "ld-android", "libvndksupport", "libnativewindow"}
+}
+
+func replaceFirst(slice []string, from, to string) {
+	if slice[0] != from {
+		panic(fmt.Errorf("Expected %q, found %q", from, to))
+	}
+	slice[0] = to
 }
