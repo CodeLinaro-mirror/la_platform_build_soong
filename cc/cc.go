@@ -35,6 +35,7 @@ func init() {
 
 	android.PreDepsMutators(func(ctx android.RegisterMutatorsContext) {
 		ctx.BottomUp("link", linkageMutator).Parallel()
+		ctx.BottomUp("vndk", vndkMutator).Parallel()
 		ctx.BottomUp("image", vendorMutator).Parallel()
 		ctx.BottomUp("ndk_api", ndkApiMutator).Parallel()
 		ctx.BottomUp("test_per_src", testPerSrcMutator).Parallel()
@@ -183,6 +184,8 @@ type ModuleContextIntf interface {
 	sdk() bool
 	sdkVersion() string
 	vndk() bool
+	isVndk() bool
+	isVndkSp() bool
 	createVndkSourceAbiDump() bool
 	selectedStl() string
 	baseModuleName() string
@@ -273,7 +276,7 @@ var (
 // to construct the output file.  Behavior can be customized with a Customizer interface
 type Module struct {
 	android.ModuleBase
-	android.DefaultableModule
+	android.DefaultableModuleBase
 
 	Properties BaseProperties
 	unused     UnusedProperties
@@ -291,6 +294,7 @@ type Module struct {
 	sanitize  *sanitize
 	coverage  *coverage
 	sabi      *sabi
+	vndkdep   *vndkdep
 
 	androidMkSharedLibDeps []string
 
@@ -327,13 +331,16 @@ func (c *Module) Init() android.Module {
 	if c.sabi != nil {
 		c.AddProperties(c.sabi.props()...)
 	}
+	if c.vndkdep != nil {
+		c.AddProperties(c.vndkdep.props()...)
+	}
 	for _, feature := range c.features {
 		c.AddProperties(feature.props()...)
 	}
 
 	android.InitAndroidArchModule(c, c.hod, c.multilib)
 
-	android.InitDefaultableModule(c, c)
+	android.InitDefaultableModule(c)
 
 	return c
 }
@@ -353,6 +360,13 @@ func (c *Module) vndk() bool {
 	return c.Properties.UseVndk
 }
 
+func (c *Module) isVndk() bool {
+	if c.vndkdep != nil {
+		return c.vndkdep.isVndk()
+	}
+	return false
+}
+
 type baseModuleContext struct {
 	android.BaseContext
 	moduleContextImpl
@@ -368,10 +382,10 @@ type moduleContext struct {
 	moduleContextImpl
 }
 
-// Vendor returns true for vendor modules so that they get installed onto the
-// correct partition
+// Vendor returns true for vendor modules excluding VNDK libraries so that
+// they get installed onto the correct partition
 func (ctx *moduleContext) Vendor() bool {
-	return ctx.ModuleContext.Vendor() || ctx.moduleContextImpl.mod.Properties.UseVndk
+	return ctx.ModuleContext.Vendor() || (ctx.mod.vndk() && !ctx.mod.isVndk())
 }
 
 type moduleContextImpl struct {
@@ -431,9 +445,20 @@ func (ctx *moduleContextImpl) vndk() bool {
 	return ctx.mod.vndk()
 }
 
+func (ctx *moduleContextImpl) isVndk() bool {
+	return ctx.mod.isVndk()
+}
+
+func (ctx *moduleContextImpl) isVndkSp() bool {
+	if vndk := ctx.mod.vndkdep; vndk != nil {
+		return vndk.isVndkSp()
+	}
+	return false
+}
+
 // Create source abi dumps if the module belongs to the list of VndkLibraries.
 func (ctx *moduleContextImpl) createVndkSourceAbiDump() bool {
-	return ctx.ctx.Device() && ((Bool(ctx.mod.Properties.Vendor_available)) || (inList(ctx.baseModuleName(), config.LLndkLibraries())))
+	return ctx.ctx.Device() && (ctx.mod.isVndk() || inList(ctx.baseModuleName(), llndkLibraries))
 }
 
 func (ctx *moduleContextImpl) selectedStl() string {
@@ -463,6 +488,7 @@ func newModule(hod android.HostOrDeviceSupported, multilib android.Multilib) *Mo
 	module.sanitize = &sanitize{}
 	module.coverage = &coverage{}
 	module.sabi = &sabi{}
+	module.vndkdep = &vndkdep{}
 	return module
 }
 
@@ -591,6 +617,9 @@ func (c *Module) begin(ctx BaseModuleContext) {
 	if c.sabi != nil {
 		c.sabi.begin(ctx)
 	}
+	if c.vndkdep != nil {
+		c.vndkdep.begin(ctx)
+	}
 	for _, feature := range c.features {
 		feature.begin(ctx)
 	}
@@ -623,6 +652,9 @@ func (c *Module) deps(ctx DepsContext) Deps {
 	}
 	if c.sabi != nil {
 		deps = c.sabi.deps(ctx, deps)
+	}
+	if c.vndkdep != nil {
+		deps = c.vndkdep.deps(ctx, deps)
 	}
 	for _, feature := range c.features {
 		deps = feature.deps(ctx, deps)
@@ -689,9 +721,6 @@ func (c *Module) DepsMutator(actx android.BottomUpMutatorContext) {
 
 	deps := c.deps(ctx)
 
-	c.Properties.AndroidMkSharedLibs = append(c.Properties.AndroidMkSharedLibs, deps.SharedLibs...)
-	c.Properties.AndroidMkSharedLibs = append(c.Properties.AndroidMkSharedLibs, deps.LateSharedLibs...)
-
 	variantNdkLibs := []string{}
 	variantLateNdkLibs := []string{}
 	if ctx.Os() == android.Android {
@@ -717,7 +746,7 @@ func (c *Module) DepsMutator(actx android.BottomUpMutatorContext) {
 					} else {
 						variantLibs = append(variantLibs, entry+ndkLibrarySuffix)
 					}
-				} else if ctx.vndk() && inList(entry, config.LLndkLibraries()) {
+				} else if ctx.vndk() && inList(entry, llndkLibraries) {
 					nonvariantLibs = append(nonvariantLibs, entry+llndkLibrarySuffix)
 				} else {
 					nonvariantLibs = append(nonvariantLibs, entry)
@@ -828,7 +857,12 @@ func (c *Module) depsToPaths(ctx android.ModuleContext) PathDeps {
 			return
 		}
 		if from.Properties.UseVndk {
-			// Vendor code is already limited by the vendor mutator
+			// Though vendor code is limited by the vendor mutator,
+			// each vendor-available module needs to check
+			// link-type for VNDK.
+			if from.vndkdep != nil {
+				from.vndkdep.vndkCheckLinkType(ctx, to)
+			}
 			return
 		}
 		if from.Properties.Sdk_version == "" {
@@ -1065,6 +1099,26 @@ func (c *Module) depsToPaths(ctx android.ModuleContext) PathDeps {
 			}
 			*depPtr = append(*depPtr, dep.Path())
 		}
+
+		// Export the shared libs to the make world. In doing so, .vendor suffix
+		// is added if the lib has both core and vendor variants and this module
+		// is building against vndk. This is because the vendor variant will be
+		// have .vendor suffix in its name in the make world. However, if the
+		// lib is a vendor-only lib or this lib is not building against vndk,
+		// then the suffix is not added.
+		switch tag {
+		case sharedDepTag, sharedExportDepTag, lateSharedDepTag:
+			libName := strings.TrimSuffix(name, llndkLibrarySuffix)
+			libName = strings.TrimPrefix(libName, "prebuilt_")
+			isLLndk := inList(libName, llndkLibraries)
+			if c.vndk() && (Bool(cc.Properties.Vendor_available) || isLLndk) {
+				libName += vendorSuffix
+			}
+			// Note: the order of libs in this list is not important because
+			// they merely serve as dependencies in the make world and do not
+			// affect this lib itself.
+			c.Properties.AndroidMkSharedLibs = append(c.Properties.AndroidMkSharedLibs, libName)
+		}
 	})
 
 	// Dedup exported flags from dependencies
@@ -1102,7 +1156,7 @@ func (c *Module) HostToolPath() android.OptionalPath {
 //
 type Defaults struct {
 	android.ModuleBase
-	android.DefaultsModule
+	android.DefaultsModuleBase
 }
 
 func (*Defaults) GenerateAndroidBuildActions(ctx android.ModuleContext) {
@@ -1136,9 +1190,10 @@ func DefaultsFactory(props ...interface{}) android.Module {
 		&TidyProperties{},
 		&CoverageProperties{},
 		&SAbiProperties{},
+		&VndkProperties{},
 	)
 
-	android.InitDefaultsModule(module, module)
+	android.InitDefaultsModule(module)
 
 	return module
 }
@@ -1169,6 +1224,18 @@ func vendorMutator(mctx android.BottomUpMutatorContext) {
 			"doesn't make sense at the same time as `vendor: true` or `proprietary: true`")
 		return
 	}
+	if vndk := m.vndkdep; vndk != nil {
+		if vndk.isVndk() && !Bool(m.Properties.Vendor_available) {
+			mctx.PropertyErrorf("vndk",
+				"has to define `vendor_available: true` to enable vndk")
+			return
+		}
+		if !vndk.isVndk() && vndk.isVndkSp() {
+			mctx.PropertyErrorf("vndk",
+				"must set `enabled: true` to set `support_system_process: true`")
+			return
+		}
+	}
 
 	if !mctx.DeviceConfig().CompileVndk() {
 		// If the device isn't compiling against the VNDK, we always
@@ -1180,6 +1247,7 @@ func vendorMutator(mctx android.BottomUpMutatorContext) {
 		mctx.CreateVariations(vendorMode)
 	} else if Bool(m.Properties.Vendor_available) {
 		// This will be available in both /system and /vendor
+		// or a /system directory that is available to vendor.
 		mod := mctx.CreateVariations(coreMode, vendorMode)
 		mod[1].(*Module).Properties.UseVndk = true
 	} else if mctx.Vendor() && m.Properties.Sdk_version == "" {
