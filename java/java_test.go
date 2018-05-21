@@ -60,7 +60,7 @@ func testConfig(env map[string]string) android.Config {
 		env["ANDROID_JAVA8_HOME"] = "jdk8"
 	}
 	config := android.TestArchConfig(buildDir, env)
-	config.ProductVariables.DeviceSystemSdkVersions = &[]string{"14", "15"}
+	config.TestProductVariables.DeviceSystemSdkVersions = &[]string{"14", "15"}
 	return config
 
 }
@@ -70,6 +70,7 @@ func testContext(config android.Config, bp string,
 
 	ctx := android.NewTestArchContext()
 	ctx.RegisterModuleType("android_app", android.ModuleFactoryAdaptor(AndroidAppFactory))
+	ctx.RegisterModuleType("android_library", android.ModuleFactoryAdaptor(AndroidLibraryFactory))
 	ctx.RegisterModuleType("java_binary_host", android.ModuleFactoryAdaptor(BinaryHostFactory))
 	ctx.RegisterModuleType("java_library", android.ModuleFactoryAdaptor(LibraryFactory(true)))
 	ctx.RegisterModuleType("java_library_host", android.ModuleFactoryAdaptor(LibraryHostFactory))
