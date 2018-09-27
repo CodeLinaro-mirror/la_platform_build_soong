@@ -76,6 +76,7 @@ func flagsToBuilderFlags(in Flags) builderFlags {
 		sAbiFlags:       strings.Join(in.SAbiFlags, " "),
 		yasmFlags:       strings.Join(in.YasmFlags, " "),
 		toolchain:       in.Toolchain,
+		sdclang:         in.Sdclang,
 		coverage:        in.Coverage,
 		tidy:            in.Tidy,
 		sAbiDump:        in.SAbiDump,
