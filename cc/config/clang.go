@@ -98,7 +98,6 @@ func init() {
 		"-D__compiler_offsetof=__builtin_offsetof",
 
 		// -Wimplicit-fallthrough is not enabled by -Wall.
-		"-Wimplicit-fallthrough",
 
 		// Help catch common 32/64-bit errors.
 		"-Werror=int-conversion",
