@@ -102,7 +102,6 @@ func init() {
 		"-faddrsig",
 
 		// -Wimplicit-fallthrough is not enabled by -Wall.
-		"-Wimplicit-fallthrough",
 
 		// Help catch common 32/64-bit errors.
 		"-Werror=int-conversion",
