@@ -17,6 +17,7 @@ package android
 import (
 	"fmt"
 	"io"
+	"strings"
 )
 
 // prebuilt_etc is for prebuilts that will be installed to
@@ -124,7 +125,8 @@ func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx ModuleContext) {
 	p.outputFilePath = PathForModuleOut(ctx, filename).OutputPath
 	p.installDirPath = PathForModuleInstall(ctx, "etc", String(p.properties.Sub_dir))
 
-	// This ensures that outputFilePath has the same name as this module.
+	// This ensures that outputFilePath has the correct name for others to
+	// use, as the source file may have a different name.
 	ctx.Build(pctx, BuildParams{
 		Rule:   Cp,
 		Output: p.outputFilePath,
@@ -143,11 +145,15 @@ func (p *PrebuiltEtc) AndroidMk() AndroidMkData {
 			fmt.Fprintln(w, "LOCAL_PATH :=", moduleDir)
 			fmt.Fprintln(w, "LOCAL_MODULE :=", name+nameSuffix)
 			fmt.Fprintln(w, "LOCAL_MODULE_CLASS := ETC")
+			if p.commonProperties.Owner != nil {
+				fmt.Fprintln(w, "LOCAL_MODULE_OWNER :=", *p.commonProperties.Owner)
+			}
 			fmt.Fprintln(w, "LOCAL_MODULE_TAGS := optional")
 			fmt.Fprintln(w, "LOCAL_PREBUILT_MODULE_FILE :=", p.outputFilePath.String())
 			fmt.Fprintln(w, "LOCAL_MODULE_PATH :=", "$(OUT_DIR)/"+p.installDirPath.RelPathString())
 			fmt.Fprintln(w, "LOCAL_INSTALLED_MODULE_STEM :=", p.outputFilePath.Base())
 			fmt.Fprintln(w, "LOCAL_UNINSTALLABLE_MODULE :=", !p.Installable())
+			fmt.Fprintln(w, "LOCAL_REQUIRED_MODULES :=", strings.Join(data.Required, " "))
 			if p.additionalDependencies != nil {
 				fmt.Fprint(w, "LOCAL_ADDITIONAL_DEPENDENCIES :=")
 				for _, path := range *p.additionalDependencies {
@@ -168,7 +174,7 @@ func PrebuiltEtcFactory() Module {
 	module := &PrebuiltEtc{}
 	InitPrebuiltEtcModule(module)
 	// This module is device-only
-	InitAndroidArchModule(module, DeviceSupported, MultilibCommon)
+	InitAndroidArchModule(module, DeviceSupported, MultilibFirst)
 	return module
 }
 

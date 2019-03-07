@@ -32,10 +32,10 @@ var (
 	Signapk = pctx.AndroidStaticRule("signapk",
 		blueprint.RuleParams{
 			Command: `${config.JavaCmd} -Djava.library.path=$$(dirname $signapkJniLibrary) ` +
-				`-jar $signapkCmd $certificates $in $out`,
+				`-jar $signapkCmd $flags $certificates $in $out`,
 			CommandDeps: []string{"$signapkCmd", "$signapkJniLibrary"},
 		},
-		"certificates")
+		"flags", "certificates")
 
 	androidManifestMerger = pctx.AndroidStaticRule("androidManifestMerger",
 		blueprint.RuleParams{
@@ -122,9 +122,10 @@ func BuildAAR(ctx android.ModuleContext, outputFile android.WritablePath,
 	}
 
 	ctx.Build(pctx, android.BuildParams{
-		Rule:      buildAAR,
-		Implicits: deps,
-		Output:    outputFile,
+		Rule:        buildAAR,
+		Description: "aar",
+		Implicits:   deps,
+		Output:      outputFile,
 		Args: map[string]string{
 			"manifest":   manifest.String(),
 			"classesJar": classesJarPath,

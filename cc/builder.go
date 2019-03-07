@@ -55,6 +55,13 @@ var (
 		},
 		"ccCmd", "cFlags")
 
+	ccNoDeps = pctx.AndroidGomaStaticRule("ccNoDeps",
+		blueprint.RuleParams{
+			Command:     "$relPwd ${config.CcWrapper}$ccCmd -c $cFlags -o $out $in",
+			CommandDeps: []string{"$ccCmd"},
+		},
+		"ccCmd", "cFlags")
+
 	ld = pctx.AndroidStaticRule("ld",
 		blueprint.RuleParams{
 			Command: "$ldCmd ${crtBegin} @${out}.rsp " +
@@ -192,7 +199,7 @@ var (
 			// TODO(b/78139997): Add -check-all-apis back
 			commandStr := "($sAbiDiffer $allowFlags -lib $libName -arch $arch -o ${out} -new $in -old $referenceDump)"
 			commandStr += "|| (echo ' ---- Please update abi references by running $$ANDROID_BUILD_TOP/development/vndk/tools/header-checker/utils/create_reference_dumps.py -l ${libName} ----'"
-			commandStr += " && (mkdir -p $$DIST_DIR/abidiffs && cp ${out} $$DIST_DIR/abidiff/)"
+			commandStr += " && (mkdir -p $$DIST_DIR/abidiffs && cp ${out} $$DIST_DIR/abidiffs/)"
 			commandStr += " && exit 1)"
 			return blueprint.RuleParams{
 				Command:     commandStr,
@@ -384,9 +391,13 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 		tidy := flags.tidy
 		coverage := flags.coverage
 		dump := flags.sAbiDump
+		rule := cc
 
 		switch srcFile.Ext() {
-		case ".S", ".s":
+		case ".s":
+			rule = ccNoDeps
+			fallthrough
+		case ".S":
 			ccCmd = "clang"
 			moduleCflags = asflags
 			tidy = false
@@ -423,7 +434,7 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 		}
 
 		ctx.Build(pctx, android.BuildParams{
-			Rule:            cc,
+			Rule:            rule,
 			Description:     ccDesc + " " + srcFile.Rel(),
 			Output:          objFile,
 			ImplicitOutputs: implicitOutputs,
@@ -666,18 +677,33 @@ func TransformObjToDynamicBinary(ctx android.ModuleContext,
 // Generate a rule to combine .dump sAbi dump files from multiple source files
 // into a single .ldump sAbi dump file
 func TransformDumpToLinkedDump(ctx android.ModuleContext, sAbiDumps android.Paths, soFile android.Path,
-	baseName, exportedHeaderFlags string) android.OptionalPath {
+	baseName, exportedHeaderFlags string, symbolFile android.OptionalPath,
+	excludedSymbolVersions, excludedSymbolTags []string) android.OptionalPath {
+
 	outputFile := android.PathForModuleOut(ctx, baseName+".lsdump")
 	sabiLock.Lock()
 	lsdumpPaths = append(lsdumpPaths, outputFile.String())
 	sabiLock.Unlock()
+
+	implicits := android.Paths{soFile}
 	symbolFilterStr := "-so " + soFile.String()
+
+	if symbolFile.Valid() {
+		implicits = append(implicits, symbolFile.Path())
+		symbolFilterStr += " -v " + symbolFile.String()
+	}
+	for _, ver := range excludedSymbolVersions {
+		symbolFilterStr += " --exclude-symbol-version " + ver
+	}
+	for _, tag := range excludedSymbolTags {
+		symbolFilterStr += " --exclude-symbol-tag " + tag
+	}
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        sAbiLink,
 		Description: "header-abi-linker " + outputFile.Base(),
 		Output:      outputFile,
 		Inputs:      sAbiDumps,
-		Implicit:    soFile,
+		Implicits:   implicits,
 		Args: map[string]string{
 			"symbolFilter":        symbolFilterStr,
 			"arch":                ctx.Arch().ArchType.Name,

@@ -332,7 +332,7 @@ func (a *AndroidLibrary) GenerateAndroidBuildActions(ctx android.ModuleContext) 
 
 	a.Module.compile(ctx, a.aaptSrcJar)
 
-	a.aarFile = android.PathForOutput(ctx, ctx.ModuleName()+".aar")
+	a.aarFile = android.PathForModuleOut(ctx, ctx.ModuleName()+".aar")
 	var res android.Paths
 	if a.androidLibraryProperties.BuildAAR {
 		BuildAAR(ctx, a.aarFile, a.outputFile, a.manifestPath, a.rTxt, res)
@@ -357,6 +357,7 @@ func AndroidLibraryFactory() android.Module {
 	module.AddProperties(
 		&module.Module.properties,
 		&module.Module.deviceProperties,
+		&module.Module.dexpreoptProperties,
 		&module.Module.protoProperties,
 		&module.aaptProperties,
 		&module.androidLibraryProperties)
@@ -442,7 +443,7 @@ func (a *AARImport) Name() string {
 }
 
 func (a *AARImport) DepsMutator(ctx android.BottomUpMutatorContext) {
-	if !ctx.Config().UnbundledBuild() {
+	if !ctx.Config().UnbundledBuildPrebuiltSdks() {
 		sdkDep := decodeSdkDep(ctx, sdkContext(a))
 		if sdkDep.useModule && sdkDep.frameworkResModule != "" {
 			ctx.AddVariationDependencies(nil, frameworkResTag, sdkDep.frameworkResModule)

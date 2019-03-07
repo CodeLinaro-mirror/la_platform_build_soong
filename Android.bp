@@ -61,6 +61,7 @@ bootstrap_go_package {
         "android/prebuilt_etc.go",
         "android/proto.go",
         "android/register.go",
+        "android/sh_binary.go",
         "android/singleton.go",
         "android/testing.go",
         "android/util.go",
@@ -71,6 +72,7 @@ bootstrap_go_package {
         "android/env.go",
     ],
     testSrcs: [
+        "android/arch_test.go",
         "android/config_test.go",
         "android/expand_test.go",
         "android/namespace_test.go",
@@ -97,10 +99,12 @@ bootstrap_go_package {
 
         "cc/config/arm_device.go",
         "cc/config/arm64_device.go",
+        "cc/config/arm64_fuchsia_device.go",
         "cc/config/mips_device.go",
         "cc/config/mips64_device.go",
         "cc/config/x86_device.go",
         "cc/config/x86_64_device.go",
+        "cc/config/x86_64_fuchsia_device.go",
 
         "cc/config/x86_darwin_host.go",
         "cc/config/x86_linux_host.go",
@@ -145,6 +149,7 @@ bootstrap_go_package {
         "cc/util.go",
         "cc/vndk.go",
         "cc/vndk_prebuilt.go",
+        "cc/xom.go",
 
         "cc/cmakelists.go",
         "cc/compdb.go",
@@ -223,6 +228,7 @@ bootstrap_go_package {
         "soong",
         "soong-android",
         "soong-cc",
+        "soong-dexpreopt",
         "soong-genrule",
         "soong-java-config",
         "soong-tradefed",
@@ -237,23 +243,32 @@ bootstrap_go_package {
         "java/app.go",
         "java/builder.go",
         "java/dex.go",
+        "java/dexpreopt.go",
         "java/droiddoc.go",
         "java/gen.go",
         "java/genrule.go",
+        "java/hiddenapi.go",
         "java/jacoco.go",
         "java/java.go",
         "java/jdeps.go",
         "java/java_resources.go",
+        "java/kotlin.go",
+        "java/plugin.go",
         "java/prebuilt_apis.go",
         "java/proto.go",
+        "java/sdk.go",
         "java/sdk_library.go",
         "java/support_libraries.go",
         "java/system_modules.go",
     ],
     testSrcs: [
         "java/app_test.go",
+        "java/dexpreopt_test.go",
         "java/java_test.go",
         "java/jdeps_test.go",
+        "java/kotlin_test.go",
+        "java/plugin_test.go",
+        "java/sdk_test.go",
     ],
     pluginFor: ["soong_build"],
 }
@@ -279,6 +294,7 @@ bootstrap_go_package {
     deps: [
         "blueprint",
         "soong-android",
+        "soong-tradefed",
     ],
     srcs: [
         "python/androidmk.go",
@@ -351,6 +367,9 @@ bootstrap_go_package {
     srcs: [
         "apex/apex.go",
         "apex/key.go",
+    ],
+    testSrcs: [
+        "apex/apex_test.go",
     ],
     pluginFor: ["soong_build"],
 }
@@ -435,7 +454,7 @@ toolchain_library {
             src: "prebuilts/gcc/linux-x86/host/x86_64-w64-mingw32-4.8/x86_64-w64-mingw32/lib/libwinpthread.a",
         },
     },
-    notice: "../../prebuilts/gcc/linux-x86/host/x86_64-w64-mingw32-4.8/licenses/mingw-w64-svn-r5861/mingw-w64-libraries/winpthreads/COPYING",
+    notice: ":mingw-libwinpthread-notice",
 }
 
 toolchain_library {

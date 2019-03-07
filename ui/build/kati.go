@@ -18,9 +18,12 @@ import (
 	"crypto/md5"
 	"fmt"
 	"io/ioutil"
+	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 
+	"android/soong/ui/metrics"
 	"android/soong/ui/status"
 )
 
@@ -78,6 +81,7 @@ func runKati(ctx Context, config Config, extraSuffix string, args []string, envF
 		"--werror_suffix_rules",
 		"--warn_real_to_phony",
 		"--warn_phony_looks_real",
+		"--top_level_phony",
 		"--kati_stats",
 	}, args...)
 
@@ -95,13 +99,29 @@ func runKati(ctx Context, config Config, extraSuffix string, args []string, envF
 
 	envFunc(cmd.Environment)
 
+	if _, ok := cmd.Environment.Get("BUILD_USERNAME"); !ok {
+		u, err := user.Current()
+		if err != nil {
+			ctx.Println("Failed to get current user")
+		}
+		cmd.Environment.Set("BUILD_USERNAME", u.Username)
+	}
+
+	if _, ok := cmd.Environment.Get("BUILD_HOSTNAME"); !ok {
+		hostname, err := os.Hostname()
+		if err != nil {
+			ctx.Println("Failed to read hostname")
+		}
+		cmd.Environment.Set("BUILD_HOSTNAME", hostname)
+	}
+
 	cmd.StartOrFatal()
 	status.KatiReader(ctx.Status.StartTool(), pipe)
 	cmd.WaitOrFatal()
 }
 
 func runKatiBuild(ctx Context, config Config) {
-	ctx.BeginTrace("kati build")
+	ctx.BeginTrace(metrics.RunKati, "kati build")
 	defer ctx.EndTrace()
 
 	args := []string{
@@ -137,7 +157,7 @@ func runKatiBuild(ctx Context, config Config) {
 }
 
 func runKatiPackage(ctx Context, config Config) {
-	ctx.BeginTrace("kati package")
+	ctx.BeginTrace(metrics.RunKati, "kati package")
 	defer ctx.EndTrace()
 
 	args := []string{
@@ -178,7 +198,7 @@ func runKatiPackage(ctx Context, config Config) {
 }
 
 func runKatiCleanSpec(ctx Context, config Config) {
-	ctx.BeginTrace("kati cleanspec")
+	ctx.BeginTrace(metrics.RunKati, "kati cleanspec")
 	defer ctx.EndTrace()
 
 	runKati(ctx, config, katiCleanspecSuffix, []string{

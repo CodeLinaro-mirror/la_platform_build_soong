@@ -34,7 +34,9 @@ var (
 				`$opts $bootclasspathArgs $classpathArgs $sourcepathArgs ` +
 				`-d $outDir -quiet  && ` +
 				`${config.SoongZipCmd} -write_if_changed -d -o $docZip -C $outDir -D $outDir && ` +
-				`${config.SoongZipCmd} -write_if_changed -jar -o $out -C $stubsDir -D $stubsDir $postDoclavaCmds`,
+				`${config.SoongZipCmd} -write_if_changed -jar -o $out -C $stubsDir -D $stubsDir $postDoclavaCmds && ` +
+				`rm -rf "$srcJarDir"`,
+
 			CommandDeps: []string{
 				"${config.ZipSyncCmd}",
 				"${config.JavadocCmd}",
@@ -72,9 +74,10 @@ var (
 				`mkdir -p "$outDir" "$srcJarDir" "$stubsDir" && ` +
 				`${config.ZipSyncCmd} -d $srcJarDir -l $srcJarDir/list -f "*.java" $srcJars && ` +
 				`${config.JavaCmd} -jar ${config.MetalavaJar} -encoding UTF-8 -source $javaVersion @$out.rsp @$srcJarDir/list ` +
-				`$bootclasspathArgs $classpathArgs $sourcepathArgs --no-banner --color --quiet ` +
+				`$bootclasspathArgs $classpathArgs $sourcepathArgs --no-banner --color --quiet --format=v2 ` +
 				`$opts && ` +
-				`${config.SoongZipCmd} -write_if_changed -jar -o $out -C $stubsDir -D $stubsDir`,
+				`${config.SoongZipCmd} -write_if_changed -jar -o $out -C $stubsDir -D $stubsDir && ` +
+				`rm -rf "$srcJarDir"`,
 			CommandDeps: []string{
 				"${config.ZipSyncCmd}",
 				"${config.JavaCmd}",
@@ -93,8 +96,8 @@ var (
 			Command: `( rm -rf "$srcJarDir" && mkdir -p "$srcJarDir" && ` +
 				`${config.ZipSyncCmd} -d $srcJarDir -l $srcJarDir/list -f "*.java" $srcJars && ` +
 				`${config.JavaCmd} -jar ${config.MetalavaJar} -encoding UTF-8 -source $javaVersion @$out.rsp @$srcJarDir/list ` +
-				`$bootclasspathArgs $classpathArgs $sourcepathArgs --no-banner --color --quiet ` +
-				`$opts && touch $out ) || ` +
+				`$bootclasspathArgs $classpathArgs $sourcepathArgs --no-banner --color --quiet --format=v2 ` +
+				`$opts && touch $out && rm -rf "$srcJarDir") || ` +
 				`( echo -e "$msg" ; exit 38 )`,
 			CommandDeps: []string{
 				"${config.ZipSyncCmd}",
@@ -120,7 +123,8 @@ var (
 				`${config.JavaCmd} -jar ${config.DokkaJar} $srcJarDir ` +
 				`$classpathArgs -format dac -dacRoot /reference/kotlin -output $outDir $opts && ` +
 				`${config.SoongZipCmd} -write_if_changed -d -o $docZip -C $outDir -D $outDir && ` +
-				`${config.SoongZipCmd} -write_if_changed -jar -o $out -C $stubsDir -D $stubsDir`,
+				`${config.SoongZipCmd} -write_if_changed -jar -o $out -C $stubsDir -D $stubsDir && ` +
+				`rm -rf "$srcJarDir"`,
 			CommandDeps: []string{
 				"${config.ZipSyncCmd}",
 				"${config.DokkaJar}",
@@ -360,6 +364,9 @@ type DroidstubsProperties struct {
 	// a list of top-level directories containing Java stub files to merge show/hide annotations from.
 	Merge_inclusion_annotations_dirs []string
 
+	// a file containing a list of classes to do nullability validation for.
+	Validate_nullability_from_list *string
+
 	// a file containing expected warnings produced by validation of nullability annotations.
 	Check_nullability_warnings *string
 
@@ -397,6 +404,7 @@ type droiddocBuilderFlags struct {
 
 	metalavaStubsFlags                string
 	metalavaAnnotationsFlags          string
+	metalavaMergeAnnoDirFlags         string
 	metalavaInclusionAnnotationsFlags string
 	metalavaApiLevelsAnnotationsFlags string
 
@@ -623,16 +631,9 @@ func (j *Javadoc) collectDeps(ctx android.ModuleContext) deps {
 		case libTag:
 			switch dep := module.(type) {
 			case Dependency:
-				deps.classpath = append(deps.classpath, dep.ImplementationJars()...)
+				deps.classpath = append(deps.classpath, dep.HeaderJars()...)
 			case SdkLibraryDependency:
-				sdkVersion := j.sdkVersion()
-				linkType := javaSdk
-				if strings.HasPrefix(sdkVersion, "system_") || strings.HasPrefix(sdkVersion, "test_") {
-					linkType = javaSystem
-				} else if sdkVersion == "" {
-					linkType = javaPlatform
-				}
-				deps.classpath = append(deps.classpath, dep.ImplementationJars(linkType)...)
+				deps.classpath = append(deps.classpath, dep.ImplementationJars(ctx, j.sdkVersion())...)
 			case android.SourceFileProducer:
 				checkProducesJars(ctx, dep)
 				deps.classpath = append(deps.classpath, dep.Srcs()...)
@@ -1126,9 +1127,9 @@ func (d *Droiddoc) transformDokka(ctx android.ModuleContext, implicits android.P
 		Inputs:      d.Javadoc.srcFiles,
 		Implicits:   implicits,
 		Args: map[string]string{
-			"outDir":        android.PathForModuleOut(ctx, "out").String(),
-			"srcJarDir":     android.PathForModuleOut(ctx, "srcjars").String(),
-			"stubsDir":      android.PathForModuleOut(ctx, "stubsDir").String(),
+			"outDir":        android.PathForModuleOut(ctx, "dokka-out").String(),
+			"srcJarDir":     android.PathForModuleOut(ctx, "dokka-srcjars").String(),
+			"stubsDir":      android.PathForModuleOut(ctx, "dokka-stubsDir").String(),
 			"srcJars":       strings.Join(d.Javadoc.srcJars.Strings(), " "),
 			"classpathArgs": classpathArgs,
 			"opts":          opts,
@@ -1302,6 +1303,9 @@ func (d *Droidstubs) DepsMutator(ctx android.BottomUpMutatorContext) {
 		}
 	}
 
+	if String(d.properties.Validate_nullability_from_list) != "" {
+		android.ExtractSourceDeps(ctx, d.properties.Validate_nullability_from_list)
+	}
 	if String(d.properties.Check_nullability_warnings) != "" {
 		android.ExtractSourceDeps(ctx, d.properties.Check_nullability_warnings)
 	}
@@ -1407,11 +1411,13 @@ func (d *Droidstubs) collectStubsFlags(ctx android.ModuleContext,
 }
 
 func (d *Droidstubs) collectAnnotationsFlags(ctx android.ModuleContext,
-	implicits *android.Paths, implicitOutputs *android.WritablePaths) string {
-	var flags string
+	implicits *android.Paths, implicitOutputs *android.WritablePaths) (string, string) {
+	var flags, mergeAnnoDirFlags string
 	if Bool(d.properties.Annotations_enabled) {
 		flags += " --include-annotations"
-		validatingNullability := strings.Contains(d.Javadoc.args, "--validate-nullability-from-merged-stubs")
+		validatingNullability :=
+			strings.Contains(d.Javadoc.args, "--validate-nullability-from-merged-stubs") ||
+				String(d.properties.Validate_nullability_from_list) != ""
 		migratingNullability := String(d.properties.Previous_api) != ""
 		if !(migratingNullability || validatingNullability) {
 			ctx.PropertyErrorf("previous_api",
@@ -1421,6 +1427,9 @@ func (d *Droidstubs) collectAnnotationsFlags(ctx android.ModuleContext,
 			previousApi := ctx.ExpandSource(String(d.properties.Previous_api), "previous_api")
 			*implicits = append(*implicits, previousApi)
 			flags += " --migrate-nullness " + previousApi.String()
+		}
+		if s := String(d.properties.Validate_nullability_from_list); s != "" {
+			flags += " --validate-nullability-from-list " + ctx.ExpandSource(s, "validate_nullability_from_list").String()
 		}
 		if validatingNullability {
 			d.nullabilityWarningsFile = android.PathForModuleOut(ctx, ctx.ModuleName()+"_nullability_warnings.txt")
@@ -1440,17 +1449,18 @@ func (d *Droidstubs) collectAnnotationsFlags(ctx android.ModuleContext,
 		ctx.VisitDirectDepsWithTag(metalavaMergeAnnotationsDirTag, func(m android.Module) {
 			if t, ok := m.(*ExportedDroiddocDir); ok {
 				*implicits = append(*implicits, t.deps...)
-				flags += " --merge-qualifier-annotations " + t.dir.String()
+				mergeAnnoDirFlags += " --merge-qualifier-annotations " + t.dir.String()
 			} else {
 				ctx.PropertyErrorf("merge_annotations_dirs",
 					"module %q is not a metalava merge-annotations dir", ctx.OtherModuleName(m))
 			}
 		})
+		flags += mergeAnnoDirFlags
 		// TODO(tnorbye): find owners to fix these warnings when annotation was enabled.
 		flags += " --hide HiddenTypedefConstant --hide SuperfluousPrefix --hide AnnotationExtraction"
 	}
 
-	return flags
+	return flags, mergeAnnoDirFlags
 }
 
 func (d *Droidstubs) collectInclusionAnnotationsFlags(ctx android.ModuleContext,
@@ -1494,7 +1504,7 @@ func (d *Droidstubs) collectAPILevelsAnnotationsFlags(ctx android.ModuleContext,
 					}
 				}
 				*implicits = append(*implicits, androidJars...)
-				flags += " --android-jar-pattern " + t.dir.String() + "/%/android.jar "
+				flags += " --android-jar-pattern " + t.dir.String() + "/%/public/android.jar "
 			} else {
 				ctx.PropertyErrorf("api_levels_annotations_dirs",
 					"module %q is not a metalava api-levels-annotations dir", ctx.OtherModuleName(m))
@@ -1564,7 +1574,7 @@ func (d *Droidstubs) transformMetalava(ctx android.ModuleContext, implicits andr
 
 func (d *Droidstubs) transformCheckApi(ctx android.ModuleContext,
 	apiFile, removedApiFile android.Path, implicits android.Paths,
-	javaVersion, bootclasspathArgs, classpathArgs, sourcepathArgs, opts, msg string,
+	javaVersion, bootclasspathArgs, classpathArgs, sourcepathArgs, opts, subdir, msg string,
 	output android.WritablePath) {
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        metalavaApiCheck,
@@ -1574,7 +1584,7 @@ func (d *Droidstubs) transformCheckApi(ctx android.ModuleContext,
 		Implicits: append(android.Paths{apiFile, removedApiFile, d.apiFile, d.removedApiFile},
 			implicits...),
 		Args: map[string]string{
-			"srcJarDir":         android.PathForModuleOut(ctx, "srcjars").String(),
+			"srcJarDir":         android.PathForModuleOut(ctx, subdir, "srcjars").String(),
 			"srcJars":           strings.Join(d.Javadoc.srcJars.Strings(), " "),
 			"javaVersion":       javaVersion,
 			"bootclasspathArgs": bootclasspathArgs,
@@ -1633,7 +1643,8 @@ func (d *Droidstubs) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	}
 
 	flags.metalavaStubsFlags = d.collectStubsFlags(ctx, &implicitOutputs)
-	flags.metalavaAnnotationsFlags = d.collectAnnotationsFlags(ctx, &implicits, &implicitOutputs)
+	flags.metalavaAnnotationsFlags, flags.metalavaMergeAnnoDirFlags =
+		d.collectAnnotationsFlags(ctx, &implicits, &implicitOutputs)
 	flags.metalavaInclusionAnnotationsFlags = d.collectInclusionAnnotationsFlags(ctx, &implicits, &implicitOutputs)
 	flags.metalavaApiLevelsAnnotationsFlags = d.collectAPILevelsAnnotationsFlags(ctx, &implicits, &implicitOutputs)
 	flags.metalavaApiToXmlFlags = d.collectApiToXmlFlags(ctx, &implicits, &implicitOutputs)
@@ -1659,10 +1670,10 @@ func (d *Droidstubs) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		d.checkCurrentApiTimestamp = android.PathForModuleOut(ctx, "check_current_api.timestamp")
 		opts := " " + d.Javadoc.args + " --check-compatibility:api:current " + apiFile.String() +
 			" --check-compatibility:removed:current " + removedApiFile.String() +
-			flags.metalavaInclusionAnnotationsFlags
+			flags.metalavaInclusionAnnotationsFlags + flags.metalavaMergeAnnoDirFlags + " "
 
 		d.transformCheckApi(ctx, apiFile, removedApiFile, metalavaCheckApiImplicits,
-			javaVersion, flags.bootClasspathArgs, flags.classpathArgs, flags.sourcepathArgs, opts,
+			javaVersion, flags.bootClasspathArgs, flags.classpathArgs, flags.sourcepathArgs, opts, "current-apicheck",
 			fmt.Sprintf(`\n******************************\n`+
 				`You have tried to change the API from what has been previously approved.\n\n`+
 				`To make these errors go away, you have two choices:\n`+
@@ -1690,10 +1701,10 @@ func (d *Droidstubs) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		d.checkLastReleasedApiTimestamp = android.PathForModuleOut(ctx, "check_last_released_api.timestamp")
 		opts := " " + d.Javadoc.args + " --check-compatibility:api:released " + apiFile.String() +
 			flags.metalavaInclusionAnnotationsFlags + " --check-compatibility:removed:released " +
-			removedApiFile.String() + " "
+			removedApiFile.String() + flags.metalavaMergeAnnoDirFlags + " "
 
 		d.transformCheckApi(ctx, apiFile, removedApiFile, metalavaCheckApiImplicits,
-			javaVersion, flags.bootClasspathArgs, flags.classpathArgs, flags.sourcepathArgs, opts,
+			javaVersion, flags.bootClasspathArgs, flags.classpathArgs, flags.sourcepathArgs, opts, "last-apicheck",
 			`\n******************************\n`+
 				`You have tried to change the API from what has been previously released in\n`+
 				`an SDK.  Please fix the errors listed above.\n`+
@@ -1803,9 +1814,6 @@ type DocDefaults struct {
 }
 
 func (*DocDefaults) GenerateAndroidBuildActions(ctx android.ModuleContext) {
-}
-
-func (d *DocDefaults) DepsMutator(ctx android.BottomUpMutatorContext) {
 }
 
 func DocDefaultsFactory() android.Module {

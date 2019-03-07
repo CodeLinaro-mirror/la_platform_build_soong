@@ -94,8 +94,6 @@ var (
 
 	deviceGlobalLldflags = append(ClangFilterUnknownLldflags(deviceGlobalLdflags),
 		[]string{
-			"-Wl,--pack-dyn-relocs=android+relr",
-			"-Wl,--use-android-relr-tags",
 			"-fuse-ld=lld",
 		}...)
 
@@ -121,18 +119,19 @@ var (
 	}
 
 	CStdVersion               = "gnu99"
-	CppStdVersion             = "gnu++14"
+	CppStdVersion             = "gnu++17"
 	ExperimentalCStdVersion   = "gnu11"
-	ExperimentalCppStdVersion = "gnu++1z"
+	ExperimentalCppStdVersion = "gnu++2a"
 
 	NdkMaxPrebuiltVersionInt = 27
 
 	SDClang                  = false
+	SDClangPath              = ""
 
 	// prebuilts/clang default settings.
 	ClangDefaultBase         = "prebuilts/clang/host"
-	ClangDefaultVersion      = "clang-r344140b"
-	ClangDefaultShortVersion = "8.0.4"
+	ClangDefaultVersion      = "clang-r349610"
+	ClangDefaultShortVersion = "8.0.8"
 
 	// Directories with warnings from Android.bp files.
 	WarningAllowedProjects = []string{
@@ -161,8 +160,13 @@ func init() {
 
 	pctx.StaticVariable("CommonClangGlobalCflags",
 		strings.Join(append(ClangFilterUnknownCflags(commonGlobalCflags), "${ClangExtraCflags}"), " "))
-	pctx.StaticVariable("DeviceClangGlobalCflags",
-		strings.Join(append(ClangFilterUnknownCflags(deviceGlobalCflags), "${ClangExtraTargetCflags}"), " "))
+	pctx.VariableFunc("DeviceClangGlobalCflags", func(ctx android.PackageVarContext) string {
+		if ctx.Config().Fuchsia() {
+			return strings.Join(ClangFilterUnknownCflags(deviceGlobalCflags), " ")
+		} else {
+			return strings.Join(append(ClangFilterUnknownCflags(deviceGlobalCflags), "${ClangExtraTargetCflags}"), " ")
+		}
+	})
 	pctx.StaticVariable("HostClangGlobalCflags",
 		strings.Join(ClangFilterUnknownCflags(hostGlobalCflags), " "))
 	pctx.StaticVariable("NoOverrideClangGlobalCflags",
@@ -182,7 +186,6 @@ func init() {
 			"hardware/libhardware/include",
 			"hardware/libhardware_legacy/include",
 			"hardware/ril/include",
-			"libnativehelper/include",
 			"frameworks/native/include",
 			"frameworks/native/opengl/include",
 			"frameworks/av/include",
@@ -394,6 +397,7 @@ func setSdclangVars() {
 		return sdclangAEFlag + " " + sdclangFlags2
 	})
 
+	SDClangPath = sdclangPath
 	// Find the path to SDLLVM's ASan libraries
 	// TODO (b/117846004): Disable setting SDClangAsanLibDir due to unit test path issues
 	//absPath := sdclangPath

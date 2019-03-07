@@ -51,11 +51,6 @@ var (
 	}
 
 	armClangArchVariantCflags = map[string][]string{
-		"armv7-a": []string{
-			"-march=armv7-a",
-			"-mfloat-abi=softfp",
-			"-mfpu=vfpv3-d16",
-		},
 		"armv7-a-neon": []string{
 			"-march=armv7-a",
 			"-mfloat-abi=softfp",
@@ -151,6 +146,15 @@ var (
 			// better solution comes around. See Bug 27340895
 			"-D__ARM_FEATURE_LPAE=1",
 		},
+		"kryo385": []string{
+			// Use cortex-a53 because kryo385 is not supported in GCC/clang.
+			"-mcpu=cortex-a53",
+			// Fake an ARM compiler flag as these processors support LPAE which GCC/clang
+			// don't advertise.
+			// TODO This is a hack and we need to add it for each processor that supports LPAE until some
+			// better solution comes around. See Bug 27340895
+			"-D__ARM_FEATURE_LPAE=1",
+		},
 	}
 )
 
@@ -159,35 +163,6 @@ const (
 )
 
 func init() {
-	android.RegisterArchFeatures(android.Arm,
-		"neon")
-
-	android.RegisterArchVariants(android.Arm,
-		"armv7-a",
-		"armv7-a-neon",
-		"armv8-a",
-		"armv8-2a",
-		"cortex-a7",
-		"cortex-a8",
-		"cortex-a9",
-		"cortex-a15",
-		"cortex-a53",
-		"cortex-a53-a57",
-		"cortex-a55",
-		"cortex-a72",
-		"cortex-a73",
-		"cortex-a75",
-		"cortex-a76",
-		"krait",
-		"kryo",
-		"exynos-m1",
-		"exynos-m2",
-		"denver")
-
-	android.RegisterArchVariantFeatures(android.Arm, "armv7-a-neon", "neon")
-	android.RegisterArchVariantFeatures(android.Arm, "armv8-a", "neon")
-	android.RegisterArchVariantFeatures(android.Arm, "armv8-2a", "neon")
-
 	pctx.StaticVariable("armGccVersion", armGccVersion)
 
 	pctx.SourcePathVariable("ArmGccRoot",
@@ -209,8 +184,6 @@ func init() {
 	pctx.StaticVariable("ArmClangThumbCflags", strings.Join(ClangFilterUnknownCflags(armThumbCflags), " "))
 
 	// Clang arch variant cflags
-	pctx.StaticVariable("ArmClangArmv7ACflags",
-		strings.Join(armClangArchVariantCflags["armv7-a"], " "))
 	pctx.StaticVariable("ArmClangArmv7ANeonCflags",
 		strings.Join(armClangArchVariantCflags["armv7-a-neon"], " "))
 	pctx.StaticVariable("ArmClangArmv8ACflags",
@@ -239,10 +212,9 @@ func init() {
 
 var (
 	armClangArchVariantCflagsVar = map[string]string{
-		"armv7-a":      "${config.ArmClangArmv7ACflags}",
 		"armv7-a-neon": "${config.ArmClangArmv7ANeonCflags}",
 		"armv8-a":      "${config.ArmClangArmv8ACflags}",
-		"armv8-2a":      "${config.ArmClangArmv82ACflags}",
+		"armv8-2a":     "${config.ArmClangArmv82ACflags}",
 	}
 
 	armClangCpuVariantCflagsVar = map[string]string{
@@ -258,9 +230,9 @@ var (
 		"cortex-a75":     "${config.ArmClangCortexA55Cflags}",
 		"krait":          "${config.ArmClangKraitCflags}",
 		"kryo":           "${config.ArmClangKryoCflags}",
+		"kryo385":        "${config.ArmClangCortexA53Cflags}",
 		"exynos-m1":      "${config.ArmClangCortexA53Cflags}",
 		"exynos-m2":      "${config.ArmClangCortexA53Cflags}",
-		"denver":         "${config.ArmClangCortexA15Cflags}",
 	}
 )
 
@@ -355,8 +327,6 @@ func armToolchainFactory(arch android.Arch) Toolchain {
 		default:
 			fixCortexA8 = "-Wl,--no-fix-cortex-a8"
 		}
-	case "armv7-a":
-		fixCortexA8 = "-Wl,--fix-cortex-a8"
 	case "armv8-a", "armv8-2a":
 		// Nothing extra for armv8-a/armv8-2a
 	default:

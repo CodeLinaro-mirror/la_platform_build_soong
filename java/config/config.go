@@ -29,7 +29,7 @@ var (
 
 	DefaultBootclasspathLibraries = []string{"core.platform.api.stubs", "core-lambda-stubs"}
 	DefaultSystemModules          = "core-platform-api-stubs-system-modules"
-	DefaultLibraries              = []string{"ext", "framework"}
+	DefaultLibraries              = []string{"ext", "framework", "updatable_media_stubs"}
 	DefaultLambdaStubsLibrary     = "core-lambda-stubs"
 	SdkLambdaStubsPath            = "prebuilts/sdk/tools/core-lambda-stubs.jar"
 
@@ -43,7 +43,7 @@ var (
 		"android.car7",
 		"core-oj",
 		"core-libart",
-		"core-simple",
+		"updatable-media",
 	}
 
 	ManifestMergerClasspath = []string{
@@ -126,6 +126,7 @@ func init() {
 	pctx.HostJavaToolVariable("JetifierJar", "jetifier.jar")
 
 	pctx.HostBinToolVariable("SoongJavacWrapper", "soong_javac_wrapper")
+	pctx.HostBinToolVariable("DexpreoptGen", "dexpreopt_gen")
 
 	pctx.VariableFunc("JavacWrapper", func(ctx android.PackageVarContext) string {
 		if override := ctx.Config().Getenv("JAVAC_WRAPPER"); override != "" {
@@ -152,4 +153,9 @@ func init() {
 
 	pctx.SourcePathsVariable("ManifestMergerJars", " ", ManifestMergerClasspath...)
 	pctx.SourcePathsVariable("ManifestMergerClasspath", ":", ManifestMergerClasspath...)
+
+	pctx.HostBinToolVariable("ZipAlign", "zipalign")
+
+	pctx.HostBinToolVariable("Class2Greylist", "class2greylist")
+	pctx.HostBinToolVariable("HiddenAPI", "hiddenapi")
 }

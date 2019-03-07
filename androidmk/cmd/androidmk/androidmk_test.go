@@ -554,6 +554,10 @@ include $(call all-makefiles-under,$(LOCAL_PATH))
 			LOCAL_SRC_FILES := d.java
 			LOCAL_UNINSTALLABLE_MODULE := false
 			include $(BUILD_JAVA_LIBRARY)
+
+			include $(CLEAR_VARS)
+			LOCAL_SRC_FILES := $(call all-java-files-under, src gen)
+			include $(BUILD_STATIC_JAVA_LIBRARY)
 		`,
 		expected: `
 			java_library {
@@ -573,6 +577,13 @@ include $(call all-makefiles-under,$(LOCAL_PATH))
 			java_library {
 				installable: true,
 				srcs: ["d.java"],
+			}
+
+			java_library {
+				srcs: [
+					"src/**/*.java",
+					"gen/**/*.java",
+				],
 			}
 		`,
 	},
@@ -632,12 +643,14 @@ include $(call all-makefiles-under,$(LOCAL_PATH))
 			include $(CLEAR_VARS)
 			LOCAL_SRC_FILES := test.java
 			LOCAL_RESOURCE_DIR := res
+			LOCAL_JACK_COVERAGE_INCLUDE_FILTER := foo.*
 			include $(BUILD_STATIC_JAVA_LIBRARY)
 
 			include $(CLEAR_VARS)
 			LOCAL_SRC_FILES := test.java
 			LOCAL_STATIC_LIBRARIES := foo
 			LOCAL_STATIC_ANDROID_LIBRARIES := bar
+			LOCAL_JACK_COVERAGE_EXCLUDE_FILTER := bar.*
 			include $(BUILD_STATIC_JAVA_LIBRARY)
 
 			include $(CLEAR_VARS)
@@ -655,6 +668,9 @@ include $(call all-makefiles-under,$(LOCAL_PATH))
 			android_library {
 				srcs: ["test.java"],
 				resource_dirs: ["res"],
+				jacoco: {
+					include_filter: ["foo.*"],
+				},
 			}
 
 			android_library {
@@ -663,6 +679,9 @@ include $(call all-makefiles-under,$(LOCAL_PATH))
 					"foo",
 					"bar",
 				],
+				jacoco: {
+					exclude_filter: ["bar.*"],
+				},
 			}
 
 			android_library {
@@ -730,6 +749,282 @@ cc_library_shared {
     strip: {
         keep_symbols: true,
     }
+}
+`,
+	},
+	{
+		desc: "BUILD_CTS_SUPPORT_PACKAGE",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_PACKAGE_NAME := FooTest
+LOCAL_COMPATIBILITY_SUITE := cts
+include $(BUILD_CTS_SUPPORT_PACKAGE)
+`,
+		expected: `
+android_test {
+    name: "FooTest",
+    defaults: ["cts_support_defaults"],
+    test_suites: ["cts"],
+}
+`,
+	},
+	{
+		desc: "BUILD_CTS_PACKAGE",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_PACKAGE_NAME := FooTest
+LOCAL_COMPATIBILITY_SUITE := cts
+include $(BUILD_CTS_PACKAGE)
+`,
+		expected: `
+android_test {
+    name: "FooTest",
+    defaults: ["cts_defaults"],
+    test_suites: ["cts"],
+}
+`,
+	},
+	{
+		desc: "BUILD_CTS_*_JAVA_LIBRARY",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := foolib
+include $(BUILD_CTS_TARGET_JAVA_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := foolib-host
+include $(BUILD_CTS_HOST_JAVA_LIBRARY)
+`,
+		expected: `
+java_library {
+    name: "foolib",
+    defaults: ["cts_defaults"],
+}
+
+java_library_host {
+    name: "foolib-host",
+    defaults: ["cts_defaults"],
+}
+`,
+	},
+	{
+		desc: "LOCAL_ANNOTATION_PROCESSORS",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := foolib
+LOCAL_ANNOTATION_PROCESSORS := bar
+LOCAL_ANNOTATION_PROCESSOR_CLASSES := com.bar
+include $(BUILD_STATIC_JAVA_LIBRARY)
+`,
+		expected: `
+java_library {
+    name: "foolib",
+    plugins: ["bar"],
+
+}
+`,
+	},
+	{
+		desc: "prebuilt_etc_TARGET_OUT_ETC",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := etc.test1
+LOCAL_SRC_FILES := mymod
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(TARGET_OUT_ETC)/foo/bar
+include $(BUILD_PREBUILT)
+`,
+		expected: `
+prebuilt_etc {
+	name: "etc.test1",
+	src: "mymod",
+	sub_dir: "foo/bar",
+
+}
+`,
+	},
+
+	{
+		desc: "prebuilt_etc_PRODUCT_OUT/system/etc",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := etc.test1
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(PRODUCT_OUT)/system/etc/foo/bar
+LOCAL_SRC_FILES := $(LOCAL_MODULE)
+include $(BUILD_PREBUILT)
+`,
+		expected: `
+prebuilt_etc {
+	name: "etc.test1",
+
+	src: "etc.test1",
+	sub_dir: "foo/bar",
+
+}
+`,
+	},
+	{
+		desc: "prebuilt_etc_TARGET_OUT_ODM/etc",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := etc.test1
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(TARGET_OUT_ODM)/etc/foo/bar
+include $(BUILD_PREBUILT)
+`,
+		expected: `
+prebuilt_etc {
+	name: "etc.test1",
+	sub_dir: "foo/bar",
+    device_specific: true,
+
+}
+`,
+	},
+	{
+		desc: "prebuilt_etc_TARGET_OUT_PRODUCT/etc",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := etc.test1
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(TARGET_OUT_PRODUCT)/etc/foo/bar
+include $(BUILD_PREBUILT)
+`,
+		expected: `
+prebuilt_etc {
+	name: "etc.test1",
+	sub_dir: "foo/bar",
+	product_specific: true,
+
+
+}
+`,
+	},
+	{
+		desc: "prebuilt_etc_TARGET_OUT_PRODUCT_ETC",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := etc.test1
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(TARGET_OUT_PRODUCT_ETC)/foo/bar
+include $(BUILD_PREBUILT)
+`,
+		expected: `
+prebuilt_etc {
+	name: "etc.test1",
+	sub_dir: "foo/bar",
+	product_specific: true,
+
+}
+`,
+	},
+	{
+		desc: "prebuilt_etc_TARGET_OUT_PRODUCT_SERVICES/etc",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := etc.test1
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(TARGET_OUT_PRODUCT_SERVICES)/etc/foo/bar
+include $(BUILD_PREBUILT)
+`,
+		expected: `
+prebuilt_etc {
+	name: "etc.test1",
+	sub_dir: "foo/bar",
+	product_services_specific: true,
+
+}
+`,
+	},
+	{
+		desc: "prebuilt_etc_TARGET_OUT_PRODUCT_SERVICES_ETC",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := etc.test1
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(TARGET_OUT_PRODUCT_SERVICES_ETC)/foo/bar
+include $(BUILD_PREBUILT)
+`,
+		expected: `
+prebuilt_etc {
+	name: "etc.test1",
+	sub_dir: "foo/bar",
+	product_services_specific: true,
+
+
+}
+`,
+	},
+	{
+		desc: "prebuilt_etc_TARGET_OUT_VENDOR/etc",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := etc.test1
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(TARGET_OUT_VENDOR)/etc/foo/bar
+include $(BUILD_PREBUILT)
+`,
+		expected: `
+prebuilt_etc {
+	name: "etc.test1",
+	sub_dir: "foo/bar",
+	proprietary: true,
+
+}
+`,
+	},
+	{
+		desc: "prebuilt_etc_PRODUCT_OUT/TARGET_COPY_OUT_VENDOR/etc",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := etc.test1
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(PRODUCT_OUT)/$(TARGET_COPY_OUT_VENDOR)/etc/foo/bar
+include $(BUILD_PREBUILT)
+`,
+		expected: `
+prebuilt_etc {
+	name: "etc.test1",
+	sub_dir: "foo/bar",
+	proprietary: true,
+
+}
+`,
+	},
+	{
+		desc: "prebuilt_etc_TARGET_OUT_VENDOR_ETC",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := etc.test1
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(TARGET_OUT_VENDOR_ETC)/foo/bar
+include $(BUILD_PREBUILT)
+`,
+		expected: `
+prebuilt_etc {
+	name: "etc.test1",
+	sub_dir: "foo/bar",
+	proprietary: true,
+
+}
+`,
+	},
+	{
+		desc: "prebuilt_etc_TARGET_RECOVERY_ROOT_OUT/system/etc",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := etc.test1
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/system/etc/foo/bar
+include $(BUILD_PREBUILT)
+`,
+		expected: `
+prebuilt_etc {
+	name: "etc.test1",
+	sub_dir: "foo/bar",
+	recovery: true,
+
 }
 `,
 	},

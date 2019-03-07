@@ -29,9 +29,15 @@ var (
 )
 
 type AndroidMkContext interface {
+	Name() string
 	Target() android.Target
 	subAndroidMk(*android.AndroidMkData, interface{})
+	Arch() android.Arch
+	Os() android.OsType
+	Host() bool
 	useVndk() bool
+	static() bool
+	inRecovery() bool
 }
 
 type subAndroidMkProvider interface {
@@ -59,8 +65,12 @@ func (c *Module) AndroidMk() android.AndroidMkData {
 
 	ret := android.AndroidMkData{
 		OutputFile: c.outputFile,
-		Required:   c.Properties.AndroidMkRuntimeLibs,
-		Include:    "$(BUILD_SYSTEM)/soong_cc_prebuilt.mk",
+		// TODO(jiyong): add the APEXes providing shared libs to the required modules
+		// Currently, adding c.Properties.ApexesProvidingSharedLibs is causing multiple
+		// runtime APEXes (com.android.runtime.debug|release) to be installed. And this
+		// is breaking some older devices (like marlin) where system.img is small.
+		Required: c.Properties.AndroidMkRuntimeLibs,
+		Include:  "$(BUILD_SYSTEM)/soong_cc_prebuilt.mk",
 
 		Extra: []android.AndroidMkExtraFunc{
 			func(w io.Writer, outputFile android.Path) {
@@ -151,6 +161,7 @@ func (library *libraryDecorator) AndroidMk(ctx AndroidMkContext, ret *android.An
 		ret.Class = "HEADER_LIBRARIES"
 	}
 
+	ret.DistFile = library.distFile
 	ret.Extra = append(ret.Extra, func(w io.Writer, outputFile android.Path) {
 		library.androidMkWriteExportedFlags(w)
 		fmt.Fprintln(w, "LOCAL_ADDITIONAL_DEPENDENCIES := ")
@@ -171,12 +182,22 @@ func (library *libraryDecorator) AndroidMk(ctx AndroidMkContext, ret *android.An
 		}
 	})
 
-	if library.shared() {
+	if library.shared() && !library.buildStubs() {
 		ctx.subAndroidMk(ret, library.baseInstaller)
 	} else {
 		ret.Extra = append(ret.Extra, func(w io.Writer, outputFile android.Path) {
 			fmt.Fprintln(w, "LOCAL_UNINSTALLABLE_MODULE := true")
+			if library.buildStubs() {
+				fmt.Fprintln(w, "LOCAL_NO_NOTICE_FILE := true")
+			}
 		})
+	}
+	if len(library.Properties.Stubs.Versions) > 0 &&
+		android.DirectlyInAnyApex(ctx, ctx.Name()) && !ctx.inRecovery() && !ctx.useVndk() &&
+		!ctx.static() {
+		if !library.buildStubs() {
+			ret.SubName = ".bootstrap"
+		}
 	}
 }
 
@@ -194,6 +215,7 @@ func (binary *binaryDecorator) AndroidMk(ctx AndroidMkContext, ret *android.Andr
 	ctx.subAndroidMk(ret, binary.baseInstaller)
 
 	ret.Class = "EXECUTABLES"
+	ret.DistFile = binary.distFile
 	ret.Extra = append(ret.Extra, func(w io.Writer, outputFile android.Path) {
 		fmt.Fprintln(w, "LOCAL_SOONG_UNSTRIPPED_BINARY :=", binary.unstrippedOutputFile.String())
 		if len(binary.symlinks) > 0 {
@@ -338,5 +360,42 @@ func (c *vendorPublicLibraryStubDecorator) AndroidMk(ctx AndroidMkContext, ret *
 		fmt.Fprintln(w, "LOCAL_BUILT_MODULE_STEM := $(LOCAL_MODULE)"+ext)
 		fmt.Fprintln(w, "LOCAL_UNINSTALLABLE_MODULE := true")
 		fmt.Fprintln(w, "LOCAL_NO_NOTICE_FILE := true")
+	})
+}
+
+func (p *prebuiltLinker) AndroidMk(ctx AndroidMkContext, ret *android.AndroidMkData) {
+	ret.Extra = append(ret.Extra, func(w io.Writer, outputFile android.Path) {
+		if p.properties.Check_elf_files != nil {
+			fmt.Fprintln(w, "LOCAL_CHECK_ELF_FILES :=", *p.properties.Check_elf_files)
+		} else {
+			// soong_cc_prebuilt.mk does not include check_elf_file.mk by default
+			// because cc_library_shared and cc_binary use soong_cc_prebuilt.mk as well.
+			// In order to turn on prebuilt ABI checker, set `LOCAL_CHECK_ELF_FILES` to
+			// true if `p.properties.Check_elf_files` is not specified.
+			fmt.Fprintln(w, "LOCAL_CHECK_ELF_FILES := true")
+		}
+	})
+}
+
+func (p *prebuiltLibraryLinker) AndroidMk(ctx AndroidMkContext, ret *android.AndroidMkData) {
+	ctx.subAndroidMk(ret, p.libraryDecorator)
+	if p.shared() {
+		ctx.subAndroidMk(ret, &p.prebuiltLinker)
+		androidMkWriteAllowUndefinedSymbols(p.baseLinker, ret)
+	}
+}
+
+func (p *prebuiltBinaryLinker) AndroidMk(ctx AndroidMkContext, ret *android.AndroidMkData) {
+	ctx.subAndroidMk(ret, p.binaryDecorator)
+	ctx.subAndroidMk(ret, &p.prebuiltLinker)
+	androidMkWriteAllowUndefinedSymbols(p.baseLinker, ret)
+}
+
+func androidMkWriteAllowUndefinedSymbols(linker *baseLinker, ret *android.AndroidMkData) {
+	ret.Extra = append(ret.Extra, func(w io.Writer, outputFile android.Path) {
+		allow := linker.Properties.Allow_undefined_symbols
+		if allow != nil {
+			fmt.Fprintln(w, "LOCAL_ALLOW_UNDEFINED_SYMBOLS :=", *allow)
+		}
 	})
 }

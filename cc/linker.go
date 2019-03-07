@@ -18,6 +18,7 @@ import (
 	"android/soong/android"
 	"android/soong/cc/config"
 	"fmt"
+	"strconv"
 
 	"github.com/google/blueprint"
 	"github.com/google/blueprint/proptools"
@@ -48,7 +49,7 @@ type BaseLinkerProperties struct {
 	// list of system libraries that will be dynamically linked to
 	// shared library and executable modules.  If unset, generally defaults to libc,
 	// libm, and libdl.  Set to [] to prevent linking against the defaults.
-	System_shared_libs []string
+	System_shared_libs []string `android:"arch_variant"`
 
 	// allow the module to contain undefined symbols.  By default,
 	// modules cannot contain undefined symbols that are not satisified by their immediate
@@ -149,6 +150,9 @@ type BaseLinkerProperties struct {
 
 	// local file name to pass to the linker as --version_script
 	Version_script *string `android:"arch_variant"`
+
+	// Local file name to pass to the linker as --symbol-ordering-file
+	Symbol_ordering_file *string `android:"arch_variant"`
 }
 
 func NewBaseLinker(sanitize *sanitize) *baseLinker {
@@ -236,35 +240,46 @@ func (linker *baseLinker) linkerDeps(ctx DepsContext, deps Deps) Deps {
 			deps.LateStaticLibs = append(deps.LateStaticLibs, "libgcc")
 		}
 
-		if !ctx.static() {
-			systemSharedLibs := linker.Properties.System_shared_libs
-			if systemSharedLibs == nil {
-				systemSharedLibs = []string{"libc", "libm", "libdl"}
-			}
-
-			if inList("libdl", deps.SharedLibs) {
-				// If system_shared_libs has libc but not libdl, make sure shared_libs does not
-				// have libdl to avoid loading libdl before libc.
-				if inList("libc", systemSharedLibs) {
-					if !inList("libdl", systemSharedLibs) {
-						ctx.PropertyErrorf("shared_libs",
-							"libdl must be in system_shared_libs, not shared_libs")
-					}
-					_, deps.SharedLibs = removeFromList("libdl", deps.SharedLibs)
-				}
-			}
-
-			// If libc and libdl are both in system_shared_libs make sure libd comes after libc
-			// to avoid loading libdl before libc.
-			if inList("libdl", systemSharedLibs) && inList("libc", systemSharedLibs) &&
-				indexList("libdl", systemSharedLibs) < indexList("libc", systemSharedLibs) {
-				ctx.PropertyErrorf("system_shared_libs", "libdl must be after libc")
-			}
-
-			deps.LateSharedLibs = append(deps.LateSharedLibs, systemSharedLibs...)
-		} else if ctx.useSdk() || ctx.useVndk() {
-			deps.LateSharedLibs = append(deps.LateSharedLibs, "libc", "libm", "libdl")
+		systemSharedLibs := linker.Properties.System_shared_libs
+		if systemSharedLibs == nil {
+			// Provide a default system_shared_libs if it is unspecified. Note: If an
+			// empty list [] is specified, it implies that the module declines the
+			// default system_shared_libs.
+			systemSharedLibs = []string{"libc", "libm", "libdl"}
 		}
+
+		if inList("libdl", deps.SharedLibs) {
+			// If system_shared_libs has libc but not libdl, make sure shared_libs does not
+			// have libdl to avoid loading libdl before libc.
+			if inList("libc", systemSharedLibs) {
+				if !inList("libdl", systemSharedLibs) {
+					ctx.PropertyErrorf("shared_libs",
+						"libdl must be in system_shared_libs, not shared_libs")
+				}
+				_, deps.SharedLibs = removeFromList("libdl", deps.SharedLibs)
+			}
+		}
+
+		// If libc and libdl are both in system_shared_libs make sure libdl comes after libc
+		// to avoid loading libdl before libc.
+		if inList("libdl", systemSharedLibs) && inList("libc", systemSharedLibs) &&
+			indexList("libdl", systemSharedLibs) < indexList("libc", systemSharedLibs) {
+			ctx.PropertyErrorf("system_shared_libs", "libdl must be after libc")
+		}
+
+		deps.LateSharedLibs = append(deps.LateSharedLibs, systemSharedLibs...)
+	}
+
+	if ctx.Fuchsia() {
+		if ctx.ModuleName() != "libbioniccompat" &&
+			ctx.ModuleName() != "libcompiler_rt-extras" &&
+			ctx.ModuleName() != "libcompiler_rt" {
+			deps.StaticLibs = append(deps.StaticLibs, "libbioniccompat")
+		}
+		if ctx.ModuleName() != "libcompiler_rt" && ctx.ModuleName() != "libcompiler_rt-extras" {
+			deps.LateStaticLibs = append(deps.LateStaticLibs, "libcompiler_rt")
+		}
+
 	}
 
 	if ctx.Windows() {
@@ -278,6 +293,8 @@ func (linker *baseLinker) linkerDeps(ctx DepsContext, deps Deps) Deps {
 		android.ExtractSourceDeps(ctx,
 			linker.Properties.Target.Vendor.Version_script)
 	}
+
+	android.ExtractSourceDeps(ctx, linker.Properties.Symbol_ordering_file)
 
 	return deps
 }
@@ -298,6 +315,23 @@ func (linker *baseLinker) useClangLld(ctx ModuleContext) bool {
 	return true
 }
 
+// Check whether the SDK version is not older than the specific one
+func CheckSdkVersionAtLeast(ctx ModuleContext, SdkVersion int) bool {
+	if ctx.sdkVersion() == "current" {
+		return true
+	}
+	parsedSdkVersion, err := strconv.Atoi(ctx.sdkVersion())
+	if err != nil {
+		ctx.PropertyErrorf("sdk_version",
+			"Invalid sdk_version value (must be int or current): %q",
+			ctx.sdkVersion())
+	}
+	if parsedSdkVersion < SdkVersion {
+		return false
+	}
+	return true
+}
+
 // ModuleContext extends BaseModuleContext
 // BaseModuleContext should know if LLD is used?
 func (linker *baseLinker) linkerFlags(ctx ModuleContext, flags Flags) Flags {
@@ -312,6 +346,13 @@ func (linker *baseLinker) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 		flags.LdFlags = append(flags.LdFlags, fmt.Sprintf("${config.%sGlobalLldflags}", hod))
 		if !BoolDefault(linker.Properties.Pack_relocations, true) {
 			flags.LdFlags = append(flags.LdFlags, "-Wl,--pack-dyn-relocs=none")
+		} else if ctx.Device() {
+			// The SHT_RELR relocations is only supported by API level >= 28.
+			// Do not turn this on if older version NDK is used.
+			if !ctx.useSdk() || CheckSdkVersionAtLeast(ctx, 28) {
+				flags.LdFlags = append(flags.LdFlags, "-Wl,--pack-dyn-relocs=android+relr")
+				flags.LdFlags = append(flags.LdFlags, "-Wl,--use-android-relr-tags")
+			}
 		}
 	} else {
 		flags.LdFlags = append(flags.LdFlags, fmt.Sprintf("${config.%sGlobalLdflags}", hod))
@@ -331,7 +372,7 @@ func (linker *baseLinker) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 		flags.LdFlags = append(flags.LdFlags, toolchain.ClangLdflags())
 	}
 
-	if !ctx.toolchain().Bionic() {
+	if !ctx.toolchain().Bionic() && !ctx.Fuchsia() {
 		CheckBadHostLdlibs(ctx, "host_ldlibs", linker.Properties.Host_ldlibs)
 
 		flags.LdFlags = append(flags.LdFlags, linker.Properties.Host_ldlibs...)
@@ -348,6 +389,10 @@ func (linker *baseLinker) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 				flags.LdFlags = append(flags.LdFlags, "-lrt")
 			}
 		}
+	}
+
+	if ctx.Fuchsia() {
+		flags.LdFlags = append(flags.LdFlags, "-lfdio", "-lzircon")
 	}
 
 	CheckBadLinkerFlags(ctx, "ldflags", linker.Properties.Ldflags)
@@ -408,6 +453,16 @@ func (linker *baseLinker) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 					flags.LdFlagsDeps = append(flags.LdFlagsDeps, cfiExportsMap)
 				}
 			}
+		}
+	}
+
+	if !linker.dynamicProperties.BuildStubs {
+		symbolOrderingFile := ctx.ExpandOptionalSource(
+			linker.Properties.Symbol_ordering_file, "Symbol_ordering_file")
+		if symbolOrderingFile.Valid() {
+			flags.LdFlags = append(flags.LdFlags,
+				"-Wl,--symbol-ordering-file,"+symbolOrderingFile.String())
+			flags.LdFlagsDeps = append(flags.LdFlagsDeps, symbolOrderingFile.Path())
 		}
 	}
 

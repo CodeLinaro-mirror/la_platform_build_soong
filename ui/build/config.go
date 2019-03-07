@@ -217,6 +217,9 @@ func NewConfig(ctx Context, args ...string) Config {
 	} else {
 		content = strconv.FormatInt(time.Now().Unix(), 10)
 	}
+	if ctx.Metrics != nil {
+		ctx.Metrics.SetBuildDateTime(content)
+	}
 	err := ioutil.WriteFile(buildDateTimeFile, []byte(content), 0777)
 	if err != nil {
 		ctx.Fatalln("Failed to write BUILD_DATETIME to file:", err)
@@ -473,6 +476,20 @@ func (c *configImpl) UseGoma() bool {
 		}
 	}
 	return false
+}
+
+func (c *configImpl) StartGoma() bool {
+	if !c.UseGoma() {
+		return false
+	}
+
+	if v, ok := c.environ.Get("NOSTART_GOMA"); ok {
+		v = strings.TrimSpace(v)
+		if v != "" && v != "false" {
+			return false
+		}
+	}
+	return true
 }
 
 // RemoteParallel controls how many remote jobs (i.e., commands which contain

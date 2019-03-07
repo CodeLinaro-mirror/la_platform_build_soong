@@ -42,6 +42,7 @@ type variableAssignmentContext struct {
 
 var rewriteProperties = map[string](func(variableAssignmentContext) error){
 	// custom functions
+	"LOCAL_32_BIT_ONLY":           local32BitOnly,
 	"LOCAL_AIDL_INCLUDES":         localAidlIncludes,
 	"LOCAL_C_INCLUDES":            localIncludeDirs,
 	"LOCAL_EXPORT_C_INCLUDE_DIRS": exportIncludeDirs,
@@ -55,6 +56,7 @@ var rewriteProperties = map[string](func(variableAssignmentContext) error){
 	"LOCAL_CFLAGS":                cflags,
 	"LOCAL_UNINSTALLABLE_MODULE":  invert("installable"),
 	"LOCAL_PROGUARD_ENABLED":      proguardEnabled,
+	"LOCAL_MODULE_PATH":           prebuiltModulePath,
 
 	// composite functions
 	"LOCAL_MODULE_TAGS": includeVariableIf(bpVariable{"tags", bpparser.ListType}, not(valueDumpEquals("optional"))),
@@ -68,6 +70,8 @@ var rewriteProperties = map[string](func(variableAssignmentContext) error){
 	"LOCAL_BUILT_MODULE_STEM":       skip,
 	"LOCAL_USE_AAPT2":               skip, // Always enabled in Soong
 	"LOCAL_JAR_EXCLUDE_FILES":       skip, // Soong never excludes files from jars
+
+	"LOCAL_ANNOTATION_PROCESSOR_CLASSES": skip, // Soong gets the processor classes from the plugin
 }
 
 // adds a group of properties all having the same type
@@ -144,9 +148,9 @@ func init() {
 			"LOCAL_AAPT_FLAGS":            "aaptflags",
 			"LOCAL_PACKAGE_SPLITS":        "package_splits",
 			"LOCAL_COMPATIBILITY_SUITE":   "test_suites",
+			"LOCAL_OVERRIDES_PACKAGES":    "overrides",
 
-			"LOCAL_ANNOTATION_PROCESSORS":        "annotation_processors",
-			"LOCAL_ANNOTATION_PROCESSOR_CLASSES": "annotation_processor_classes",
+			"LOCAL_ANNOTATION_PROCESSORS": "plugins",
 
 			"LOCAL_PROGUARD_FLAGS":      "optimize.proguard_flags",
 			"LOCAL_PROGUARD_FLAG_FILES": "optimize.proguard_flags_files",
@@ -156,6 +160,10 @@ func init() {
 			"LOCAL_SHARED_ANDROID_LIBRARIES": "android_libs",
 			"LOCAL_STATIC_ANDROID_LIBRARIES": "android_static_libs",
 			"LOCAL_ADDITIONAL_CERTIFICATES":  "additional_certificates",
+
+			// Jacoco filters:
+			"LOCAL_JACK_COVERAGE_INCLUDE_FILTER": "jacoco.include_filter",
+			"LOCAL_JACK_COVERAGE_EXCLUDE_FILTER": "jacoco.exclude_filter",
 		})
 
 	addStandardProperties(bpparser.BoolType,
@@ -359,6 +367,20 @@ func exportIncludeDirs(ctx variableAssignmentContext) error {
 	return splitAndAssign(ctx, classifyLocalOrGlobalPath, map[string]string{"global": "export_include_dirs", "local": "export_include_dirs"})
 }
 
+func local32BitOnly(ctx variableAssignmentContext) error {
+	val, err := makeVariableToBlueprint(ctx.file, ctx.mkvalue, bpparser.BoolType)
+	if err != nil {
+		return err
+	}
+	if val.(*bpparser.Bool).Value {
+		thirtyTwo := &bpparser.String{
+			Value: "32",
+		}
+		setVariable(ctx.file, false, ctx.prefix, "compile_multilib", thirtyTwo, true)
+	}
+	return nil
+}
+
 func localAidlIncludes(ctx variableAssignmentContext) error {
 	return splitAndAssign(ctx, classifyLocalOrGlobalPath, map[string]string{"global": "aidl.include_dirs", "local": "aidl.local_include_dirs"})
 }
@@ -496,6 +518,55 @@ func prebuiltClass(ctx variableAssignmentContext) error {
 		ctx.file.scope.Set("BUILD_PREBUILT", "prebuilt")
 	}
 	return nil
+}
+
+func makeBlueprintStringAssignment(file *bpFile, prefix string, suffix string, value string) error {
+	val, err := makeVariableToBlueprint(file, mkparser.SimpleMakeString(value, mkparser.NoPos), bpparser.StringType)
+	if err == nil {
+		err = setVariable(file, false, prefix, suffix, val, true)
+	}
+	return err
+}
+
+// If variable is a literal variable name, return the name, otherwise return ""
+func varLiteralName(variable mkparser.Variable) string {
+	if len(variable.Name.Variables) == 0 {
+		return variable.Name.Strings[0]
+	}
+	return ""
+}
+
+func prebuiltModulePath(ctx variableAssignmentContext) error {
+	// Cannot handle appending
+	if ctx.append {
+		return fmt.Errorf("Cannot handle appending to LOCAL_MODULE_PATH")
+	}
+	// Analyze value in order to set the correct values for the 'device_specific',
+	// 'product_specific', 'product_services_specific' 'vendor'/'soc_specific',
+	// 'product_services_specific' attribute. Two cases are allowed:
+	//   $(VAR)/<literal-value>
+	//   $(PRODUCT_OUT)/$(TARGET_COPY_OUT_VENDOR)/<literal-value>
+	// The last case is equivalent to $(TARGET_OUT_VENDOR)/<literal-value>
+	// Map the variable name if present to `local_module_path_var`
+	// Map literal-path to local_module_path_fixed
+	varname := ""
+	fixed := ""
+	val := ctx.mkvalue
+	if len(val.Variables) == 1 && varLiteralName(val.Variables[0]) != "" && len(val.Strings) == 2 && val.Strings[0] == "" {
+		fixed = val.Strings[1]
+		varname = val.Variables[0].Name.Strings[0]
+	} else if len(val.Variables) == 2 && varLiteralName(val.Variables[0]) == "PRODUCT_OUT" && varLiteralName(val.Variables[1]) == "TARGET_COPY_OUT_VENDOR" &&
+		len(val.Strings) == 3 && val.Strings[0] == "" && val.Strings[1] == "/" {
+		fixed = val.Strings[2]
+		varname = "TARGET_OUT_VENDOR"
+	} else {
+		return fmt.Errorf("LOCAL_MODULE_PATH value should start with $(<some-varaible>)/ or $(PRODUCT_OUT)/$(TARGET_COPY_VENDOR)/")
+	}
+	err := makeBlueprintStringAssignment(ctx.file, "local_module_path", "var", varname)
+	if err == nil && fixed != "" {
+		err = makeBlueprintStringAssignment(ctx.file, "local_module_path", "fixed", fixed)
+	}
+	return err
 }
 
 func ldflags(ctx variableAssignmentContext) error {
@@ -738,27 +809,31 @@ var conditionalTranslations = map[string]map[bool]string{
 		true: "product_variables.pdk"},
 }
 
-func mydir(args []string) string {
-	return "."
+func mydir(args []string) []string {
+	return []string{"."}
 }
 
-func allFilesUnder(wildcard string) func(args []string) string {
-	return func(args []string) string {
-		dir := ""
+func allFilesUnder(wildcard string) func(args []string) []string {
+	return func(args []string) []string {
+		dirs := []string{""}
 		if len(args) > 0 {
-			dir = strings.TrimSpace(args[0])
+			dirs = strings.Fields(args[0])
 		}
 
-		return fmt.Sprintf("%s/**/"+wildcard, dir)
+		paths := make([]string, len(dirs))
+		for i := range paths {
+			paths[i] = fmt.Sprintf("%s/**/"+wildcard, dirs[i])
+		}
+		return paths
 	}
 }
 
-func allSubdirJavaFiles(args []string) string {
-	return "**/*.java"
+func allSubdirJavaFiles(args []string) []string {
+	return []string{"**/*.java"}
 }
 
-func includeIgnored(args []string) string {
-	return include_ignored
+func includeIgnored(args []string) []string {
+	return []string{include_ignored}
 }
 
 var moduleTypes = map[string]string{
@@ -779,6 +854,11 @@ var moduleTypes = map[string]string{
 	"BUILD_HOST_JAVA_LIBRARY":        "java_library_host",
 	"BUILD_HOST_DALVIK_JAVA_LIBRARY": "java_library_host_dalvik",
 	"BUILD_PACKAGE":                  "android_app",
+
+	"BUILD_CTS_SUPPORT_PACKAGE":     "cts_support_package",     // will be rewritten to android_test by bpfix
+	"BUILD_CTS_PACKAGE":             "cts_package",             // will be rewritten to android_test by bpfix
+	"BUILD_CTS_TARGET_JAVA_LIBRARY": "cts_target_java_library", // will be rewritten to java_library by bpfix
+	"BUILD_CTS_HOST_JAVA_LIBRARY":   "cts_host_java_library",   // will be rewritten to java_library_host by bpfix
 }
 
 var prebuiltTypes = map[string]string{
@@ -786,6 +866,7 @@ var prebuiltTypes = map[string]string{
 	"STATIC_LIBRARIES": "cc_prebuilt_library_static",
 	"EXECUTABLES":      "cc_prebuilt_binary",
 	"JAVA_LIBRARIES":   "java_import",
+	"ETC":              "prebuilt_etc",
 }
 
 var soongModuleTypes = map[string]bool{}
@@ -804,7 +885,6 @@ func androidScope() mkparser.Scope {
 	globalScope.SetFunc("first-makefiles-under", includeIgnored)
 	globalScope.SetFunc("all-named-subdir-makefiles", includeIgnored)
 	globalScope.SetFunc("all-subdir-makefiles", includeIgnored)
-
 	for k, v := range moduleTypes {
 		globalScope.Set(k, v)
 		soongModuleTypes[v] = true

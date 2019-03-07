@@ -19,6 +19,7 @@ import (
 	"io"
 
 	"android/soong/android"
+
 	"github.com/google/blueprint/proptools"
 )
 
@@ -45,6 +46,9 @@ type apexKeyProperties struct {
 	Public_key *string
 	// Path to the private key file in pem format. Used to sign APEXs.
 	Private_key *string
+
+	// Whether this key is installable to one of the partitions. Defualt: true.
+	Installable *bool
 }
 
 func apexKeyFactory() android.Module {
@@ -54,12 +58,26 @@ func apexKeyFactory() android.Module {
 	return module
 }
 
-func (m *apexKey) DepsMutator(ctx android.BottomUpMutatorContext) {
+func (m *apexKey) installable() bool {
+	return m.properties.Installable == nil || proptools.Bool(m.properties.Installable)
 }
 
 func (m *apexKey) GenerateAndroidBuildActions(ctx android.ModuleContext) {
-	m.public_key_file = android.PathForModuleSrc(ctx, String(m.properties.Public_key))
-	m.private_key_file = android.PathForModuleSrc(ctx, String(m.properties.Private_key))
+	if ctx.Config().FlattenApex() && !ctx.Config().UnbundledBuild() {
+		// Flattened APEXes are not signed
+		return
+	}
+
+	m.public_key_file = ctx.Config().ApexKeyDir(ctx).Join(ctx, String(m.properties.Public_key))
+	m.private_key_file = ctx.Config().ApexKeyDir(ctx).Join(ctx, String(m.properties.Private_key))
+
+	// If not found, fall back to the local key pairs
+	if !android.ExistentPathForSource(ctx, m.public_key_file.String()).Valid() {
+		m.public_key_file = android.PathForModuleSrc(ctx, String(m.properties.Public_key))
+	}
+	if !android.ExistentPathForSource(ctx, m.private_key_file.String()).Valid() {
+		m.private_key_file = android.PathForModuleSrc(ctx, String(m.properties.Private_key))
+	}
 
 	pubKeyName := m.public_key_file.Base()[0 : len(m.public_key_file.Base())-len(m.public_key_file.Ext())]
 	privKeyName := m.private_key_file.Base()[0 : len(m.private_key_file.Base())-len(m.private_key_file.Ext())]
@@ -71,7 +89,9 @@ func (m *apexKey) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	}
 	m.keyName = pubKeyName
 
-	ctx.InstallFile(android.PathForModuleInstall(ctx, "etc/security/apex"), m.keyName, m.public_key_file)
+	if m.installable() {
+		ctx.InstallFile(android.PathForModuleInstall(ctx, "etc/security/apex"), m.keyName, m.public_key_file)
+	}
 }
 
 func (m *apexKey) AndroidMk() android.AndroidMkData {
@@ -82,6 +102,7 @@ func (m *apexKey) AndroidMk() android.AndroidMkData {
 			func(w io.Writer, outputFile android.Path) {
 				fmt.Fprintln(w, "LOCAL_MODULE_PATH :=", "$(TARGET_OUT)/etc/security/apex")
 				fmt.Fprintln(w, "LOCAL_INSTALLED_MODULE_STEM :=", m.keyName)
+				fmt.Fprintln(w, "LOCAL_UNINSTALLABLE_MODULE :=", !m.installable())
 			},
 		},
 	}

@@ -17,6 +17,7 @@ package cc
 import (
 	"android/soong/android"
 	"fmt"
+	"strconv"
 )
 
 func getNdkStlFamily(m *Module) string {
@@ -90,6 +91,26 @@ func (stl *stl) begin(ctx BaseModuleContext) {
 				ctx.ModuleErrorf("stl: %q is not a supported STL for windows", s)
 				return ""
 			}
+		} else if ctx.Fuchsia() {
+			switch s {
+			case "c++_static":
+				return "libc++_static"
+			case "c++_shared":
+				return "libc++"
+			case "libc++", "libc++_static":
+				return s
+			case "none":
+				return ""
+			case "":
+				if ctx.static() {
+					return "libc++_static"
+				} else {
+					return "libc++"
+				}
+			default:
+				ctx.ModuleErrorf("stl: %q is not a supported STL on Fuchsia", s)
+				return ""
+			}
 		} else {
 			switch s {
 			case "libc++", "libc++_static":
@@ -108,6 +129,26 @@ func (stl *stl) begin(ctx BaseModuleContext) {
 			}
 		}
 	}()
+}
+
+func needsLibAndroidSupport(ctx BaseModuleContext) bool {
+	versionStr, err := normalizeNdkApiLevel(ctx, ctx.sdkVersion(), ctx.Arch())
+	if err != nil {
+		ctx.PropertyErrorf("sdk_version", err.Error())
+	}
+
+	if versionStr == "current" {
+		return false
+	}
+
+	version, err := strconv.Atoi(versionStr)
+	if err != nil {
+		panic(fmt.Sprintf(
+			"invalid API level returned from normalizeNdkApiLevel: %q",
+			versionStr))
+	}
+
+	return version < 21
 }
 
 func (stl *stl) deps(ctx BaseModuleContext, deps Deps) Deps {
@@ -141,7 +182,9 @@ func (stl *stl) deps(ctx BaseModuleContext, deps Deps) Deps {
 		} else {
 			deps.StaticLibs = append(deps.StaticLibs, stl.Properties.SelectedStl, "ndk_libc++abi")
 		}
-		deps.StaticLibs = append(deps.StaticLibs, "ndk_libandroid_support")
+		if needsLibAndroidSupport(ctx) {
+			deps.StaticLibs = append(deps.StaticLibs, "ndk_libandroid_support")
+		}
 		if ctx.Arch().ArchType == android.Arm {
 			deps.StaticLibs = append(deps.StaticLibs, "ndk_libunwind")
 		}
@@ -225,10 +268,11 @@ var hostDynamicGccLibs, hostStaticGccLibs map[android.OsType][]string
 
 func init() {
 	hostDynamicGccLibs = map[android.OsType][]string{
-		android.Linux:  []string{"-lgcc_s", "-lgcc", "-lc", "-lgcc_s", "-lgcc"},
-		android.Darwin: []string{"-lc", "-lSystem"},
+		android.Fuchsia: []string{"-lc", "-lunwind"},
+		android.Linux:   []string{"-lgcc_s", "-lgcc", "-lc", "-lgcc_s", "-lgcc"},
+		android.Darwin:  []string{"-lc", "-lSystem"},
 		android.Windows: []string{"-Wl,--start-group", "-lmingw32", "-lgcc", "-lgcc_eh",
-			"-lmoldname", "-lmingwex", "-lmsvcr110", "-lmsvcrt", "-lpthread",
+			"-lmoldname", "-lmingwex", "-lmsvcrt", "-lucrt", "-lpthread",
 			"-ladvapi32", "-lshell32", "-luser32", "-lkernel32", "-lpsapi",
 			"-Wl,--end-group"},
 	}

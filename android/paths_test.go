@@ -573,3 +573,121 @@ func TestDirectorySortedPaths(t *testing.T) {
 		t.Errorf("FilesInDirectory(b):\n %#v\n != \n %#v", inA.Strings(), expectedA)
 	}
 }
+
+func TestMaybeRel(t *testing.T) {
+	testCases := []struct {
+		name   string
+		base   string
+		target string
+		out    string
+		isRel  bool
+	}{
+		{
+			name:   "normal",
+			base:   "a/b/c",
+			target: "a/b/c/d",
+			out:    "d",
+			isRel:  true,
+		},
+		{
+			name:   "parent",
+			base:   "a/b/c/d",
+			target: "a/b/c",
+			isRel:  false,
+		},
+		{
+			name:   "not relative",
+			base:   "a/b",
+			target: "c/d",
+			isRel:  false,
+		},
+		{
+			name:   "abs1",
+			base:   "/a",
+			target: "a",
+			isRel:  false,
+		},
+		{
+			name:   "abs2",
+			base:   "a",
+			target: "/a",
+			isRel:  false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := &configErrorWrapper{}
+			out, isRel := MaybeRel(ctx, testCase.base, testCase.target)
+			if len(ctx.errors) > 0 {
+				t.Errorf("MaybeRel(..., %s, %s) reported unexpected errors %v",
+					testCase.base, testCase.target, ctx.errors)
+			}
+			if isRel != testCase.isRel || out != testCase.out {
+				t.Errorf("MaybeRel(..., %s, %s) want %v, %v got %v, %v",
+					testCase.base, testCase.target, testCase.out, testCase.isRel, out, isRel)
+			}
+		})
+	}
+}
+
+func TestPathForSource(t *testing.T) {
+	testCases := []struct {
+		name     string
+		buildDir string
+		src      string
+		err      string
+	}{
+		{
+			name:     "normal",
+			buildDir: "out",
+			src:      "a/b/c",
+		},
+		{
+			name:     "abs",
+			buildDir: "out",
+			src:      "/a/b/c",
+			err:      "is outside directory",
+		},
+		{
+			name:     "in out dir",
+			buildDir: "out",
+			src:      "out/a/b/c",
+			err:      "is in output",
+		},
+	}
+
+	funcs := []struct {
+		name string
+		f    func(ctx PathContext, pathComponents ...string) (SourcePath, error)
+	}{
+		{"pathForSource", pathForSource},
+		{"safePathForSource", safePathForSource},
+	}
+
+	for _, f := range funcs {
+		t.Run(f.name, func(t *testing.T) {
+			for _, test := range testCases {
+				t.Run(test.name, func(t *testing.T) {
+					testConfig := TestConfig(test.buildDir, nil)
+					ctx := &configErrorWrapper{config: testConfig}
+					_, err := f.f(ctx, test.src)
+					if len(ctx.errors) > 0 {
+						t.Fatalf("unexpected errors %v", ctx.errors)
+					}
+					if err != nil {
+						if test.err == "" {
+							t.Fatalf("unexpected error %q", err.Error())
+						} else if !strings.Contains(err.Error(), test.err) {
+							t.Fatalf("incorrect error, want substring %q got %q", test.err, err.Error())
+						}
+					} else {
+						if test.err != "" {
+							t.Fatalf("missing error %q", test.err)
+						}
+					}
+				})
+			}
+		})
+	}
+}

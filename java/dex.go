@@ -85,8 +85,8 @@ func (j *Module) dexCommonFlags(ctx android.ModuleContext) []string {
 func (j *Module) d8Flags(ctx android.ModuleContext, flags javaBuilderFlags) ([]string, android.Paths) {
 	d8Flags := j.dexCommonFlags(ctx)
 
-	d8Flags = append(d8Flags, flags.bootClasspath.FormTurbineClasspath("--lib")...)
-	d8Flags = append(d8Flags, flags.classpath.FormTurbineClasspath("--lib")...)
+	d8Flags = append(d8Flags, flags.bootClasspath.FormTurbineClasspath("--lib ")...)
+	d8Flags = append(d8Flags, flags.classpath.FormTurbineClasspath("--lib ")...)
 
 	var d8Deps android.Paths
 	d8Deps = append(d8Deps, flags.bootClasspath...)
@@ -160,6 +160,11 @@ func (j *Module) r8Flags(ctx android.ModuleContext, flags javaBuilderFlags) (r8F
 	// TODO(ccross): if this is an instrumentation test of an obfuscated app, use the
 	// dictionary of the app and move the app from libraryjars to injars.
 
+	// Don't strip out debug information for eng builds.
+	if ctx.Config().Eng() {
+		r8Flags = append(r8Flags, "--debug")
+	}
+
 	return r8Flags, r8Deps
 }
 
@@ -209,6 +214,11 @@ func (j *Module) compileDex(ctx android.ModuleContext, flags javaBuilderFlags,
 				"outDir":   outDir.String(),
 			},
 		})
+	}
+	if j.deviceProperties.UncompressDex {
+		alignedJavalibJar := android.PathForModuleOut(ctx, "aligned", jarName)
+		TransformZipAlign(ctx, alignedJavalibJar, javalibJar)
+		javalibJar = alignedJavalibJar
 	}
 
 	return javalibJar
