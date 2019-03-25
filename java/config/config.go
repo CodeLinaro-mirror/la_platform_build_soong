@@ -33,6 +33,17 @@ var (
 	DefaultLambdaStubsLibrary     = "core-lambda-stubs"
 	SdkLambdaStubsPath            = "prebuilts/sdk/tools/core-lambda-stubs.jar"
 
+	// A list of the non-boot jars that provide hidden APIs, i.e. libraries.
+	HiddenAPIProvidingNonBootJars = []string{
+		"android.test.base",
+	}
+
+	// A list of the non-boot jars that provide information about usages of the hidden API.
+	HiddenAPIExtraAppUsageJars = []string{
+		// The core-oj-hiddenapi provides information for the core-oj jar.
+		"core-oj-hiddenapi",
+	}
+
 	DefaultJacocoExcludeFilter = []string{"org.junit.*", "org.jacoco.*", "org.mockito.*"}
 
 	InstrumentFrameworkModules = []string{
@@ -108,6 +119,7 @@ func init() {
 	pctx.HostBinToolVariable("ApiCheckCmd", "apicheck")
 	pctx.HostBinToolVariable("D8Cmd", "d8")
 	pctx.HostBinToolVariable("R8Cmd", "r8-compat-proguard")
+	pctx.HostBinToolVariable("HiddenAPICmd", "hiddenapi")
 
 	pctx.VariableFunc("TurbineJar", func(ctx android.PackageVarContext) string {
 		turbine := "turbine.jar"

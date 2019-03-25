@@ -20,11 +20,13 @@ import (
 	"strings"
 )
 
-// prebuilt_etc is for prebuilts that will be installed to
-// <partition>/etc/<subdir>
+// TODO(jungw): Now that it handles more than the ones in etc/, consider renaming this file.
 
 func init() {
 	RegisterModuleType("prebuilt_etc", PrebuiltEtcFactory)
+	RegisterModuleType("prebuilt_etc_host", PrebuiltEtcHostFactory)
+	RegisterModuleType("prebuilt_usr_share", PrebuiltUserShareFactory)
+	RegisterModuleType("prebuilt_usr_share_host", PrebuiltUserShareHostFactory)
 
 	PreDepsMutators(func(ctx RegisterMutatorsContext) {
 		ctx.BottomUp("prebuilt_etc", prebuiltEtcMutator).Parallel()
@@ -59,8 +61,10 @@ type PrebuiltEtc struct {
 
 	properties prebuiltEtcProperties
 
-	sourceFilePath         Path
-	outputFilePath         OutputPath
+	sourceFilePath Path
+	outputFilePath OutputPath
+	// The base install location, e.g. "etc" for prebuilt_etc, "usr/share" for prebuilt_usr_share.
+	installDirBase         string
 	installDirPath         OutputPath
 	additionalDependencies *Paths
 }
@@ -123,7 +127,7 @@ func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx ModuleContext) {
 		return
 	}
 	p.outputFilePath = PathForModuleOut(ctx, filename).OutputPath
-	p.installDirPath = PathForModuleInstall(ctx, "etc", String(p.properties.Sub_dir))
+	p.installDirPath = PathForModuleInstall(ctx, p.installDirBase, String(p.properties.Sub_dir))
 
 	// This ensures that outputFilePath has the correct name for others to
 	// use, as the source file may have a different name.
@@ -149,6 +153,9 @@ func (p *PrebuiltEtc) AndroidMk() AndroidMkData {
 				fmt.Fprintln(w, "LOCAL_MODULE_OWNER :=", *p.commonProperties.Owner)
 			}
 			fmt.Fprintln(w, "LOCAL_MODULE_TAGS := optional")
+			if p.Host() {
+				fmt.Fprintln(w, "LOCAL_IS_HOST_MODULE := true")
+			}
 			fmt.Fprintln(w, "LOCAL_PREBUILT_MODULE_FILE :=", p.outputFilePath.String())
 			fmt.Fprintln(w, "LOCAL_MODULE_PATH :=", "$(OUT_DIR)/"+p.installDirPath.RelPathString())
 			fmt.Fprintln(w, "LOCAL_INSTALLED_MODULE_STEM :=", p.outputFilePath.Base())
@@ -170,11 +177,38 @@ func InitPrebuiltEtcModule(p *PrebuiltEtc) {
 	p.AddProperties(&p.properties)
 }
 
+// prebuilt_etc is for prebuilts that will be installed to <partition>/etc/<subdir>
 func PrebuiltEtcFactory() Module {
-	module := &PrebuiltEtc{}
+	module := &PrebuiltEtc{installDirBase: "etc"}
 	InitPrebuiltEtcModule(module)
 	// This module is device-only
 	InitAndroidArchModule(module, DeviceSupported, MultilibFirst)
+	return module
+}
+
+func PrebuiltEtcHostFactory() Module {
+	module := &PrebuiltEtc{installDirBase: "etc"}
+	InitPrebuiltEtcModule(module)
+	// This module is host-only
+	InitAndroidArchModule(module, HostSupported, MultilibCommon)
+	return module
+}
+
+// prebuilt_usr_share is for prebuilts that will be installed to <partition>/usr/share/<subdir>
+func PrebuiltUserShareFactory() Module {
+	module := &PrebuiltEtc{installDirBase: "usr/share"}
+	InitPrebuiltEtcModule(module)
+	// This module is device-only
+	InitAndroidArchModule(module, DeviceSupported, MultilibFirst)
+	return module
+}
+
+// prebuild_usr_share_host is for host prebuilts that will be installed to <partition>/usr/share/<subdir>
+func PrebuiltUserShareHostFactory() Module {
+	module := &PrebuiltEtc{installDirBase: "usr/share"}
+	InitPrebuiltEtcModule(module)
+	// This module is host-only
+	InitAndroidArchModule(module, HostSupported, MultilibCommon)
 	return module
 }
 
@@ -190,7 +224,7 @@ const (
 // system or recovery.
 func prebuiltEtcMutator(mctx BottomUpMutatorContext) {
 	m, ok := mctx.Module().(*PrebuiltEtc)
-	if !ok {
+	if !ok || m.Host() {
 		return
 	}
 

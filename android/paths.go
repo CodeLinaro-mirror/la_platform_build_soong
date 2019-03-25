@@ -244,7 +244,7 @@ func pathsForModuleSrcFromFullPath(ctx ModuleContext, paths []string, incDirs bo
 		}
 		path := filepath.Clean(p)
 		if !strings.HasPrefix(path, prefix) {
-			reportPathErrorf(ctx, "Path '%s' is not in module source directory '%s'", p, prefix)
+			reportPathErrorf(ctx, "Path %q is not in module source directory %q", p, prefix)
 			continue
 		}
 
@@ -263,9 +263,9 @@ func pathsForModuleSrcFromFullPath(ctx ModuleContext, paths []string, incDirs bo
 }
 
 // PathsWithOptionalDefaultForModuleSrc returns Paths rooted from the module's
-// local source directory. If none are provided, use the default if it exists.
+// local source directory. If input is nil, use the default if it exists.  If input is empty, returns nil.
 func PathsWithOptionalDefaultForModuleSrc(ctx ModuleContext, input []string, def string) Paths {
-	if len(input) > 0 {
+	if input != nil {
 		return PathsForModuleSrc(ctx, input)
 	}
 	// Use Glob so that if the default doesn't exist, a dependency is added so that when it
@@ -505,7 +505,7 @@ func safePathForSource(ctx PathContext, pathComponents ...string) (SourcePath, e
 
 	// absolute path already checked by validateSafePath
 	if strings.HasPrefix(ret.String(), ctx.Config().buildDir) {
-		return ret, fmt.Errorf("source path %s is in output", ret.String())
+		return ret, fmt.Errorf("source path %q is in output", ret.String())
 	}
 
 	return ret, err
@@ -521,7 +521,7 @@ func pathForSource(ctx PathContext, pathComponents ...string) (SourcePath, error
 
 	// absolute path already checked by validatePath
 	if strings.HasPrefix(ret.String(), ctx.Config().buildDir) {
-		return ret, fmt.Errorf("source path %s is in output", ret.String())
+		return ret, fmt.Errorf("source path %q is in output", ret.String())
 	}
 
 	return ret, nil
@@ -575,7 +575,7 @@ func PathForSource(ctx PathContext, pathComponents ...string) SourcePath {
 	} else if exists, _, err := ctx.Fs().Exists(path.String()); err != nil {
 		reportPathErrorf(ctx, "%s: %s", path, err.Error())
 	} else if !exists {
-		reportPathErrorf(ctx, "source path %s does not exist", path)
+		reportPathErrorf(ctx, "source path %q does not exist", path)
 	}
 	return path
 }
@@ -677,6 +677,15 @@ func PathForOutput(ctx PathContext, pathComponents ...string) OutputPath {
 	return OutputPath{basePath{path, ctx.Config(), ""}}
 }
 
+// PathsForOutput returns Paths rooted from buildDir
+func PathsForOutput(ctx PathContext, paths []string) WritablePaths {
+	ret := make(WritablePaths, len(paths))
+	for i, path := range paths {
+		ret[i] = PathForOutput(ctx, path)
+	}
+	return ret
+}
+
 func (p OutputPath) writablePath() {}
 
 func (p OutputPath) String() string {
@@ -695,6 +704,28 @@ func (p OutputPath) Join(ctx PathContext, paths ...string) OutputPath {
 		reportPathError(ctx, err)
 	}
 	return p.withRel(path)
+}
+
+// ReplaceExtension creates a new OutputPath with the extension replaced with ext.
+func (p OutputPath) ReplaceExtension(ctx PathContext, ext string) OutputPath {
+	if strings.Contains(ext, "/") {
+		reportPathErrorf(ctx, "extension %q cannot contain /", ext)
+	}
+	ret := PathForOutput(ctx, pathtools.ReplaceExtension(p.path, ext))
+	ret.rel = pathtools.ReplaceExtension(p.rel, ext)
+	return ret
+}
+
+// InSameDir creates a new OutputPath from the directory of the current OutputPath joined with the elements in paths.
+func (p OutputPath) InSameDir(ctx PathContext, paths ...string) OutputPath {
+	path, err := validatePath(paths...)
+	if err != nil {
+		reportPathError(ctx, err)
+	}
+
+	ret := PathForOutput(ctx, filepath.Dir(p.path), path)
+	ret.rel = filepath.Join(filepath.Dir(p.rel), path)
+	return ret
 }
 
 // PathForIntermediates returns an OutputPath representing the top-level
@@ -740,7 +771,7 @@ func PathForModuleSrc(ctx ModuleContext, paths ...string) ModuleSrcPath {
 	if exists, _, err := ctx.Fs().Exists(path.String()); err != nil {
 		reportPathErrorf(ctx, "%s: %s", path, err.Error())
 	} else if !exists {
-		reportPathErrorf(ctx, "module source path %s does not exist", path)
+		reportPathErrorf(ctx, "module source path %q does not exist", path)
 	}
 
 	return path
@@ -1009,6 +1040,14 @@ func (p testPath) String() string {
 	return p.path
 }
 
+type testWritablePath struct {
+	testPath
+}
+
+func (p testPath) writablePath() {}
+
+// PathForTesting returns a Path constructed from joining the elements of paths with '/'.  It should only be used from
+// within tests.
 func PathForTesting(paths ...string) Path {
 	p, err := validateSafePath(paths...)
 	if err != nil {
@@ -1017,13 +1056,53 @@ func PathForTesting(paths ...string) Path {
 	return testPath{basePath{path: p, rel: p}}
 }
 
-func PathsForTesting(strs []string) Paths {
+// PathsForTesting returns a Path constructed from each element in strs. It should only be used from within tests.
+func PathsForTesting(strs ...string) Paths {
 	p := make(Paths, len(strs))
 	for i, s := range strs {
 		p[i] = PathForTesting(s)
 	}
 
 	return p
+}
+
+// WritablePathForTesting returns a Path constructed from joining the elements of paths with '/'.  It should only be
+// used from within tests.
+func WritablePathForTesting(paths ...string) WritablePath {
+	p, err := validateSafePath(paths...)
+	if err != nil {
+		panic(err)
+	}
+	return testWritablePath{testPath{basePath{path: p, rel: p}}}
+}
+
+// WritablePathsForTesting returns a Path constructed from each element in strs. It should only be used from within
+// tests.
+func WritablePathsForTesting(strs ...string) WritablePaths {
+	p := make(WritablePaths, len(strs))
+	for i, s := range strs {
+		p[i] = WritablePathForTesting(s)
+	}
+
+	return p
+}
+
+type testPathContext struct {
+	config Config
+	fs     pathtools.FileSystem
+}
+
+func (x *testPathContext) Fs() pathtools.FileSystem   { return x.fs }
+func (x *testPathContext) Config() Config             { return x.config }
+func (x *testPathContext) AddNinjaFileDeps(...string) {}
+
+// PathContextForTesting returns a PathContext that can be used in tests, for example to create an OutputPath with
+// PathForOutput.
+func PathContextForTesting(config Config, fs map[string][]byte) PathContext {
+	return &testPathContext{
+		config: config,
+		fs:     pathtools.MockFs(fs),
+	}
 }
 
 // Rel performs the same function as filepath.Rel, but reports errors to a PathContext, and reports an error if

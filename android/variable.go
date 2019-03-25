@@ -232,12 +232,7 @@ type productVariables struct {
 	UncompressPrivAppDex             *bool    `json:",omitempty"`
 	ModulesLoadedByPrivilegedModules []string `json:",omitempty"`
 
-	BootJars       []string `json:",omitempty"`
-	PreoptBootJars []string `json:",omitempty"`
-
-	DisableDexPreopt        *bool    `json:",omitempty"`
-	DisableDexPreoptModules []string `json:",omitempty"`
-	DexPreoptProfileDir     *string  `json:",omitempty"`
+	BootJars []string `json:",omitempty"`
 
 	IntegerOverflowExcludePaths []string `json:",omitempty"`
 
@@ -310,10 +305,9 @@ type productVariables struct {
 	EnforceSystemCertificate          *bool    `json:",omitempty"`
 	EnforceSystemCertificateWhitelist []string `json:",omitempty"`
 
-	// TODO(ccross): move these to a Singleton in Soong
-	HiddenAPIStubFlags         *string  `json:",omitempty"`
-	HiddenAPIFlags             *string  `json:",omitempty"`
-	HiddenAPIExtraAppUsageJars []string `json:",omitempty"`
+	ProductHiddenAPIStubs       []string `json:",omitempty"`
+	ProductHiddenAPIStubsSystem []string `json:",omitempty"`
+	ProductHiddenAPIStubsTest   []string `json:",omitempty"`
 }
 
 func boolPtr(v bool) *bool {

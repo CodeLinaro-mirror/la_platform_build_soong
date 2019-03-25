@@ -666,6 +666,14 @@ func sanitizerDepsMutator(t sanitizerType) func(android.TopDownMutatorContext) {
 				}
 				return true
 			})
+		} else if sanitizeable, ok := mctx.Module().(Sanitizeable); ok {
+			// If an APEX module includes a lib which is enabled for a sanitizer T, then
+			// the APEX module is also enabled for the same sanitizer type.
+			mctx.VisitDirectDeps(func(child android.Module) {
+				if c, ok := child.(*Module); ok && c.sanitize.isSanitizerEnabled(t) {
+					sanitizeable.EnableSanitizer(t.name())
+				}
+			})
 		}
 	}
 }
@@ -848,6 +856,7 @@ func sanitizerRuntimeMutator(mctx android.BottomUpMutatorContext) {
 type Sanitizeable interface {
 	android.Module
 	IsSanitizerEnabled(ctx android.BaseModuleContext, sanitizerName string) bool
+	EnableSanitizer(sanitizerName string)
 }
 
 // Create sanitized variants for modules that need them
@@ -958,20 +967,26 @@ func sanitizerMutator(t sanitizerType) func(android.BottomUpMutatorContext) {
 	}
 }
 
+var cfiStaticLibsKey = android.NewOnceKey("cfiStaticLibs")
+
 func cfiStaticLibs(config android.Config) *[]string {
-	return config.Once("cfiStaticLibs", func() interface{} {
+	return config.Once(cfiStaticLibsKey, func() interface{} {
 		return &[]string{}
 	}).(*[]string)
 }
+
+var hwasanStaticLibsKey = android.NewOnceKey("hwasanStaticLibs")
 
 func hwasanStaticLibs(config android.Config) *[]string {
-	return config.Once("hwasanStaticLibs", func() interface{} {
+	return config.Once(hwasanStaticLibsKey, func() interface{} {
 		return &[]string{}
 	}).(*[]string)
 }
 
+var hwasanVendorStaticLibsKey = android.NewOnceKey("hwasanVendorStaticLibs")
+
 func hwasanVendorStaticLibs(config android.Config) *[]string {
-	return config.Once("hwasanVendorStaticLibs", func() interface{} {
+	return config.Once(hwasanVendorStaticLibsKey, func() interface{} {
 		return &[]string{}
 	}).(*[]string)
 }

@@ -51,170 +51,12 @@ func TestMain(m *testing.M) {
 	os.Exit(run())
 }
 
-func gatherRequiredDeps(os android.OsType) string {
-	ret := `
-		toolchain_library {
-			name: "libatomic",
-			vendor_available: true,
-			recovery_available: true,
-			src: "",
-		}
-
-		toolchain_library {
-			name: "libcompiler_rt-extras",
-			vendor_available: true,
-			recovery_available: true,
-			src: "",
-		}
-
-		toolchain_library {
-			name: "libclang_rt.builtins-arm-android",
-			vendor_available: true,
-			recovery_available: true,
-			src: "",
-		}
-
-		toolchain_library {
-			name: "libclang_rt.builtins-aarch64-android",
-			vendor_available: true,
-			recovery_available: true,
-			src: "",
-		}
-
-		toolchain_library {
-			name: "libclang_rt.builtins-i686-android",
-			vendor_available: true,
-			recovery_available: true,
-			src: "",
-		}
-
-		toolchain_library {
-			name: "libclang_rt.builtins-x86_64-android",
-			vendor_available: true,
-			recovery_available: true,
-			src: "",
-		}
-
-		toolchain_library {
-			name: "libgcc",
-			vendor_available: true,
-			recovery_available: true,
-			src: "",
-		}
-
-		cc_library {
-			name: "libc",
-			no_libgcc: true,
-			nocrt: true,
-			system_shared_libs: [],
-			recovery_available: true,
-		}
-		llndk_library {
-			name: "libc",
-			symbol_file: "",
-		}
-		cc_library {
-			name: "libm",
-			no_libgcc: true,
-			nocrt: true,
-			system_shared_libs: [],
-			recovery_available: true,
-		}
-		llndk_library {
-			name: "libm",
-			symbol_file: "",
-		}
-		cc_library {
-			name: "libdl",
-			no_libgcc: true,
-			nocrt: true,
-			system_shared_libs: [],
-			recovery_available: true,
-		}
-		llndk_library {
-			name: "libdl",
-			symbol_file: "",
-		}
-		cc_library {
-			name: "libc++_static",
-			no_libgcc: true,
-			nocrt: true,
-			system_shared_libs: [],
-			stl: "none",
-			vendor_available: true,
-			recovery_available: true,
-		}
-		cc_library {
-			name: "libc++",
-			no_libgcc: true,
-			nocrt: true,
-			system_shared_libs: [],
-			stl: "none",
-			vendor_available: true,
-			recovery_available: true,
-			vndk: {
-				enabled: true,
-				support_system_process: true,
-			},
-		}
-		cc_library {
-			name: "libunwind_llvm",
-			no_libgcc: true,
-			nocrt: true,
-			system_shared_libs: [],
-			stl: "none",
-			vendor_available: true,
-			recovery_available: true,
-		}
-
-		cc_object {
-			name: "crtbegin_so",
-			recovery_available: true,
-			vendor_available: true,
-		}
-
-		cc_object {
-			name: "crtbegin_static",
-			recovery_available: true,
-			vendor_available: true,
-		}
-
-		cc_object {
-			name: "crtend_so",
-			recovery_available: true,
-			vendor_available: true,
-		}
-
-		cc_object {
-			name: "crtend_android",
-			recovery_available: true,
-			vendor_available: true,
-		}
-
-		cc_library {
-			name: "libprotobuf-cpp-lite",
-		}
-		`
-	if os == android.Fuchsia {
-		ret += `
-		cc_library {
-			name: "libbioniccompat",
-			stl: "none",
-		}
-		cc_library {
-			name: "libcompiler_rt",
-			stl: "none",
-		}
-		`
-	}
-	return ret
-}
-
 func createTestContext(t *testing.T, config android.Config, bp string, os android.OsType) *android.TestContext {
 	ctx := android.NewTestArchContext()
 	ctx.RegisterModuleType("cc_binary", android.ModuleFactoryAdaptor(BinaryFactory))
 	ctx.RegisterModuleType("cc_library", android.ModuleFactoryAdaptor(LibraryFactory))
 	ctx.RegisterModuleType("cc_library_shared", android.ModuleFactoryAdaptor(LibrarySharedFactory))
+	ctx.RegisterModuleType("cc_library_static", android.ModuleFactoryAdaptor(LibraryStaticFactory))
 	ctx.RegisterModuleType("cc_library_headers", android.ModuleFactoryAdaptor(LibraryHeaderFactory))
 	ctx.RegisterModuleType("toolchain_library", android.ModuleFactoryAdaptor(ToolchainLibraryFactory))
 	ctx.RegisterModuleType("llndk_library", android.ModuleFactoryAdaptor(LlndkLibraryFactory))
@@ -232,7 +74,7 @@ func createTestContext(t *testing.T, config android.Config, bp string, os androi
 	ctx.Register()
 
 	// add some modules that are required by the compiler and/or linker
-	bp = bp + gatherRequiredDeps(os)
+	bp = bp + GatherRequiredDepsForTest(os)
 
 	ctx.MockFileSystem(map[string][]byte{
 		"Android.bp":  []byte(bp),
@@ -1197,7 +1039,7 @@ var splitListForSizeTestCases = []struct {
 
 func TestSplitListForSize(t *testing.T) {
 	for _, testCase := range splitListForSizeTestCases {
-		out, _ := splitListForSize(android.PathsForTesting(testCase.in), testCase.size)
+		out, _ := splitListForSize(android.PathsForTesting(testCase.in...), testCase.size)
 
 		var outStrings [][]string
 
@@ -1964,5 +1806,45 @@ func TestStaticExecutable(t *testing.T) {
 		if strings.Contains(libFlags, lib) {
 			t.Errorf("Shared lib %q was found in %q", lib, libFlags)
 		}
+	}
+}
+
+func TestStaticDepsOrderWithStubs(t *testing.T) {
+	ctx := testCc(t, `
+		cc_binary {
+			name: "mybin",
+			srcs: ["foo.c"],
+			static_libs: ["libB"],
+			static_executable: true,
+			stl: "none",
+		}
+
+		cc_library {
+			name: "libB",
+			srcs: ["foo.c"],
+			shared_libs: ["libC"],
+			stl: "none",
+		}
+
+		cc_library {
+			name: "libC",
+			srcs: ["foo.c"],
+			stl: "none",
+			stubs: {
+				versions: ["1"],
+			},
+		}`)
+
+	mybin := ctx.ModuleForTests("mybin", "android_arm64_armv8-a_core").Module().(*Module)
+	actual := mybin.depsInLinkOrder
+	expected := getOutputPaths(ctx, "android_arm64_armv8-a_core_static", []string{"libB", "libC"})
+
+	if !reflect.DeepEqual(actual, expected) {
+		t.Errorf("staticDeps orderings were not propagated correctly"+
+			"\nactual:   %v"+
+			"\nexpected: %v",
+			actual,
+			expected,
+		)
 	}
 }

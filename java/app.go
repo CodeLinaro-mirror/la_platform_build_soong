@@ -68,7 +68,15 @@ type appProperties struct {
 	// list of native libraries that will be provided in or alongside the resulting jar
 	Jni_libs []string `android:"arch_variant"`
 
-	EmbedJNI bool `blueprint:"mutated"`
+	// Store native libraries uncompressed in the APK and set the android:extractNativeLibs="false" manifest
+	// flag so that they are used from inside the APK at runtime.  Defaults to true for android_test modules unless
+	// sdk_version or min_sdk_version is set to a version that doesn't support it (<23), defaults to false for other
+	// module types where the native libraries are generally preinstalled outside the APK.
+	Use_embedded_native_libs *bool
+
+	// Store dex files uncompressed in the APK and set the android:useEmbeddedDex="true" manifest attribute so that
+	// they are used from inside the APK at runtime.
+	Use_embedded_dex *bool
 }
 
 type AndroidApp struct {
@@ -93,10 +101,6 @@ func (a *AndroidApp) ExportedProguardFlagFiles() android.Paths {
 
 func (a *AndroidApp) ExportedStaticPackages() android.Paths {
 	return nil
-}
-
-func (a *AndroidApp) ExportedManifest() android.Path {
-	return a.manifestPath
 }
 
 var _ AndroidLibraryDependency = (*AndroidApp)(nil)
@@ -140,22 +144,50 @@ func (a *AndroidApp) DepsMutator(ctx android.BottomUpMutatorContext) {
 }
 
 func (a *AndroidApp) GenerateAndroidBuildActions(ctx android.ModuleContext) {
+	a.aapt.uncompressedJNI = a.shouldUncompressJNI(ctx)
+	a.aapt.useEmbeddedDex = Bool(a.appProperties.Use_embedded_dex)
 	a.generateAndroidBuildActions(ctx)
+}
+
+// shouldUncompressJNI returns true if the native libraries should be stored in the APK uncompressed and the
+// extractNativeLibs application flag should be set to false in the manifest.
+func (a *AndroidApp) shouldUncompressJNI(ctx android.ModuleContext) bool {
+	minSdkVersion, err := sdkVersionToNumber(ctx, a.minSdkVersion())
+	if err != nil {
+		ctx.PropertyErrorf("min_sdk_version", "invalid value %q: %s", a.minSdkVersion(), err)
+	}
+
+	return minSdkVersion >= 23 && Bool(a.appProperties.Use_embedded_native_libs)
 }
 
 // Returns whether this module should have the dex file stored uncompressed in the APK.
 func (a *AndroidApp) shouldUncompressDex(ctx android.ModuleContext) bool {
+	if Bool(a.appProperties.Use_embedded_dex) {
+		return true
+	}
+
 	if ctx.Config().UnbundledBuild() {
 		return false
 	}
 
 	// Uncompress dex in APKs of privileged apps, and modules used by privileged apps.
-	return ctx.Config().UncompressPrivAppDex() &&
+	if ctx.Config().UncompressPrivAppDex() &&
 		(Bool(a.appProperties.Privileged) ||
-			inList(ctx.ModuleName(), ctx.Config().ModulesLoadedByPrivilegedModules()))
+			inList(ctx.ModuleName(), ctx.Config().ModulesLoadedByPrivilegedModules())) {
+		return true
+	}
+
+	// Uncompress if the dex files is preopted on /system.
+	if !a.dexpreopter.dexpreoptDisabled(ctx) && (ctx.Host() || !odexOnSystemOther(ctx, a.dexpreopter.installPath)) {
+		return true
+	}
+
+	return false
 }
 
 func (a *AndroidApp) aaptBuildActions(ctx android.ModuleContext) {
+	a.aapt.usesNonSdkApis = Bool(a.Module.deviceProperties.Platform_apis)
+
 	aaptLinkFlags := []string{}
 
 	// Add TARGET_AAPT_CHARACTERISTICS values to AAPT link flags if they exist and --product flags were not provided.
@@ -211,7 +243,6 @@ func (a *AndroidApp) proguardBuildActions(ctx android.ModuleContext) {
 }
 
 func (a *AndroidApp) dexBuildActions(ctx android.ModuleContext) android.Path {
-	a.deviceProperties.UncompressDex = a.shouldUncompressDex(ctx)
 
 	var installDir string
 	if ctx.ModuleName() == "framework-res" {
@@ -223,6 +254,9 @@ func (a *AndroidApp) dexBuildActions(ctx android.ModuleContext) android.Path {
 		installDir = filepath.Join("app", a.installApkName)
 	}
 	a.dexpreopter.installPath = android.PathForModuleInstall(ctx, installDir, a.installApkName+".apk")
+	a.dexpreopter.isInstallable = Bool(a.properties.Installable)
+	a.dexpreopter.uncompressedDex = a.shouldUncompressDex(ctx)
+	a.deviceProperties.UncompressDex = a.dexpreopter.uncompressedDex
 
 	if ctx.ModuleName() != "framework-res" {
 		a.Module.compile(ctx, a.aaptSrcJar)
@@ -234,10 +268,10 @@ func (a *AndroidApp) dexBuildActions(ctx android.ModuleContext) android.Path {
 func (a *AndroidApp) jniBuildActions(jniLibs []jniLib, ctx android.ModuleContext) android.WritablePath {
 	var jniJarFile android.WritablePath
 	if len(jniLibs) > 0 {
-		embedJni := ctx.Config().UnbundledBuild() || a.appProperties.EmbedJNI
+		embedJni := ctx.Config().UnbundledBuild() || Bool(a.appProperties.Use_embedded_native_libs)
 		if embedJni {
 			jniJarFile = android.PathForModuleOut(ctx, "jnilibs.zip")
-			TransformJniLibsToJar(ctx, jniJarFile, jniLibs)
+			TransformJniLibsToJar(ctx, jniJarFile, jniLibs, a.shouldUncompressJNI(ctx))
 		} else {
 			a.installJniLibs = jniLibs
 		}
@@ -363,6 +397,7 @@ func (a *AndroidApp) getCertString(ctx android.BaseContext) string {
 	return String(a.appProperties.Certificate)
 }
 
+// android_app compiles sources and Android resources into an Android application package `.apk` file.
 func AndroidAppFactory() android.Module {
 	module := &AndroidApp{}
 
@@ -408,7 +443,7 @@ type AndroidTest struct {
 func (a *AndroidTest) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	a.generateAndroidBuildActions(ctx)
 
-	a.testConfig = tradefed.AutoGenInstrumentationTestConfig(ctx, a.testProperties.Test_config, a.testProperties.Test_config_template, a.manifestPath)
+	a.testConfig = tradefed.AutoGenInstrumentationTestConfig(ctx, a.testProperties.Test_config, a.testProperties.Test_config_template, a.manifestPath, a.testProperties.Test_suites)
 	a.data = ctx.ExpandSources(a.testProperties.Data, nil)
 }
 
@@ -425,6 +460,8 @@ func (a *AndroidTest) DepsMutator(ctx android.BottomUpMutatorContext) {
 	}
 }
 
+// android_test compiles test sources and Android resources into an Android application package `.apk` file and
+// creates an `AndroidTest.xml` file to allow running the test with `atest` or a `TEST_MAPPING` file.
 func AndroidTestFactory() android.Module {
 	module := &AndroidTest{}
 
@@ -432,7 +469,7 @@ func AndroidTestFactory() android.Module {
 
 	module.Module.properties.Instrument = true
 	module.Module.properties.Installable = proptools.BoolPtr(true)
-	module.appProperties.EmbedJNI = true
+	module.appProperties.Use_embedded_native_libs = proptools.BoolPtr(true)
 	module.Module.dexpreopter.isTest = true
 
 	module.AddProperties(
@@ -462,13 +499,16 @@ type AndroidTestHelperApp struct {
 	appTestHelperAppProperties appTestHelperAppProperties
 }
 
+// android_test_helper_app compiles sources and Android resources into an Android application package `.apk` file that
+// will be used by tests, but does not produce an `AndroidTest.xml` file so the module will not be run directly as a
+// test.
 func AndroidTestHelperAppFactory() android.Module {
 	module := &AndroidTestHelperApp{}
 
 	module.Module.deviceProperties.Optimize.Enabled = proptools.BoolPtr(true)
 
 	module.Module.properties.Installable = proptools.BoolPtr(true)
-	module.appProperties.EmbedJNI = true
+	module.appProperties.Use_embedded_native_libs = proptools.BoolPtr(true)
 	module.Module.dexpreopter.isTest = true
 
 	module.AddProperties(
@@ -496,6 +536,8 @@ type AndroidAppCertificateProperties struct {
 	Certificate *string
 }
 
+// android_app_certificate modules can be referenced by the certificates property of android_app modules to select
+// the signing key.
 func AndroidAppCertificateFactory() android.Module {
 	module := &AndroidAppCertificate{}
 	module.AddProperties(&module.properties)

@@ -61,11 +61,13 @@ bootstrap_go_package {
         "android/prebuilt_etc.go",
         "android/proto.go",
         "android/register.go",
+        "android/rule_builder.go",
         "android/sh_binary.go",
         "android/singleton.go",
         "android/testing.go",
         "android/util.go",
         "android/variable.go",
+        "android/vts_config.go",
         "android/writedocs.go",
 
         // Lock down environment access last
@@ -77,11 +79,14 @@ bootstrap_go_package {
         "android/expand_test.go",
         "android/namespace_test.go",
         "android/neverallow_test.go",
+        "android/onceper_test.go",
         "android/paths_test.go",
         "android/prebuilt_test.go",
         "android/prebuilt_etc_test.go",
+        "android/rule_builder_test.go",
         "android/util_test.go",
         "android/variable_test.go",
+        "android/vts_config_test.go",
     ],
 }
 
@@ -145,6 +150,7 @@ bootstrap_go_package {
         "cc/sabi.go",
         "cc/stl.go",
         "cc/strip.go",
+        "cc/sysprop.go",
         "cc/tidy.go",
         "cc/util.go",
         "cc/vndk.go",
@@ -175,6 +181,8 @@ bootstrap_go_package {
         "cc/genrule.go",
 
         "cc/vendor_public_library.go",
+
+        "cc/testing.go",
     ],
     testSrcs: [
         "cc/cc_test.go",
@@ -244,10 +252,13 @@ bootstrap_go_package {
         "java/builder.go",
         "java/dex.go",
         "java/dexpreopt.go",
+        "java/dexpreopt_bootjars.go",
+        "java/dexpreopt_config.go",
         "java/droiddoc.go",
         "java/gen.go",
         "java/genrule.go",
         "java/hiddenapi.go",
+        "java/hiddenapi_singleton.go",
         "java/jacoco.go",
         "java/java.go",
         "java/jdeps.go",
@@ -260,6 +271,7 @@ bootstrap_go_package {
         "java/sdk_library.go",
         "java/support_libraries.go",
         "java/system_modules.go",
+        "java/testing.go",
     ],
     testSrcs: [
         "java/app_test.go",
@@ -370,6 +382,25 @@ bootstrap_go_package {
     ],
     testSrcs: [
         "apex/apex_test.go",
+    ],
+    pluginFor: ["soong_build"],
+}
+
+bootstrap_go_package {
+    name: "soong-sysprop",
+    pkgPath: "android/soong/sysprop",
+    deps: [
+        "blueprint",
+        "soong",
+        "soong-android",
+        "soong-cc",
+        "soong-java",
+    ],
+    srcs: [
+        "sysprop/sysprop_library.go",
+    ],
+    testSrcs: [
+        "sysprop/sysprop_test.go",
     ],
     pluginFor: ["soong_build"],
 }
