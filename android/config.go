@@ -475,8 +475,12 @@ func (c *config) DeviceName() string {
 	return *c.productVariables.DeviceName
 }
 
-func (c *config) ResourceOverlays() []string {
-	return c.productVariables.ResourceOverlays
+func (c *config) DeviceResourceOverlays() []string {
+	return c.productVariables.DeviceResourceOverlays
+}
+
+func (c *config) ProductResourceOverlays() []string {
+	return c.productVariables.ProductResourceOverlays
 }
 
 func (c *config) PlatformVersionName() string {
@@ -581,7 +585,7 @@ func (c *config) ApexKeyDir(ctx ModuleContext) SourcePath {
 	if defaultCert == "" || filepath.Dir(defaultCert) == "build/target/product/security" {
 		// When defaultCert is unset or is set to the testkeys path, use the APEX keys
 		// that is under the module dir
-		return PathForModuleSrc(ctx).SourcePath
+		return pathForModuleSrc(ctx)
 	} else {
 		// If not, APEX keys are under the specified directory
 		return PathForSource(ctx, filepath.Dir(defaultCert))
@@ -818,6 +822,10 @@ func (c *deviceConfig) ExtraVndkVersions() []string {
 	return c.config.productVariables.ExtraVndkVersions
 }
 
+func (c *deviceConfig) VndkUseCoreVariant() bool {
+	return Bool(c.config.productVariables.VndkUseCoreVariant)
+}
+
 func (c *deviceConfig) SystemSdkVersions() []string {
 	return c.config.productVariables.DeviceSystemSdkVersions
 }
@@ -862,7 +870,7 @@ func (c *deviceConfig) NativeCoverageEnabled() bool {
 func (c *deviceConfig) CoverageEnabledForPath(path string) bool {
 	coverage := false
 	if c.config.productVariables.CoveragePaths != nil {
-		if PrefixInList(path, c.config.productVariables.CoveragePaths) {
+		if InList("*", c.config.productVariables.CoveragePaths) || PrefixInList(path, c.config.productVariables.CoveragePaths) {
 			coverage = true
 		}
 	}
