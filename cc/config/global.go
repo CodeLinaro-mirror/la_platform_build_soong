@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 
@@ -182,6 +183,7 @@ func init() {
 			"hardware/libhardware/include",
 			"hardware/libhardware_legacy/include",
 			"hardware/ril/include",
+			"libnativehelper/include",
 			"frameworks/native/include",
 			"frameworks/native/opengl/include",
 			"frameworks/av/include",
@@ -248,6 +250,7 @@ func setSdclangVars() {
 	sdclangFlags2 := ""
 
 	product := android.SdclangEnv["TARGET_PRODUCT"]
+	androidRoot := android.SdclangEnv["TOP"]
 	aeConfigPath := android.SdclangEnv["SDCLANG_AE_CONFIG"]
 	sdclangConfigPath := android.SdclangEnv["SDCLANG_CONFIG"]
 
@@ -256,7 +259,8 @@ func setSdclangVars() {
 	}
 
 	// Load AE config file and set AE flag
-	if file, err := os.Open(aeConfigPath); err == nil {
+	aeConfigFile := path.Join(androidRoot, aeConfigPath)
+	if file, err := os.Open(aeConfigFile); err == nil {
 		decoder := json.NewDecoder(file)
 		aeConfig := sdclangAEConfig{}
 		if err := decoder.Decode(&aeConfig); err == nil {
@@ -267,8 +271,9 @@ func setSdclangVars() {
 	}
 
 	// Load SD Clang config file and set SD Clang variables
+	sdclangConfigFile := path.Join(androidRoot, sdclangConfigPath)
 	var sdclangConfig interface{}
-	if file, err := os.Open(sdclangConfigPath); err == nil {
+	if file, err := os.Open(sdclangConfigFile); err == nil {
 		decoder := json.NewDecoder(file)
                 // Parse the config file
 		if err := decoder.Decode(&sdclangConfig); err == nil {
