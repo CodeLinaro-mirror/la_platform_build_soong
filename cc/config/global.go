@@ -124,6 +124,7 @@ var (
 	NdkMaxPrebuiltVersionInt = 27
 
 	SDClang                  = false
+        SDClangPath              = ""
 
 	// prebuilts/clang default settings.
 	ClangDefaultBase         = "prebuilts/clang/host"
@@ -383,6 +384,7 @@ func setSdclangVars() {
 		}
 		return sdclangAEFlag + " " + sdclangFlags2
 	})
+        SDClangPath = sdclangPath
 }
 
 var HostPrebuiltTag = pctx.VariableConfigMethod("HostPrebuiltTag", android.Config.PrebuiltOS)
