@@ -41,19 +41,10 @@ var (
 		"services",
 		"android.car",
 		"android.car7",
+		"conscrypt",
 		"core-oj",
 		"core-libart",
 		"updatable-media",
-	}
-
-	ManifestMergerClasspath = []string{
-		"prebuilts/gradle-plugin/com/android/tools/build/manifest-merger/26.1.0/manifest-merger-26.1.0.jar",
-		"prebuilts/gradle-plugin/com/android/tools/common/26.1.0/common-26.1.0.jar",
-		"prebuilts/gradle-plugin/com/android/tools/sdk-common/26.1.0/sdk-common-26.1.0.jar",
-		"prebuilts/gradle-plugin/com/android/tools/sdklib/26.1.0/sdklib-26.1.0.jar",
-		"prebuilts/gradle-plugin/org/jetbrains/kotlin/kotlin-runtime/1.0.5/kotlin-runtime-1.0.5.jar",
-		"prebuilts/gradle-plugin/org/jetbrains/kotlin/kotlin-stdlib/1.1.3/kotlin-stdlib-1.1.3.jar",
-		"prebuilts/misc/common/guava/guava-21.0.jar",
 	}
 )
 
@@ -62,6 +53,7 @@ func init() {
 
 	pctx.StaticVariable("JavacHeapSize", "2048M")
 	pctx.StaticVariable("JavacHeapFlags", "-J-Xmx${JavacHeapSize}")
+	pctx.StaticVariable("DexFlags", "-JXX:+TieredCompilation -JXX:TieredStopAtLevel=1")
 
 	pctx.StaticVariable("CommonJdkFlags", strings.Join([]string{
 		`-Xmaxerrs 9999999`,
@@ -100,6 +92,7 @@ func init() {
 	pctx.SourcePathVariable("GenKotlinBuildFileCmd", "build/soong/scripts/gen-kotlin-build-file.sh")
 
 	pctx.SourcePathVariable("JarArgsCmd", "build/soong/scripts/jar-args.sh")
+	pctx.SourcePathVariable("PackageCheckCmd", "build/soong/scripts/package-check.sh")
 	pctx.HostBinToolVariable("ExtractJarPackagesCmd", "extract_jar_packages")
 	pctx.HostBinToolVariable("SoongZipCmd", "soong_zip")
 	pctx.HostBinToolVariable("MergeZipsCmd", "merge_zips")
@@ -108,6 +101,7 @@ func init() {
 	pctx.HostBinToolVariable("ApiCheckCmd", "apicheck")
 	pctx.HostBinToolVariable("D8Cmd", "d8")
 	pctx.HostBinToolVariable("R8Cmd", "r8-compat-proguard")
+	pctx.HostBinToolVariable("HiddenAPICmd", "hiddenapi")
 
 	pctx.VariableFunc("TurbineJar", func(ctx android.PackageVarContext) string {
 		turbine := "turbine.jar"
@@ -151,8 +145,7 @@ func init() {
 
 	pctx.SourcePathVariable("ManifestFixerCmd", "build/soong/scripts/manifest_fixer.py")
 
-	pctx.SourcePathsVariable("ManifestMergerJars", " ", ManifestMergerClasspath...)
-	pctx.SourcePathsVariable("ManifestMergerClasspath", ":", ManifestMergerClasspath...)
+	pctx.HostBinToolVariable("ManifestMergerCmd", "manifest-merger")
 
 	pctx.HostBinToolVariable("ZipAlign", "zipalign")
 

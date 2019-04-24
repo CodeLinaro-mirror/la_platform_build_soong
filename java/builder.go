@@ -113,6 +113,15 @@ var (
 		},
 		"rulesFile")
 
+	packageCheck = pctx.AndroidStaticRule("packageCheck",
+		blueprint.RuleParams{
+			Command: "rm -f $out && " +
+				"${config.PackageCheckCmd} $in $packages && " +
+				"touch $out",
+			CommandDeps: []string{"${config.PackageCheckCmd}"},
+		},
+		"packages")
+
 	jetifier = pctx.AndroidStaticRule("jetifier",
 		blueprint.RuleParams{
 			Command:     "${config.JavaCmd} -jar ${config.JetifierJar} -l error -o $out -i $in",
@@ -122,8 +131,8 @@ var (
 
 	zipalign = pctx.AndroidStaticRule("zipalign",
 		blueprint.RuleParams{
-			Command: "if ! ${config.ZipAlign} -c 4 $in > /dev/null; then " +
-				"${config.ZipAlign} -f 4 $in $out; " +
+			Command: "if ! ${config.ZipAlign} -c -p 4 $in > /dev/null; then " +
+				"${config.ZipAlign} -f -p 4 $in $out; " +
 				"else " +
 				"cp -f $in $out; " +
 				"fi",
@@ -153,10 +162,7 @@ type javaBuilderFlags struct {
 	kotlincFlags     string
 	kotlincClasspath classpath
 
-	protoFlags       []string
-	protoOutTypeFlag string // The flag itself: --java_out
-	protoOutParams   string // Parameters to that flag: --java_out=$protoOutParams:$outDir
-	protoRoot        bool
+	proto android.ProtoFlags
 }
 
 func TransformJavaToClasses(ctx android.ModuleContext, outputFile android.WritablePath, shardIdx int,
@@ -300,7 +306,7 @@ func TransformResourcesToJar(ctx android.ModuleContext, outputFile android.Writa
 		Output:      outputFile,
 		Implicits:   deps,
 		Args: map[string]string{
-			"jarArgs": strings.Join(proptools.NinjaAndShellEscape(jarArgs), " "),
+			"jarArgs": strings.Join(proptools.NinjaAndShellEscapeList(jarArgs), " "),
 		},
 	})
 }
@@ -355,6 +361,19 @@ func TransformJarJar(ctx android.ModuleContext, outputFile android.WritablePath,
 		Implicit:    rulesFile,
 		Args: map[string]string{
 			"rulesFile": rulesFile.String(),
+		},
+	})
+}
+
+func CheckJarPackages(ctx android.ModuleContext, outputFile android.WritablePath,
+	classesJar android.Path, permittedPackages []string) {
+	ctx.Build(pctx, android.BuildParams{
+		Rule:        packageCheck,
+		Description: "packageCheck",
+		Output:      outputFile,
+		Input:       classesJar,
+		Args: map[string]string{
+			"packages": strings.Join(permittedPackages, " "),
 		},
 	})
 }

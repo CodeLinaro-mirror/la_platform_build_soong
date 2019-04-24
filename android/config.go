@@ -200,12 +200,14 @@ func saveToConfigFile(config jsonConfigurable, filename string) error {
 func TestConfig(buildDir string, env map[string]string) Config {
 	config := &config{
 		productVariables: productVariables{
-			DeviceName:           stringPtr("test_device"),
-			Platform_sdk_version: intPtr(26),
-			AAPTConfig:           &[]string{"normal", "large", "xlarge", "hdpi", "xhdpi", "xxhdpi"},
-			AAPTPreferredConfig:  stringPtr("xhdpi"),
-			AAPTCharacteristics:  stringPtr("nosdcard"),
-			AAPTPrebuiltDPI:      &[]string{"xhdpi", "xxhdpi"},
+			DeviceName:                  stringPtr("test_device"),
+			Platform_sdk_version:        intPtr(26),
+			DeviceSystemSdkVersions:     []string{"14", "15"},
+			Platform_systemsdk_versions: []string{"25", "26"},
+			AAPTConfig:                  []string{"normal", "large", "xlarge", "hdpi", "xhdpi", "xxhdpi"},
+			AAPTPreferredConfig:         stringPtr("xhdpi"),
+			AAPTCharacteristics:         stringPtr("nosdcard"),
+			AAPTPrebuiltDPI:             []string{"xhdpi", "xxhdpi"},
 		},
 
 		buildDir:     buildDir,
@@ -475,11 +477,12 @@ func (c *config) DeviceName() string {
 	return *c.productVariables.DeviceName
 }
 
-func (c *config) ResourceOverlays() []string {
-	if c.productVariables.ResourceOverlays == nil {
-		return nil
-	}
-	return *c.productVariables.ResourceOverlays
+func (c *config) DeviceResourceOverlays() []string {
+	return c.productVariables.DeviceResourceOverlays
+}
+
+func (c *config) ProductResourceOverlays() []string {
+	return c.productVariables.ProductResourceOverlays
 }
 
 func (c *config) PlatformVersionName() string {
@@ -544,7 +547,7 @@ func (c *config) PlatformVersionCombinedCodenames() []string {
 }
 
 func (c *config) ProductAAPTConfig() []string {
-	return stringSlice(c.productVariables.AAPTConfig)
+	return c.productVariables.AAPTConfig
 }
 
 func (c *config) ProductAAPTPreferredConfig() string {
@@ -556,7 +559,7 @@ func (c *config) ProductAAPTCharacteristics() string {
 }
 
 func (c *config) ProductAAPTPrebuiltDPI() []string {
-	return stringSlice(c.productVariables.AAPTPrebuiltDPI)
+	return c.productVariables.AAPTPrebuiltDPI
 }
 
 func (c *config) DefaultAppCertificateDir(ctx PathContext) SourcePath {
@@ -584,7 +587,7 @@ func (c *config) ApexKeyDir(ctx ModuleContext) SourcePath {
 	if defaultCert == "" || filepath.Dir(defaultCert) == "build/target/product/security" {
 		// When defaultCert is unset or is set to the testkeys path, use the APEX keys
 		// that is under the module dir
-		return PathForModuleSrc(ctx).SourcePath
+		return pathForModuleSrc(ctx)
 	} else {
 		// If not, APEX keys are under the specified directory
 		return PathForSource(ctx, filepath.Dir(defaultCert))
@@ -668,6 +671,10 @@ func (c *config) EnableCFI() bool {
 	}
 }
 
+func (c *config) DisableScudo() bool {
+	return Bool(c.productVariables.DisableScudo)
+}
+
 func (c *config) EnableXOM() bool {
 	if c.productVariables.EnableXOM == nil {
 		return true
@@ -734,10 +741,10 @@ func (c *config) ArtUseReadBarrier() bool {
 func (c *config) EnforceRROForModule(name string) bool {
 	enforceList := c.productVariables.EnforceRROTargets
 	if enforceList != nil {
-		if len(*enforceList) == 1 && (*enforceList)[0] == "*" {
+		if len(enforceList) == 1 && (enforceList)[0] == "*" {
 			return true
 		}
-		return InList(name, *enforceList)
+		return InList(name, enforceList)
 	}
 	return false
 }
@@ -745,7 +752,7 @@ func (c *config) EnforceRROForModule(name string) bool {
 func (c *config) EnforceRROExcludedOverlay(path string) bool {
 	excluded := c.productVariables.EnforceRROExcludedOverlays
 	if excluded != nil {
-		for _, exclude := range *excluded {
+		for _, exclude := range excluded {
 			if strings.HasPrefix(path, exclude) {
 				return true
 			}
@@ -774,20 +781,8 @@ func (c *config) BootJars() []string {
 	return c.productVariables.BootJars
 }
 
-func (c *config) PreoptBootJars() []string {
-	return c.productVariables.PreoptBootJars
-}
-
-func (c *config) DisableDexPreopt(name string) bool {
-	return Bool(c.productVariables.DisableDexPreopt) || InList(name, c.productVariables.DisableDexPreoptModules)
-}
-
 func (c *config) DexpreoptGlobalConfig() string {
 	return String(c.productVariables.DexpreoptGlobalConfig)
-}
-
-func (c *config) DexPreoptProfileDir() string {
-	return String(c.productVariables.DexPreoptProfileDir)
 }
 
 func (c *config) FrameworksBaseDirExists(ctx PathContext) bool {
@@ -829,11 +824,12 @@ func (c *deviceConfig) ExtraVndkVersions() []string {
 	return c.config.productVariables.ExtraVndkVersions
 }
 
+func (c *deviceConfig) VndkUseCoreVariant() bool {
+	return Bool(c.config.productVariables.VndkUseCoreVariant)
+}
+
 func (c *deviceConfig) SystemSdkVersions() []string {
-	if c.config.productVariables.DeviceSystemSdkVersions == nil {
-		return nil
-	}
-	return *c.config.productVariables.DeviceSystemSdkVersions
+	return c.config.productVariables.DeviceSystemSdkVersions
 }
 
 func (c *deviceConfig) PlatformSystemSdkVersions() []string {
@@ -876,12 +872,12 @@ func (c *deviceConfig) NativeCoverageEnabled() bool {
 func (c *deviceConfig) CoverageEnabledForPath(path string) bool {
 	coverage := false
 	if c.config.productVariables.CoveragePaths != nil {
-		if PrefixInList(path, *c.config.productVariables.CoveragePaths) {
+		if InList("*", c.config.productVariables.CoveragePaths) || PrefixInList(path, c.config.productVariables.CoveragePaths) {
 			coverage = true
 		}
 	}
 	if coverage && c.config.productVariables.CoverageExcludePaths != nil {
-		if PrefixInList(path, *c.config.productVariables.CoverageExcludePaths) {
+		if PrefixInList(path, c.config.productVariables.CoverageExcludePaths) {
 			coverage = false
 		}
 	}
@@ -946,6 +942,8 @@ func findOverrideValue(overrides []string, name string, errorMsg string) (newVal
 	return "", false
 }
 
+// SecondArchIsTranslated returns true if the primary device arch is X86 or X86_64 and the device also has an arch
+// that is Arm or Arm64.
 func (c *config) SecondArchIsTranslated() bool {
 	deviceTargets := c.Targets[Android]
 	if len(deviceTargets) < 2 {
@@ -954,36 +952,35 @@ func (c *config) SecondArchIsTranslated() bool {
 
 	arch := deviceTargets[0].Arch
 
-	return (arch.ArchType == X86 || arch.ArchType == X86_64) &&
-		(hasArmAbi(arch) || hasArmAndroidArch(deviceTargets))
+	return (arch.ArchType == X86 || arch.ArchType == X86_64) && hasArmAndroidArch(deviceTargets)
 }
 
 func (c *config) IntegerOverflowDisabledForPath(path string) bool {
 	if c.productVariables.IntegerOverflowExcludePaths == nil {
 		return false
 	}
-	return PrefixInList(path, *c.productVariables.IntegerOverflowExcludePaths)
+	return PrefixInList(path, c.productVariables.IntegerOverflowExcludePaths)
 }
 
 func (c *config) CFIDisabledForPath(path string) bool {
 	if c.productVariables.CFIExcludePaths == nil {
 		return false
 	}
-	return PrefixInList(path, *c.productVariables.CFIExcludePaths)
+	return PrefixInList(path, c.productVariables.CFIExcludePaths)
 }
 
 func (c *config) CFIEnabledForPath(path string) bool {
 	if c.productVariables.CFIIncludePaths == nil {
 		return false
 	}
-	return PrefixInList(path, *c.productVariables.CFIIncludePaths)
+	return PrefixInList(path, c.productVariables.CFIIncludePaths)
 }
 
 func (c *config) XOMDisabledForPath(path string) bool {
 	if c.productVariables.XOMExcludePaths == nil {
 		return false
 	}
-	return PrefixInList(path, *c.productVariables.XOMExcludePaths)
+	return PrefixInList(path, c.productVariables.XOMExcludePaths)
 }
 
 func (c *config) VendorConfig(name string) VendorConfig {
@@ -1024,22 +1021,14 @@ func (c *config) EnforceSystemCertificateWhitelist() []string {
 	return c.productVariables.EnforceSystemCertificateWhitelist
 }
 
-func (c *config) HiddenAPIStubFlags() string {
-	return String(c.productVariables.HiddenAPIStubFlags)
+func (c *config) ProductHiddenAPIStubs() []string {
+	return c.productVariables.ProductHiddenAPIStubs
 }
 
-func (c *config) HiddenAPIFlags() string {
-	return String(c.productVariables.HiddenAPIFlags)
+func (c *config) ProductHiddenAPIStubsSystem() []string {
+	return c.productVariables.ProductHiddenAPIStubsSystem
 }
 
-func (c *config) HiddenAPIExtraAppUsageJars() []string {
-	return c.productVariables.HiddenAPIExtraAppUsageJars
-}
-
-func stringSlice(s *[]string) []string {
-	if s != nil {
-		return *s
-	} else {
-		return nil
-	}
+func (c *config) ProductHiddenAPIStubsTest() []string {
+	return c.productVariables.ProductHiddenAPIStubsTest
 }

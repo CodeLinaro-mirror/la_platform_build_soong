@@ -148,6 +148,28 @@ var neverallowTests = []struct {
 		},
 		expectedError: "Only core libraries projects can depend on core-libart",
 	},
+	{
+		name: "dependency on updatable-media",
+		fs: map[string][]byte{
+			"Blueprints": []byte(`
+				java_library {
+					name: "needs_updatable_media",
+					libs: ["updatable-media"],
+				}`),
+		},
+		expectedError: "updatable-media includes private APIs. Use updatable_media_stubs instead.",
+	},
+	{
+		name: "java_device_for_host",
+		fs: map[string][]byte{
+			"Blueprints": []byte(`
+				java_device_for_host {
+					name: "device_for_host",
+					libs: ["core-libart"],
+				}`),
+		},
+		expectedError: "java_device_for_host can only be used in whitelisted projects",
+	},
 }
 
 func TestNeverallow(t *testing.T) {
@@ -176,6 +198,7 @@ func testNeverallow(t *testing.T, config Config, fs map[string][]byte) (*TestCon
 	ctx := NewTestContext()
 	ctx.RegisterModuleType("cc_library", ModuleFactoryAdaptor(newMockCcLibraryModule))
 	ctx.RegisterModuleType("java_library", ModuleFactoryAdaptor(newMockJavaLibraryModule))
+	ctx.RegisterModuleType("java_device_for_host", ModuleFactoryAdaptor(newMockJavaLibraryModule))
 	ctx.PostDepsMutators(registerNeverallowMutator)
 	ctx.Register()
 
@@ -222,9 +245,6 @@ func newMockCcLibraryModule() Module {
 	return m
 }
 
-func (p *mockCcLibraryModule) DepsMutator(ctx BottomUpMutatorContext) {
-}
-
 func (p *mockCcLibraryModule) GenerateAndroidBuildActions(ModuleContext) {
 }
 
@@ -242,9 +262,6 @@ func newMockJavaLibraryModule() Module {
 	m.AddProperties(&m.properties)
 	InitAndroidModule(m)
 	return m
-}
-
-func (p *mockJavaLibraryModule) DepsMutator(ctx BottomUpMutatorContext) {
 }
 
 func (p *mockJavaLibraryModule) GenerateAndroidBuildActions(ModuleContext) {

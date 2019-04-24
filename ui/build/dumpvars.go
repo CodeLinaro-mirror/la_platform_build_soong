@@ -203,9 +203,14 @@ func runMakeProductConfig(ctx Context, config Config) {
 		// Used to turn on --werror_ options in Kati
 		"BUILD_BROKEN_PHONY_TARGETS",
 
+		// Whether to enable the network during the build
+		"BUILD_BROKEN_USES_NETWORK",
+
 		// Not used, but useful to be in the soong.log
+		"BOARD_VNDK_VERSION",
 		"BUILD_BROKEN_ANDROIDMK_EXPORTS",
 		"BUILD_BROKEN_DUP_COPY_HEADERS",
+		"BUILD_BROKEN_ENG_DEBUG_TAGS",
 	}, exportEnvVars...), BannerVars...)
 
 	make_vars, err := dumpMakeVars(ctx, config, config.Arguments(), allVars, true)
@@ -213,11 +218,13 @@ func runMakeProductConfig(ctx Context, config Config) {
 		ctx.Fatalln("Error dumping make vars:", err)
 	}
 
+	env := config.Environment()
 	// Print the banner like make does
-	ctx.Writer.Print(Banner(make_vars))
+	if !env.IsEnvTrue("ANDROID_QUIET_BUILD") {
+		ctx.Writer.Print(Banner(make_vars))
+	}
 
 	// Populate the environment
-	env := config.Environment()
 	for _, name := range exportEnvVars {
 		if make_vars[name] == "" {
 			env.Unset(name)
@@ -234,4 +241,5 @@ func runMakeProductConfig(ctx Context, config Config) {
 	config.SetPdkBuild(make_vars["TARGET_BUILD_PDK"] == "true")
 	config.SetBuildBrokenDupRules(make_vars["BUILD_BROKEN_DUP_RULES"] == "true")
 	config.SetBuildBrokenPhonyTargets(make_vars["BUILD_BROKEN_PHONY_TARGETS"] == "true")
+	config.SetBuildBrokenUsesNetwork(make_vars["BUILD_BROKEN_USES_NETWORK"] == "true")
 }

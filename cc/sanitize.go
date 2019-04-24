@@ -35,7 +35,12 @@ var (
 	asanLdflags = []string{"-Wl,-u,__asan_preinit"}
 	asanLibs    = []string{"libasan"}
 
-	hwasanCflags = []string{"-fno-omit-frame-pointer", "-Wno-frame-larger-than=", "-mllvm", "-hwasan-create-frame-descriptions=0"}
+	// TODO(pcc): Stop passing -hwasan-allow-ifunc here once it has been made
+	// the default.
+	hwasanCflags = []string{"-fno-omit-frame-pointer", "-Wno-frame-larger-than=",
+		"-mllvm", "-hwasan-create-frame-descriptions=0",
+		"-mllvm", "-hwasan-allow-ifunc",
+		"-fsanitize-hwaddress-abi=platform"}
 
 	cfiCflags = []string{"-flto", "-fsanitize-cfi-cross-dso",
 		"-fsanitize-blacklist=external/compiler-rt/lib/cfi/cfi_blacklist.txt"}
@@ -50,12 +55,7 @@ var (
 
 	intOverflowCflags = []string{"-fsanitize-blacklist=build/soong/cc/config/integer_overflow_blacklist.txt"}
 
-	// Pass -Xclang before -fsanitize-minimal-runtime to work around a driver
-	// check which rejects -fsanitize-minimal-runtime together with
-	// -fsanitize=shadow-call-stack even though this combination of flags
-	// is valid.
-	// TODO(pcc): Remove the -Xclang once LLVM r346526 is rolled into the compiler.
-	minimalRuntimeFlags = []string{"-Xclang", "-fsanitize-minimal-runtime", "-fno-sanitize-trap=integer,undefined",
+	minimalRuntimeFlags = []string{"-fsanitize-minimal-runtime", "-fno-sanitize-trap=integer,undefined",
 		"-fno-sanitize-recover=integer,undefined"}
 	hwasanGlobalOptions = []string{"heap_history_size=1023,stack_history_size=512"}
 )
@@ -312,10 +312,7 @@ func (sanitize *sanitize) begin(ctx BaseModuleContext) {
 	}
 
 	// SCS is only implemented on AArch64.
-	// We also disable SCS if ASAN, TSAN or HWASAN are enabled because Clang considers
-	// them to be incompatible, although they are in fact compatible.
-	// TODO(pcc): Remove these checks once r347282 is rolled into the compiler.
-	if ctx.Arch().ArchType != android.Arm64 || Bool(s.Address) || Bool(s.Thread) || Bool(s.Hwaddress) {
+	if ctx.Arch().ArchType != android.Arm64 {
 		s.Scs = nil
 	}
 
@@ -370,8 +367,8 @@ func (sanitize *sanitize) begin(ctx BaseModuleContext) {
 		sanitize.Properties.SanitizerEnabled = true
 	}
 
-	// Disable Scudo if ASan or TSan is enabled.
-	if Bool(s.Address) || Bool(s.Thread) || Bool(s.Hwaddress) {
+	// Disable Scudo if ASan or TSan is enabled, or if it's disabled globally.
+	if Bool(s.Address) || Bool(s.Thread) || Bool(s.Hwaddress) || ctx.Config().DisableScudo() {
 		s.Scudo = nil
 	}
 
@@ -667,6 +664,14 @@ func sanitizerDepsMutator(t sanitizerType) func(android.TopDownMutatorContext) {
 				}
 				return true
 			})
+		} else if sanitizeable, ok := mctx.Module().(Sanitizeable); ok {
+			// If an APEX module includes a lib which is enabled for a sanitizer T, then
+			// the APEX module is also enabled for the same sanitizer type.
+			mctx.VisitDirectDeps(func(child android.Module) {
+				if c, ok := child.(*Module); ok && c.sanitize.isSanitizerEnabled(t) {
+					sanitizeable.EnableSanitizer(t.name())
+				}
+			})
 		}
 	}
 }
@@ -849,6 +854,7 @@ func sanitizerRuntimeMutator(mctx android.BottomUpMutatorContext) {
 type Sanitizeable interface {
 	android.Module
 	IsSanitizerEnabled(ctx android.BaseModuleContext, sanitizerName string) bool
+	EnableSanitizer(sanitizerName string)
 }
 
 // Create sanitized variants for modules that need them
@@ -959,20 +965,26 @@ func sanitizerMutator(t sanitizerType) func(android.BottomUpMutatorContext) {
 	}
 }
 
+var cfiStaticLibsKey = android.NewOnceKey("cfiStaticLibs")
+
 func cfiStaticLibs(config android.Config) *[]string {
-	return config.Once("cfiStaticLibs", func() interface{} {
+	return config.Once(cfiStaticLibsKey, func() interface{} {
 		return &[]string{}
 	}).(*[]string)
 }
+
+var hwasanStaticLibsKey = android.NewOnceKey("hwasanStaticLibs")
 
 func hwasanStaticLibs(config android.Config) *[]string {
-	return config.Once("hwasanStaticLibs", func() interface{} {
+	return config.Once(hwasanStaticLibsKey, func() interface{} {
 		return &[]string{}
 	}).(*[]string)
 }
 
+var hwasanVendorStaticLibsKey = android.NewOnceKey("hwasanVendorStaticLibs")
+
 func hwasanVendorStaticLibs(config android.Config) *[]string {
-	return config.Once("hwasanVendorStaticLibs", func() interface{} {
+	return config.Once(hwasanVendorStaticLibsKey, func() interface{} {
 		return &[]string{}
 	}).(*[]string)
 }

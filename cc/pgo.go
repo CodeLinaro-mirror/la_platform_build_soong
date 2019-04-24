@@ -27,8 +27,11 @@ import (
 
 var (
 	// Add flags to ignore warnings that profiles are old or missing for
-	// some functions
-	profileUseOtherFlags = []string{"-Wno-backend-plugin"}
+	// some functions, and turn on the experimental new pass manager.
+	profileUseOtherFlags = []string{
+		"-Wno-backend-plugin",
+		"-fexperimental-new-pass-manager",
+	}
 
 	globalPgoProfileProjects = []string{
 		"toolchain/pgo-profiles",
@@ -36,7 +39,8 @@ var (
 	}
 )
 
-const pgoProfileProjectsConfigKey = "PgoProfileProjects"
+var pgoProfileProjectsConfigKey = android.NewOnceKey("PgoProfileProjects")
+
 const profileInstrumentFlag = "-fprofile-generate=/data/local/tmp"
 const profileSamplingFlag = "-gline-tables-only"
 const profileUseInstrumentFormat = "-fprofile-use=%s"
@@ -49,7 +53,7 @@ func getPgoProfileProjects(config android.DeviceConfig) []string {
 }
 
 func recordMissingProfileFile(ctx BaseModuleContext, missing string) {
-	getNamedMapForConfig(ctx.Config(), modulesMissingProfileFile).Store(missing, true)
+	getNamedMapForConfig(ctx.Config(), modulesMissingProfileFileKey).Store(missing, true)
 }
 
 type PgoProperties struct {

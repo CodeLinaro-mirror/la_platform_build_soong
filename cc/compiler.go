@@ -31,11 +31,11 @@ type BaseCompilerProperties struct {
 	// list of source files used to compile the C/C++ module.  May be .c, .cpp, or .S files.
 	// srcs may reference the outputs of other modules that produce source files like genrule
 	// or filegroup using the syntax ":module".
-	Srcs []string `android:"arch_variant"`
+	Srcs []string `android:"path,arch_variant"`
 
 	// list of source files that should not be used to build the C/C++ module.
 	// This is most useful in the arch/multilib variants to remove non-common files
-	Exclude_srcs []string `android:"arch_variant"`
+	Exclude_srcs []string `android:"path,arch_variant"`
 
 	// list of module-specific flags that will be used for C and C++ compiles.
 	Cflags []string `android:"arch_variant"`
@@ -136,11 +136,11 @@ type BaseCompilerProperties struct {
 		Vendor struct {
 			// list of source files that should only be used in the
 			// vendor variant of the C/C++ module.
-			Srcs []string
+			Srcs []string `android:"path"`
 
 			// list of source files that should not be used to
 			// build the vendor variant of the C/C++ module.
-			Exclude_srcs []string
+			Exclude_srcs []string `android:"path"`
 
 			// List of additional cflags that should be used to build the vendor
 			// variant of the C/C++ module.
@@ -149,11 +149,11 @@ type BaseCompilerProperties struct {
 		Recovery struct {
 			// list of source files that should only be used in the
 			// recovery variant of the C/C++ module.
-			Srcs []string
+			Srcs []string `android:"path"`
 
 			// list of source files that should not be used to
 			// build the recovery variant of the C/C++ module.
-			Exclude_srcs []string
+			Exclude_srcs []string `android:"path"`
 
 			// List of additional cflags that should be used to build the recovery
 			// variant of the C/C++ module.
@@ -221,15 +221,14 @@ func (compiler *baseCompiler) compilerDeps(ctx DepsContext, deps Deps) Deps {
 	deps.GeneratedSources = append(deps.GeneratedSources, compiler.Properties.Generated_sources...)
 	deps.GeneratedHeaders = append(deps.GeneratedHeaders, compiler.Properties.Generated_headers...)
 
-	android.ExtractSourcesDeps(ctx, compiler.Properties.Srcs)
-	android.ExtractSourcesDeps(ctx, compiler.Properties.Exclude_srcs)
-
+	android.ProtoDeps(ctx, &compiler.Proto)
 	if compiler.hasSrcExt(".proto") {
 		deps = protoDeps(ctx, deps, &compiler.Proto, Bool(compiler.Properties.Proto.Static))
 	}
 
 	if compiler.hasSrcExt(".sysprop") {
-		deps.SharedLibs = append(deps.SharedLibs, "libbase")
+		deps.HeaderLibs = append(deps.HeaderLibs, "libbase_headers")
+		deps.SharedLibs = append(deps.SharedLibs, "liblog")
 	}
 
 	if Bool(compiler.Properties.Openmp) {
@@ -250,8 +249,8 @@ func warningsAreAllowed(subdir string) bool {
 	return false
 }
 
-func addToModuleList(ctx ModuleContext, list string, module string) {
-	getNamedMapForConfig(ctx.Config(), list).Store(module, true)
+func addToModuleList(ctx ModuleContext, key android.OnceKey, module string) {
+	getNamedMapForConfig(ctx.Config(), key).Store(module, true)
 }
 
 // Create a Flags struct that collects the compile flags from global values,
@@ -259,7 +258,7 @@ func addToModuleList(ctx ModuleContext, list string, module string) {
 func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps PathDeps) Flags {
 	tc := ctx.toolchain()
 
-	compiler.srcsBeforeGen = ctx.ExpandSources(compiler.Properties.Srcs, compiler.Properties.Exclude_srcs)
+	compiler.srcsBeforeGen = android.PathsForModuleSrcExcludes(ctx, compiler.Properties.Srcs, compiler.Properties.Exclude_srcs)
 	compiler.srcsBeforeGen = append(compiler.srcsBeforeGen, deps.GeneratedSources...)
 
 	CheckBadCompilerFlags(ctx, "cflags", compiler.Properties.Cflags)
@@ -269,7 +268,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 	CheckBadCompilerFlags(ctx, "vendor.cflags", compiler.Properties.Target.Vendor.Cflags)
 	CheckBadCompilerFlags(ctx, "recovery.cflags", compiler.Properties.Target.Recovery.Cflags)
 
-	esc := proptools.NinjaAndShellEscape
+	esc := proptools.NinjaAndShellEscapeList
 
 	flags.CFlags = append(flags.CFlags, esc(compiler.Properties.Cflags)...)
 	flags.CppFlags = append(flags.CppFlags, esc(compiler.Properties.Cppflags)...)
@@ -503,10 +502,10 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 	if len(compiler.Properties.Srcs) > 0 {
 		module := ctx.ModuleDir() + "/Android.bp:" + ctx.ModuleName()
 		if inList("-Wno-error", flags.CFlags) || inList("-Wno-error", flags.CppFlags) {
-			addToModuleList(ctx, modulesUsingWnoError, module)
+			addToModuleList(ctx, modulesUsingWnoErrorKey, module)
 		} else if !inList("-Werror", flags.CFlags) && !inList("-Werror", flags.CppFlags) {
 			if warningsAreAllowed(ctx.ModuleDir()) {
-				addToModuleList(ctx, modulesAddedWall, module)
+				addToModuleList(ctx, modulesAddedWallKey, module)
 				flags.CFlags = append([]string{"-Wall"}, flags.CFlags...)
 			} else {
 				flags.CFlags = append([]string{"-Wall", "-Werror"}, flags.CFlags...)

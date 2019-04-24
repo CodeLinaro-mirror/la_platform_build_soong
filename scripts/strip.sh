@@ -27,7 +27,8 @@
 #   --add-gnu-debuglink
 #   --keep-mini-debug-info
 #   --keep-symbols
-#   --use-llvm-strip
+#   --use-gnu-strip
+#   --remove-build-id
 
 set -o pipefail
 
@@ -40,12 +41,13 @@ Options:
         --add-gnu-debuglink     Add a gnu-debuglink section to out-file
         --keep-mini-debug-info  Keep compressed debug info in out-file
         --keep-symbols          Keep symbols in out-file
-        --use-llvm-strip        Use llvm-{strip,objcopy} instead of strip/objcopy
+        --use-gnu-strip         Use strip/objcopy instead of llvm-{strip,objcopy}
+        --remove-build-id       Remove the gnu build-id section in out-file
 EOF
     exit 1
 }
 
-# With --use-llvm-strip, GNU strip is replaced with llvm-strip to work around
+# Without --use-gnu-strip, GNU strip is replaced with llvm-strip to work around
 # old GNU strip bug on lld output files, b/80093681.
 # Similary, calls to objcopy are replaced with llvm-objcopy,
 # with some exceptions.
@@ -53,7 +55,7 @@ EOF
 do_strip() {
     # ${CROSS_COMPILE}strip --strip-all does not strip .ARM.attributes,
     # so we tell llvm-strip to keep it too.
-    if [ ! -z "${use_llvm_strip}" ]; then
+    if [ -z "${use_gnu_strip}" ]; then
         "${CLANG_BIN}/llvm-strip" --strip-all -keep-section=.ARM.attributes "${infile}" -o "${outfile}.tmp"
     else
         "${CROSS_COMPILE}strip" --strip-all "${infile}" -o "${outfile}.tmp"
@@ -61,10 +63,8 @@ do_strip() {
 }
 
 do_strip_keep_symbols() {
-    # Maybe we should replace this objcopy with llvm-objcopy, but
-    # we have not found a use case that is broken by objcopy yet.
     REMOVE_SECTIONS=`"${CROSS_COMPILE}readelf" -S "${infile}" | awk '/.debug_/ {print "--remove-section " $2}' | xargs`
-    if [ ! -z "${use_llvm_strip}" ]; then
+    if [ -z "${use_gnu_strip}" ]; then
         "${CLANG_BIN}/llvm-objcopy" "${infile}" "${outfile}.tmp" ${REMOVE_SECTIONS}
     else
         "${CROSS_COMPILE}objcopy" "${infile}" "${outfile}.tmp" ${REMOVE_SECTIONS}
@@ -74,7 +74,7 @@ do_strip_keep_symbols() {
 do_strip_keep_mini_debug_info() {
     rm -f "${outfile}.dynsyms" "${outfile}.funcsyms" "${outfile}.keep_symbols" "${outfile}.debug" "${outfile}.mini_debuginfo" "${outfile}.mini_debuginfo.xz"
     local fail=
-    if [ ! -z "${use_llvm_strip}" ]; then
+    if [ -z "${use_gnu_strip}" ]; then
         "${CLANG_BIN}/llvm-strip" --strip-all -keep-section=.ARM.attributes -remove-section=.comment "${infile}" -o "${outfile}.tmp" || fail=true
     else
         "${CROSS_COMPILE}strip" --strip-all -R .comment "${infile}" -o "${outfile}.tmp" || fail=true
@@ -93,7 +93,7 @@ do_strip_keep_mini_debug_info() {
         "${CROSS_COMPILE}objcopy" -S --remove-section .gdb_index --remove-section .comment --keep-symbols="${outfile}.keep_symbols" "${outfile}.mini_debuginfo"
         "${CROSS_COMPILE}objcopy" --rename-section saved_debug_frame=.debug_frame "${outfile}.mini_debuginfo"
         "${XZ}" "${outfile}.mini_debuginfo"
-        if [ ! -z "${use_llvm_strip}" ]; then
+        if [ -z "${use_gnu_strip}" ]; then
             "${CLANG_BIN}/llvm-objcopy" --add-section .gnu_debugdata="${outfile}.mini_debuginfo.xz" "${outfile}.tmp"
         else
             "${CROSS_COMPILE}objcopy" --add-section .gnu_debugdata="${outfile}.mini_debuginfo.xz" "${outfile}.tmp"
@@ -105,11 +105,21 @@ do_strip_keep_mini_debug_info() {
 }
 
 do_add_gnu_debuglink() {
-    if [ ! -z "${use_llvm_strip}" ]; then
+    if [ -z "${use_gnu_strip}" ]; then
         "${CLANG_BIN}/llvm-objcopy" --add-gnu-debuglink="${infile}" "${outfile}.tmp"
     else
         "${CROSS_COMPILE}objcopy" --add-gnu-debuglink="${infile}" "${outfile}.tmp"
     fi
+}
+
+do_remove_build_id() {
+    if [ -z "${use_gnu_strip}" ]; then
+        "${CLANG_BIN}/llvm-strip" -remove-section=.note.gnu.build-id "${outfile}.tmp" -o "${outfile}.tmp.no-build-id"
+    else
+        "${CROSS_COMPILE}strip" --remove-section=.note.gnu.build-id "${outfile}.tmp" -o "${outfile}.tmp.no-build-id"
+    fi
+    rm -f "${outfile}.tmp"
+    mv "${outfile}.tmp.no-build-id" "${outfile}.tmp"
 }
 
 while getopts $OPTSTRING opt; do
@@ -122,7 +132,7 @@ while getopts $OPTSTRING opt; do
 		add-gnu-debuglink) add_gnu_debuglink=true ;;
 		keep-mini-debug-info) keep_mini_debug_info=true ;;
 		keep-symbols) keep_symbols=true ;;
-		use-llvm-strip) use_llvm_strip=true ;;
+		remove-build-id) remove_build_id=true ;;
 		*) echo "Unknown option --${OPTARG}"; usage ;;
 	    esac;;
 	?) usage ;;
@@ -169,10 +179,14 @@ if [ ! -z "${add_gnu_debuglink}" ]; then
     do_add_gnu_debuglink
 fi
 
+if [ ! -z "${remove_build_id}" ]; then
+    do_remove_build_id
+fi
+
 rm -f "${outfile}"
 mv "${outfile}.tmp" "${outfile}"
 
-if [ ! -z "${use_llvm_strip}" ]; then
+if [ -z "${use_gnu_strip}" ]; then
   USED_STRIP_OBJCOPY="${CLANG_BIN}/llvm-strip ${CLANG_BIN}/llvm-objcopy"
 else
   USED_STRIP_OBJCOPY="${CROSS_COMPILE}strip"

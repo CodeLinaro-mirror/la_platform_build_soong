@@ -15,9 +15,7 @@
 package java
 
 import (
-	"sort"
 	"strings"
-	"sync"
 
 	"github.com/google/blueprint"
 
@@ -29,10 +27,79 @@ var hiddenAPIGenerateCSVRule = pctx.AndroidStaticRule("hiddenAPIGenerateCSV", bl
 	CommandDeps: []string{"${config.Class2Greylist}"},
 }, "outFlag", "stubAPIFlags")
 
-func hiddenAPIGenerateCSV(ctx android.ModuleContext, classesJar android.Path) {
-	flagsCSV := android.PathForModuleOut(ctx, "hiddenapi", "flags.csv")
-	metadataCSV := android.PathForModuleOut(ctx, "hiddenapi", "metadata.csv")
-	stubFlagsCSV := &bootImagePath{ctx.Config().HiddenAPIStubFlags()}
+type hiddenAPI struct {
+	flagsCSVPath    android.Path
+	metadataCSVPath android.Path
+	bootDexJarPath  android.Path
+}
+
+func (h *hiddenAPI) flagsCSV() android.Path {
+	return h.flagsCSVPath
+}
+
+func (h *hiddenAPI) metadataCSV() android.Path {
+	return h.metadataCSVPath
+}
+
+func (h *hiddenAPI) bootDexJar() android.Path {
+	return h.bootDexJarPath
+}
+
+type hiddenAPIIntf interface {
+	flagsCSV() android.Path
+	metadataCSV() android.Path
+	bootDexJar() android.Path
+}
+
+var _ hiddenAPIIntf = (*hiddenAPI)(nil)
+
+func (h *hiddenAPI) hiddenAPI(ctx android.ModuleContext, dexJar android.ModuleOutPath, implementationJar android.Path,
+	uncompressDex bool) android.ModuleOutPath {
+
+	if !ctx.Config().IsEnvTrue("UNSAFE_DISABLE_HIDDENAPI_FLAGS") {
+		name := ctx.ModuleName()
+
+		// Modules whose names are of the format <x>-hiddenapi provide hiddenapi information
+		// for the boot jar module <x>. Otherwise, the module provides information for itself.
+		// Either way extract the name of the boot jar module.
+		bootJarName := strings.TrimSuffix(name, "-hiddenapi")
+
+		// If this module is on the boot jars list (or providing information for a module
+		// on the list) then extract the hiddenapi information from it, and if necessary
+		// encode that information in the generated dex file.
+		//
+		// It is important that hiddenapi information is only gathered for/from modules on
+		// that are actually on the boot jars list because the runtime only enforces access
+		// to the hidden API for the bootclassloader. If information is gathered for modules
+		// not on the list then that will cause failures in the CtsHiddenApiBlacklist...
+		// tests.
+		if inList(bootJarName, ctx.Config().BootJars()) {
+			// Derive the greylist from classes jar.
+			flagsCSV := android.PathForModuleOut(ctx, "hiddenapi", "flags.csv")
+			metadataCSV := android.PathForModuleOut(ctx, "hiddenapi", "metadata.csv")
+			hiddenAPIGenerateCSV(ctx, flagsCSV, metadataCSV, implementationJar)
+			h.flagsCSVPath = flagsCSV
+			h.metadataCSVPath = metadataCSV
+
+			// If this module is actually on the boot jars list and not providing
+			// hiddenapi information for a module on the boot jars list then encode
+			// the gathered information in the generated dex file.
+			if name == bootJarName {
+				hiddenAPIJar := android.PathForModuleOut(ctx, "hiddenapi", name+".jar")
+				h.bootDexJarPath = dexJar
+				hiddenAPIEncodeDex(ctx, hiddenAPIJar, dexJar, uncompressDex)
+				dexJar = hiddenAPIJar
+			}
+		}
+	}
+
+	return dexJar
+}
+
+func hiddenAPIGenerateCSV(ctx android.ModuleContext, flagsCSV, metadataCSV android.WritablePath,
+	classesJar android.Path) {
+
+	stubFlagsCSV := hiddenAPISingletonPaths(ctx).stubFlags
 
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        hiddenAPIGenerateCSVRule,
@@ -58,7 +125,6 @@ func hiddenAPIGenerateCSV(ctx android.ModuleContext, classesJar android.Path) {
 		},
 	})
 
-	hiddenAPISaveCSVOutputs(ctx, flagsCSV, metadataCSV)
 }
 
 var hiddenAPIEncodeDexRule = pctx.AndroidStaticRule("hiddenAPIEncodeDex", blueprint.RuleParams{
@@ -77,10 +143,10 @@ var hiddenAPIEncodeDexRule = pctx.AndroidStaticRule("hiddenAPIEncodeDex", bluepr
 	},
 }, "flagsCsv", "hiddenapiFlags", "tmpDir", "soongZipFlags")
 
-func hiddenAPIEncodeDex(ctx android.ModuleContext, output android.WritablePath, dexInput android.WritablePath,
+func hiddenAPIEncodeDex(ctx android.ModuleContext, output android.WritablePath, dexInput android.Path,
 	uncompressDex bool) {
 
-	flagsCsv := &bootImagePath{ctx.Config().HiddenAPIFlags()}
+	flagsCSV := hiddenAPISingletonPaths(ctx).flags
 
 	// The encode dex rule requires unzipping and rezipping the classes.dex files, ensure that if it was uncompressed
 	// in the input it stays uncompressed in the output.
@@ -104,9 +170,9 @@ func hiddenAPIEncodeDex(ctx android.ModuleContext, output android.WritablePath, 
 		Description: "hiddenapi encode dex",
 		Input:       dexInput,
 		Output:      tmpOutput,
-		Implicit:    flagsCsv,
+		Implicit:    flagsCSV,
 		Args: map[string]string{
-			"flagsCsv":       flagsCsv.String(),
+			"flagsCsv":       flagsCSV.String(),
 			"tmpDir":         tmpDir.String(),
 			"soongZipFlags":  soongZipFlags,
 			"hiddenapiFlags": hiddenapiFlags,
@@ -116,55 +182,4 @@ func hiddenAPIEncodeDex(ctx android.ModuleContext, output android.WritablePath, 
 	if uncompressDex {
 		TransformZipAlign(ctx, output, tmpOutput)
 	}
-
-	hiddenAPISaveDexInputs(ctx, dexInput)
-}
-
-const hiddenAPIOutputsKey = "hiddenAPIOutputsKey"
-
-var hiddenAPIOutputsLock sync.Mutex
-
-func hiddenAPIGetOutputs(config android.Config) (*android.Paths, *android.Paths, *android.Paths) {
-	type threePathsPtrs [3]*android.Paths
-	s := config.Once(hiddenAPIOutputsKey, func() interface{} {
-		return threePathsPtrs{new(android.Paths), new(android.Paths), new(android.Paths)}
-	}).(threePathsPtrs)
-	return s[0], s[1], s[2]
-}
-
-func hiddenAPISaveCSVOutputs(ctx android.ModuleContext, flagsCSV, metadataCSV android.Path) {
-	flagsCSVList, metadataCSVList, _ := hiddenAPIGetOutputs(ctx.Config())
-
-	hiddenAPIOutputsLock.Lock()
-	defer hiddenAPIOutputsLock.Unlock()
-
-	*flagsCSVList = append(*flagsCSVList, flagsCSV)
-	*metadataCSVList = append(*metadataCSVList, metadataCSV)
-}
-
-func hiddenAPISaveDexInputs(ctx android.ModuleContext, dexInput android.Path) {
-	_, _, dexInputList := hiddenAPIGetOutputs(ctx.Config())
-
-	hiddenAPIOutputsLock.Lock()
-	defer hiddenAPIOutputsLock.Unlock()
-
-	*dexInputList = append(*dexInputList, dexInput)
-}
-
-func init() {
-	android.RegisterMakeVarsProvider(pctx, hiddenAPIMakeVars)
-}
-
-func hiddenAPIMakeVars(ctx android.MakeVarsContext) {
-	flagsCSVList, metadataCSVList, dexInputList := hiddenAPIGetOutputs(ctx.Config())
-
-	export := func(name string, paths *android.Paths) {
-		s := paths.Strings()
-		sort.Strings(s)
-		ctx.Strict(name, strings.Join(s, " "))
-	}
-
-	export("SOONG_HIDDENAPI_FLAGS", flagsCSVList)
-	export("SOONG_HIDDENAPI_GREYLIST_METADATA", metadataCSVList)
-	export("SOONG_HIDDENAPI_DEX_INPUTS", dexInputList)
 }
