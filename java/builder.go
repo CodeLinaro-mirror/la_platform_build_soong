@@ -142,7 +142,7 @@ var (
 )
 
 func init() {
-	pctx.Import("android/soong/common")
+	pctx.Import("android/soong/android")
 	pctx.Import("android/soong/java/config")
 }
 
@@ -154,6 +154,7 @@ type javaBuilderFlags struct {
 	processor     string
 	systemModules classpath
 	aidlFlags     string
+	aidlDeps      android.Paths
 	javaVersion   string
 
 	errorProneExtraJavacFlags string
