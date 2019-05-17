@@ -221,6 +221,13 @@ type CompilerDeviceProperties struct {
 	// If true, export a copy of the module as a -hostdex module for host testing.
 	Hostdex *bool
 
+	Target struct {
+		Hostdex struct {
+			// Additional required dependencies to add to -hostdex modules.
+			Required []string
+		}
+	}
+
 	// If set to true, compile dex regardless of installable.  Defaults to false.
 	Compile_dex *bool
 
@@ -228,6 +235,8 @@ type CompilerDeviceProperties struct {
 		// If false, disable all optimization.  Defaults to true for android_app and android_test
 		// modules, false for java_library and java_test modules.
 		Enabled *bool
+		// True if the module containing this has it set by default.
+		EnabledByDefault bool `blueprint:"mutated"`
 
 		// If true, optimize for size by removing unused code.  Defaults to true for apps,
 		// false for libraries and tests.
@@ -255,6 +264,10 @@ type CompilerDeviceProperties struct {
 
 	UncompressDex bool `blueprint:"mutated"`
 	IsSDKLibrary  bool `blueprint:"mutated"`
+}
+
+func (me *CompilerDeviceProperties) EffectiveOptimizeEnabled() bool {
+	return BoolDefault(me.Optimize.Enabled, me.Optimize.EnabledByDefault)
 }
 
 // Module contains the properties and members used by all java module types
@@ -460,7 +473,7 @@ func (j *Module) deps(ctx android.BottomUpMutatorContext) {
 			} else if sdkDep.useModule {
 				ctx.AddVariationDependencies(nil, systemModulesTag, sdkDep.systemModules)
 				ctx.AddVariationDependencies(nil, bootClasspathTag, sdkDep.modules...)
-				if Bool(j.deviceProperties.Optimize.Enabled) {
+				if j.deviceProperties.EffectiveOptimizeEnabled() {
 					ctx.AddVariationDependencies(nil, proguardRaiseTag, config.DefaultBootclasspathLibraries...)
 					ctx.AddVariationDependencies(nil, proguardRaiseTag, config.DefaultLibraries...)
 				}
