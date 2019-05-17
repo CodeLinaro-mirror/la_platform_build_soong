@@ -739,6 +739,10 @@ func (ctx *moduleContextImpl) shouldCreateVndkSourceAbiDump() bool {
 		return false
 	}
 
+        if ctx.baseModuleName() == "libbase" ||  ctx.baseModuleName() == "libstagefright_bufferpool@2.0" {
+                return false
+        }
+
 	if sanitize := ctx.mod.sanitize; sanitize != nil {
 		if !sanitize.isVariantOnProductionDevice() {
 			return false
