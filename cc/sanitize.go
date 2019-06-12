@@ -57,7 +57,8 @@ var (
 
 	minimalRuntimeFlags = []string{"-fsanitize-minimal-runtime", "-fno-sanitize-trap=integer,undefined",
 		"-fno-sanitize-recover=integer,undefined"}
-	hwasanGlobalOptions = []string{"heap_history_size=1023,stack_history_size=512"}
+	hwasanGlobalOptions = []string{"heap_history_size=1023", "stack_history_size=512",
+		"export_memory_stats=0", "max_malloc_fill_size=0"}
 )
 
 type sanitizerType int
@@ -392,6 +393,11 @@ func (sanitize *sanitize) deps(ctx BaseModuleContext, deps Deps) Deps {
 	if ctx.Device() {
 		if Bool(sanitize.Properties.Sanitize.Address) {
 			deps.StaticLibs = append(deps.StaticLibs, asanLibs...)
+			// Compiling asan and having libc_scudo in the same
+			// executable will cause the executable to crash.
+			// Remove libc_scudo since it is only used to override
+			// allocation functions which asan already overrides.
+			_, deps.SharedLibs = removeFromList("libc_scudo", deps.SharedLibs)
 		}
 	}
 
