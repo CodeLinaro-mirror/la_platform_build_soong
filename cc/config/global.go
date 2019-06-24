@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 
@@ -125,7 +126,6 @@ var (
 	NdkMaxPrebuiltVersionInt = 27
 
 	SDClang                  = false
-	SDClangPath              = ""
 
 	// prebuilts/clang default settings.
 	ClangDefaultBase         = "prebuilts/clang/host"
@@ -252,6 +252,7 @@ func setSdclangVars() {
 	sdclangFlags2 := ""
 
 	product := android.SdclangEnv["TARGET_PRODUCT"]
+	androidRoot := android.SdclangEnv["TOP"]
 	aeConfigPath := android.SdclangEnv["SDCLANG_AE_CONFIG"]
 	sdclangConfigPath := android.SdclangEnv["SDCLANG_CONFIG"]
 
@@ -260,7 +261,8 @@ func setSdclangVars() {
 	}
 
 	// Load AE config file and set AE flag
-	if file, err := os.Open(aeConfigPath); err == nil {
+	aeConfigFile := path.Join(androidRoot, aeConfigPath)
+	if file, err := os.Open(aeConfigFile); err == nil {
 		decoder := json.NewDecoder(file)
 		aeConfig := sdclangAEConfig{}
 		if err := decoder.Decode(&aeConfig); err == nil {
@@ -271,8 +273,9 @@ func setSdclangVars() {
 	}
 
 	// Load SD Clang config file and set SD Clang variables
+	sdclangConfigFile := path.Join(androidRoot, sdclangConfigPath)
 	var sdclangConfig interface{}
-	if file, err := os.Open(sdclangConfigPath); err == nil {
+	if file, err := os.Open(sdclangConfigFile); err == nil {
 		decoder := json.NewDecoder(file)
                 // Parse the config file
 		if err := decoder.Decode(&sdclangConfig); err == nil {
@@ -382,7 +385,6 @@ func setSdclangVars() {
 		}
 		return sdclangAEFlag + " " + sdclangFlags2
 	})
-	SDClangPath = sdclangPath
 }
 
 var HostPrebuiltTag = pctx.VariableConfigMethod("HostPrebuiltTag", android.Config.PrebuiltOS)
