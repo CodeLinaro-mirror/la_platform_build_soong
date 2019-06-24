@@ -15,10 +15,6 @@
 package config
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"strconv"
 	"strings"
 
 	"android/soong/android"
@@ -124,8 +120,6 @@ var (
 
 	NdkMaxPrebuiltVersionInt = 27
 
-	SDClang                  = false
-
 	// prebuilts/clang default settings.
 	ClangDefaultBase         = "prebuilts/clang/host"
 	ClangDefaultVersion      = "clang-r353983c"
@@ -193,8 +187,6 @@ func init() {
 	pctx.PrefixedExistentPathsForSourcesVariable("CommonNativehelperInclude", "-I",
 		[]string{"libnativehelper/include_jni"})
 
-	setSdclangVars()
-
 	pctx.SourcePathVariable("ClangDefaultBase", ClangDefaultBase)
 	pctx.VariableFunc("ClangBase", func(ctx android.PackageVarContext) string {
 		if override := ctx.Config().Getenv("LLVM_PREBUILTS_BASE"); override != "" {
@@ -239,146 +231,6 @@ func init() {
 			return override + " "
 		}
 		return ""
-	})
-}
-
-func setSdclangVars() {
-	sdclangPath := ""
-	sdclangPath2 := ""
-	sdclangAEFlag := ""
-	sdclangFlags := ""
-	sdclangFlags2 := ""
-
-	product := android.SdclangEnv["TARGET_PRODUCT"]
-	aeConfigPath := android.SdclangEnv["SDCLANG_AE_CONFIG"]
-	sdclangConfigPath := android.SdclangEnv["SDCLANG_CONFIG"]
-
-	type sdclangAEConfig struct {
-		SDCLANG_AE_FLAG string
-	}
-
-	// Load AE config file and set AE flag
-	if file, err := os.Open(aeConfigPath); err == nil {
-		decoder := json.NewDecoder(file)
-		aeConfig := sdclangAEConfig{}
-		if err := decoder.Decode(&aeConfig); err == nil {
-			sdclangAEFlag = aeConfig.SDCLANG_AE_FLAG
-		} else {
-			panic(err)
-		}
-	}
-
-	// Load SD Clang config file and set SD Clang variables
-	var sdclangConfig interface{}
-	if file, err := os.Open(sdclangConfigPath); err == nil {
-		decoder := json.NewDecoder(file)
-                // Parse the config file
-		if err := decoder.Decode(&sdclangConfig); err == nil {
-			config := sdclangConfig.(map[string]interface{})
-			// Retrieve the default block
-			if dev, ok := config["default"]; ok {
-				devConfig := dev.(map[string]interface{})
-				// SDCLANG is optional in the default block
-				if _, ok := devConfig["SDCLANG"]; ok {
-					SDClang = devConfig["SDCLANG"].(bool)
-				}
-				// SDCLANG_PATH is required in the default block
-				if _, ok := devConfig["SDCLANG_PATH"]; ok {
-					sdclangPath = devConfig["SDCLANG_PATH"].(string)
-				} else {
-					panic("SDCLANG_PATH is required in the default block")
-				}
-				// SDCLANG_PATH_2 is required in the default block
-				if _, ok := devConfig["SDCLANG_PATH_2"]; ok {
-					sdclangPath2 = devConfig["SDCLANG_PATH_2"].(string)
-				} else {
-					panic("SDCLANG_PATH_2 is required in the default block")
-				}
-				// SDCLANG_FLAGS is optional in the default block
-				if _, ok := devConfig["SDCLANG_FLAGS"]; ok {
-					sdclangFlags = devConfig["SDCLANG_FLAGS"].(string)
-				}
-				// SDCLANG_FLAGS_2 is optional in the default block
-				if _, ok := devConfig["SDCLANG_FLAGS_2"]; ok {
-					sdclangFlags2 = devConfig["SDCLANG_FLAGS_2"].(string)
-				}
-			} else {
-				panic("Default block is required in the SD Clang config file")
-			}
-			// Retrieve the device specific block if it exists in the config file
-			if dev, ok := config[product]; ok {
-				devConfig := dev.(map[string]interface{})
-				// SDCLANG is optional in the device specific block
-				if _, ok := devConfig["SDCLANG"]; ok {
-					SDClang = devConfig["SDCLANG"].(bool)
-				}
-				// SDCLANG_PATH is optional in the device specific block
-				if _, ok := devConfig["SDCLANG_PATH"]; ok {
-					sdclangPath = devConfig["SDCLANG_PATH"].(string)
-				}
-				// SDCLANG_PATH_2 is optional in the device specific block
-				if _, ok := devConfig["SDCLANG_PATH_2"]; ok {
-					sdclangPath2 = devConfig["SDCLANG_PATH_2"].(string)
-				}
-				// SDCLANG_FLAGS is optional in the device specific block
-				if _, ok := devConfig["SDCLANG_FLAGS"]; ok {
-					sdclangFlags = devConfig["SDCLANG_FLAGS"].(string)
-				}
-				// SDCLANG_FLAGS_2 is optional in the device specific block
-				if _, ok := devConfig["SDCLANG_FLAGS_2"]; ok {
-					sdclangFlags2 = devConfig["SDCLANG_FLAGS_2"].(string)
-				}
-			}
-		} else {
-			panic(err)
-		}
-	} else {
-		fmt.Println(err)
-	}
-
-	// Override SDCLANG if the varialbe is set in the environment
-	if sdclang := android.SdclangEnv["SDCLANG"]; sdclang != "" {
-		if override, err := strconv.ParseBool(sdclang); err == nil {
-			SDClang = override
-		}
-	}
-
-	// Override SDCLANG_PATH if the variable is set in the environment
-	if envPath := android.SdclangEnv["SDCLANG_PATH"]; envPath != "" {
-		sdclangPath = envPath
-	}
-
-	// Override SDCLANG_PATH_2 if the variable is set in the environment
-	if envPath := android.SdclangEnv["SDCLANG_PATH_2"]; envPath != "" {
-		sdclangPath2 = envPath
-	}
-	// Sanity check SDCLANG_PATH
-	if sdclangPath == "" {
-		panic("SDCLANG_PATH can not be empty")
-	}
-
-	// Sanity check SDCLANG_PATH_2
-	if sdclangPath2 == "" {
-		panic("SDCLANG_PATH_2 can not be empty")
-	}
-
-	pctx.StaticVariable("SDClangBin", sdclangPath)
-	pctx.StaticVariable("SDClangBin2", sdclangPath2)
-
-	// Override SDCLANG_COMMON_FLAGS if the variable is set in the environment
-	pctx.VariableFunc("SDClangFlags", func(ctx android.PackageVarContext) string {
-		if override := ctx.Config().Getenv("SDCLANG_COMMON_FLAGS"); override != "" {
-			return override
-		}
-		return sdclangAEFlag + " " + sdclangFlags
-	})
-
-	// Override SDCLANG_COMMON_FLAGS_2 if the variable is set in the environment
-	pctx.VariableFunc("SDClangFlags2", func(ctx android.PackageVarContext) string {
-		if override := ctx.Config().Getenv("SDCLANG_COMMON_FLAGS_2"); override != "" {
-			return override
-		}
-		return sdclangAEFlag + " " + sdclangFlags2
 	})
 }
 

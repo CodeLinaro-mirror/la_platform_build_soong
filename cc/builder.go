@@ -259,7 +259,6 @@ type builderFlags struct {
 	aidlFlags       string
 	rsFlags         string
 	toolchain       config.Toolchain
-	sdclang         bool
 	tidy            bool
 	coverage        bool
 	sAbiDump        bool
@@ -430,13 +429,7 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 
 		ccDesc := ccCmd
 
-		var extraFlags string
-		if flags.sdclang {
-			ccCmd = "${config.SDClangBin}/" + ccCmd
-			extraFlags = " ${config.SDClangFlags}"
-		} else {
-			ccCmd = "${config.ClangBin}/" + ccCmd
-		}
+		ccCmd = "${config.ClangBin}/" + ccCmd
 
 		var implicitOutputs android.WritablePaths
 		if coverage {
@@ -454,7 +447,7 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 			Implicits:       cFlagsDeps,
 			OrderOnly:       pathDeps,
 			Args: map[string]string{
-				"cFlags": moduleCflags + extraFlags,
+				"cFlags": moduleCflags,
 				"ccCmd":  ccCmd,
 			},
 		})
@@ -619,11 +612,6 @@ func TransformObjToDynamicBinary(ctx android.ModuleContext,
 	crtBegin, crtEnd android.OptionalPath, groupLate bool, flags builderFlags, outputFile android.WritablePath) {
 
 	ldCmd := "${config.ClangBin}/clang++"
-	var extraFlags string
-	if flags.sdclang {
-		ldCmd = "${config.SDClangBin}/clang++"
-		extraFlags = " ${config.SDClangFlags}"
-	}
 
 	var libFlagsList []string
 
@@ -678,7 +666,7 @@ func TransformObjToDynamicBinary(ctx android.ModuleContext,
 			"ldCmd":    ldCmd,
 			"crtBegin": crtBegin.String(),
 			"libFlags": strings.Join(libFlagsList, " "),
-			"ldFlags":  flags.ldFlags + extraFlags,
+			"ldFlags":  flags.ldFlags,
 			"crtEnd":   crtEnd.String(),
 		},
 	})
@@ -804,11 +792,6 @@ func TransformObjsToObj(ctx android.ModuleContext, objFiles android.Paths,
 	flags builderFlags, outputFile android.WritablePath) {
 
 	ldCmd := "${config.ClangBin}/clang++"
-        var extraFlags string
-	if flags.sdclang {
-		ldCmd = "${config.SDClangBin}/clang++"
-		extraFlags = " ${config.SDClangFlags}"
-	}
 
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        partialLd,
@@ -817,7 +800,7 @@ func TransformObjsToObj(ctx android.ModuleContext, objFiles android.Paths,
 		Inputs:      objFiles,
 		Args: map[string]string{
 			"ldCmd":   ldCmd,
-			"ldFlags": flags.ldFlags + extraFlags,
+			"ldFlags": flags.ldFlags,
 		},
 	})
 }
