@@ -47,8 +47,8 @@ var (
 	// -flto and -fvisibility are required by clang when -fsanitize=cfi is
 	// used, but have no effect on assembly files
 	cfiAsflags = []string{"-flto", "-fvisibility=default"}
-	cfiLdflags = []string{"-flto", "-fsanitize-cfi-cross-dso", "-fsanitize=cfi"}
-//		"-Wl,-plugin-opt,O1"}
+	cfiLdflags = []string{"-flto", "-fsanitize-cfi-cross-dso", "-fsanitize=cfi",
+		"-Wl,-plugin-opt,O1"}
 	cfiExportsMapPath     = "build/soong/cc/config/cfi_exports.map"
 	cfiStaticLibsMutex    sync.Mutex
 	hwasanStaticLibsMutex sync.Mutex
@@ -487,6 +487,15 @@ func (sanitize *sanitize) flags(ctx ModuleContext, flags Flags) Flags {
 			_, flags.LdFlags = removeFromList("-fsanitize-cfi-cross-dso", flags.LdFlags)
 		}
 
+		if flags.Sdclang {
+			_, flags.LdFlags = removeFromList("-Wl,-plugin-opt,O1", flags.LdFlags)
+			var found bool
+			if found, flags.LdFlags = removeFromList("${config.Arm64Ldflags}", flags.LdFlags); found {
+				flags.LdFlags = append(flags.LdFlags, "${config.SdclangArm64Ldflags}")
+			}
+			flags.CFlags = append(flags.CFlags, "-fuse-ld=qcld")
+			flags.LdFlags = append(flags.LdFlags, "-fuse-ld=qcld")
+		}
 	}
 
 	if Bool(sanitize.Properties.Sanitize.Integer_overflow) {
