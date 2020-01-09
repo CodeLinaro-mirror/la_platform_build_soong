@@ -15,106 +15,11 @@
 package java
 
 import (
-	"bytes"
-	"io"
-	"io/ioutil"
-	"strings"
+	"reflect"
 	"testing"
 
 	"android/soong/android"
 )
-
-type testAndroidMk struct {
-	*testing.T
-	body []byte
-}
-
-type testAndroidMkModule struct {
-	*testing.T
-	props map[string]string
-}
-
-func newTestAndroidMk(t *testing.T, r io.Reader) *testAndroidMk {
-	t.Helper()
-	buf, err := ioutil.ReadAll(r)
-	if err != nil {
-		t.Fatal("failed to open read Android.mk.", err)
-	}
-	return &testAndroidMk{
-		T:    t,
-		body: buf,
-	}
-}
-
-func parseAndroidMkProps(lines []string) map[string]string {
-	props := make(map[string]string)
-	for _, line := range lines {
-		line = strings.TrimLeft(line, " ")
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		tokens := strings.Split(line, " ")
-		if tokens[1] == "+=" {
-			props[tokens[0]] += " " + strings.Join(tokens[2:], " ")
-		} else {
-			props[tokens[0]] = strings.Join(tokens[2:], " ")
-		}
-	}
-	return props
-}
-
-func (t *testAndroidMk) moduleFor(moduleName string) *testAndroidMkModule {
-	t.Helper()
-	lines := strings.Split(string(t.body), "\n")
-	index := android.IndexList("LOCAL_MODULE := "+moduleName, lines)
-	if index == -1 {
-		t.Fatalf("%q is not found.", moduleName)
-	}
-	lines = lines[index:]
-	includeIndex := android.IndexListPred(func(line string) bool {
-		return strings.HasPrefix(line, "include")
-	}, lines)
-	if includeIndex == -1 {
-		t.Fatalf("%q is not properly defined. (\"include\" not found).", moduleName)
-	}
-	props := parseAndroidMkProps(lines[:includeIndex])
-	return &testAndroidMkModule{
-		T:     t.T,
-		props: props,
-	}
-}
-
-func (t *testAndroidMkModule) hasRequired(dep string) {
-	t.Helper()
-	required, ok := t.props["LOCAL_REQUIRED_MODULES"]
-	if !ok {
-		t.Error("LOCAL_REQUIRED_MODULES is not found.")
-		return
-	}
-	if !android.InList(dep, strings.Split(required, " ")) {
-		t.Errorf("%q is expected in LOCAL_REQUIRED_MODULES, but not found in %q.", dep, required)
-	}
-}
-
-func (t *testAndroidMkModule) hasNoRequired(dep string) {
-	t.Helper()
-	required, ok := t.props["LOCAL_REQUIRED_MODULES"]
-	if !ok {
-		return
-	}
-	if android.InList(dep, strings.Split(required, " ")) {
-		t.Errorf("%q is not expected in LOCAL_REQUIRED_MODULES, but found.", dep)
-	}
-}
-
-func getAndroidMk(t *testing.T, ctx *android.TestContext, config android.Config, name string) *testAndroidMk {
-	t.Helper()
-	lib, _ := ctx.ModuleForTests(name, "android_common").Module().(*Library)
-	data := android.AndroidMkDataForTest(t, config, "", lib)
-	w := &bytes.Buffer{}
-	data.Custom(w, name, "", "", data)
-	return newTestAndroidMk(t, w)
-}
 
 func TestRequired(t *testing.T) {
 	ctx, config := testJava(t, `
@@ -125,8 +30,14 @@ func TestRequired(t *testing.T) {
 		}
 	`)
 
-	mk := getAndroidMk(t, ctx, config, "foo")
-	mk.moduleFor("foo").hasRequired("libfoo")
+	mod := ctx.ModuleForTests("foo", "android_common").Module()
+	entries := android.AndroidMkEntriesForTest(t, config, "", mod)[0]
+
+	expected := []string{"libfoo"}
+	actual := entries.EntryMap["LOCAL_REQUIRED_MODULES"]
+	if !reflect.DeepEqual(expected, actual) {
+		t.Errorf("Unexpected required modules - expected: %q, actual: %q", expected, actual)
+	}
 }
 
 func TestHostdex(t *testing.T) {
@@ -138,9 +49,25 @@ func TestHostdex(t *testing.T) {
 		}
 	`)
 
-	mk := getAndroidMk(t, ctx, config, "foo")
-	mk.moduleFor("foo")
-	mk.moduleFor("foo-hostdex")
+	mod := ctx.ModuleForTests("foo", "android_common").Module()
+	entriesList := android.AndroidMkEntriesForTest(t, config, "", mod)
+	if len(entriesList) != 2 {
+		t.Errorf("two entries are expected, but got %d", len(entriesList))
+	}
+
+	mainEntries := &entriesList[0]
+	expected := []string{"foo"}
+	actual := mainEntries.EntryMap["LOCAL_MODULE"]
+	if !reflect.DeepEqual(expected, actual) {
+		t.Errorf("Unexpected module name - expected: %q, actual: %q", expected, actual)
+	}
+
+	subEntries := &entriesList[1]
+	expected = []string{"foo-hostdex"}
+	actual = subEntries.EntryMap["LOCAL_MODULE"]
+	if !reflect.DeepEqual(expected, actual) {
+		t.Errorf("Unexpected module name - expected: %q, actual: %q", expected, actual)
+	}
 }
 
 func TestHostdexRequired(t *testing.T) {
@@ -153,9 +80,25 @@ func TestHostdexRequired(t *testing.T) {
 		}
 	`)
 
-	mk := getAndroidMk(t, ctx, config, "foo")
-	mk.moduleFor("foo").hasRequired("libfoo")
-	mk.moduleFor("foo-hostdex").hasRequired("libfoo")
+	mod := ctx.ModuleForTests("foo", "android_common").Module()
+	entriesList := android.AndroidMkEntriesForTest(t, config, "", mod)
+	if len(entriesList) != 2 {
+		t.Errorf("two entries are expected, but got %d", len(entriesList))
+	}
+
+	mainEntries := &entriesList[0]
+	expected := []string{"libfoo"}
+	actual := mainEntries.EntryMap["LOCAL_REQUIRED_MODULES"]
+	if !reflect.DeepEqual(expected, actual) {
+		t.Errorf("Unexpected required modules - expected: %q, actual: %q", expected, actual)
+	}
+
+	subEntries := &entriesList[1]
+	expected = []string{"libfoo"}
+	actual = subEntries.EntryMap["LOCAL_REQUIRED_MODULES"]
+	if !reflect.DeepEqual(expected, actual) {
+		t.Errorf("Unexpected required modules - expected: %q, actual: %q", expected, actual)
+	}
 }
 
 func TestHostdexSpecificRequired(t *testing.T) {
@@ -172,7 +115,21 @@ func TestHostdexSpecificRequired(t *testing.T) {
 		}
 	`)
 
-	mk := getAndroidMk(t, ctx, config, "foo")
-	mk.moduleFor("foo").hasNoRequired("libfoo")
-	mk.moduleFor("foo-hostdex").hasRequired("libfoo")
+	mod := ctx.ModuleForTests("foo", "android_common").Module()
+	entriesList := android.AndroidMkEntriesForTest(t, config, "", mod)
+	if len(entriesList) != 2 {
+		t.Errorf("two entries are expected, but got %d", len(entriesList))
+	}
+
+	mainEntries := &entriesList[0]
+	if r, ok := mainEntries.EntryMap["LOCAL_REQUIRED_MODULES"]; ok {
+		t.Errorf("Unexpected required modules: %q", r)
+	}
+
+	subEntries := &entriesList[1]
+	expected := []string{"libfoo"}
+	actual := subEntries.EntryMap["LOCAL_REQUIRED_MODULES"]
+	if !reflect.DeepEqual(expected, actual) {
+		t.Errorf("Unexpected required modules - expected: %q, actual: %q", expected, actual)
+	}
 }

@@ -46,7 +46,7 @@ var (
 var (
 	pctx = android.NewPackageContext("android/soong/cc")
 
-	cc = pctx.AndroidGomaStaticRule("cc",
+	cc = pctx.AndroidRemoteStaticRule("cc", android.SUPPORTS_BOTH,
 		blueprint.RuleParams{
 			Depfile:     "${out}.d",
 			Deps:        blueprint.DepsGCC,
@@ -55,7 +55,7 @@ var (
 		},
 		"ccCmd", "cFlags")
 
-	ccNoDeps = pctx.AndroidGomaStaticRule("ccNoDeps",
+	ccNoDeps = pctx.AndroidRemoteStaticRule("ccNoDeps", android.SUPPORTS_GOMA,
 		blueprint.RuleParams{
 			Command:     "$relPwd ${config.CcWrapper}$ccCmd -c $cFlags -o $out $in",
 			CommandDeps: []string{"$ccCmd"},
@@ -130,6 +130,17 @@ var (
 		},
 		"args", "crossCompile")
 
+	_ = pctx.SourcePathVariable("archiveRepackPath", "build/soong/scripts/archive_repack.sh")
+
+	archiveRepack = pctx.AndroidStaticRule("archiveRepack",
+		blueprint.RuleParams{
+			Depfile:     "${out}.d",
+			Deps:        blueprint.DepsGCC,
+			Command:     "CLANG_BIN=${config.ClangBin} $archiveRepackPath -i ${in} -o ${out} -d ${out}.d ${objects}",
+			CommandDeps: []string{"$archiveRepackPath"},
+		},
+		"objects")
+
 	emptyFile = pctx.AndroidStaticRule("emptyFile",
 		blueprint.RuleParams{
 			Command: "rm -f $out && touch $out",
@@ -195,7 +206,7 @@ var (
 
 	_ = pctx.SourcePathVariable("sAbiDiffer", "prebuilts/clang-tools/${config.HostPrebuiltTag}/bin/header-abi-diff")
 
-	sAbiDiff = pctx.AndroidRuleFunc("sAbiDiff",
+	sAbiDiff = pctx.RuleFunc("sAbiDiff",
 		func(ctx android.PackageRuleContext) blueprint.RuleParams {
 			// TODO(b/78139997): Add -check-all-apis back
 			commandStr := "($sAbiDiffer ${allowFlags} -lib ${libName} -arch ${arch} -o ${out} -new ${in} -old ${referenceDump})"
@@ -224,12 +235,13 @@ var (
 
 	_ = pctx.SourcePathVariable("cxxExtractor",
 		"prebuilts/clang-tools/${config.HostPrebuiltTag}/bin/cxx_extractor")
+	_ = pctx.SourcePathVariable("kytheVnames", "build/soong/vnames.json")
 	_ = pctx.VariableFunc("kytheCorpus",
 		func(ctx android.PackageVarContext) string { return ctx.Config().XrefCorpusName() })
 	kytheExtract = pctx.StaticRule("kythe",
 		blueprint.RuleParams{
-			Command:     "rm -f $out && KYTHE_CORPUS=${kytheCorpus} KYTHE_OUTPUT_FILE=$out $cxxExtractor $cFlags $in ",
-			CommandDeps: []string{"$cxxExtractor"},
+			Command:     "rm -f $out && KYTHE_CORPUS=${kytheCorpus} KYTHE_OUTPUT_FILE=$out KYTHE_VNAMES=$kytheVnames $cxxExtractor $cFlags $in ",
+			CommandDeps: []string{"$cxxExtractor", "$kytheVnames"},
 		},
 		"cFlags")
 )
@@ -249,27 +261,37 @@ func init() {
 }
 
 type builderFlags struct {
-	globalFlags     string
-	arFlags         string
-	asFlags         string
-	cFlags          string
-	toolingCFlags   string // A separate set of cFlags for clang LibTooling tools
-	toolingCppFlags string // A separate set of cppFlags for clang LibTooling tools
-	conlyFlags      string
-	cppFlags        string
-	ldFlags         string
-	libFlags        string
-	extraLibFlags   string
-	tidyFlags       string
-	sAbiFlags       string
-	yasmFlags       string
-	aidlFlags       string
-	rsFlags         string
-	toolchain       config.Toolchain
-	tidy            bool
-	coverage        bool
-	sAbiDump        bool
-	emitXrefs       bool
+	globalCommonFlags     string
+	globalAsFlags         string
+	globalYasmFlags       string
+	globalCFlags          string
+	globalToolingCFlags   string // A separate set of cFlags for clang LibTooling tools
+	globalToolingCppFlags string // A separate set of cppFlags for clang LibTooling tools
+	globalConlyFlags      string
+	globalCppFlags        string
+	globalLdFlags         string
+
+	localCommonFlags     string
+	localAsFlags         string
+	localYasmFlags       string
+	localCFlags          string
+	localToolingCFlags   string // A separate set of cFlags for clang LibTooling tools
+	localToolingCppFlags string // A separate set of cppFlags for clang LibTooling tools
+	localConlyFlags      string
+	localCppFlags        string
+	localLdFlags         string
+
+	libFlags      string
+	extraLibFlags string
+	tidyFlags     string
+	sAbiFlags     string
+	aidlFlags     string
+	rsFlags       string
+	toolchain     config.Toolchain
+	tidy          bool
+	coverage      bool
+	sAbiDump      bool
+	emitXrefs     bool
 
 	assemblerWithCpp bool
 
@@ -337,39 +359,45 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 		kytheFiles = make(android.Paths, 0, len(srcFiles))
 	}
 
-	commonFlags := strings.Join([]string{
-		flags.globalFlags,
-		flags.systemIncludeFlags,
-	}, " ")
+	// Produce fully expanded flags for use by C tools, C compiles, C++ tools, C++ compiles, and asm compiles
+	// respectively.
+	toolingCflags := flags.globalCommonFlags + " " +
+		flags.globalToolingCFlags + " " +
+		flags.globalConlyFlags + " " +
+		flags.localCommonFlags + " " +
+		flags.localToolingCFlags + " " +
+		flags.localConlyFlags + " " +
+		flags.systemIncludeFlags
 
-	toolingCflags := strings.Join([]string{
-		commonFlags,
-		flags.toolingCFlags,
-		flags.conlyFlags,
-	}, " ")
+	cflags := flags.globalCommonFlags + " " +
+		flags.globalCFlags + " " +
+		flags.globalConlyFlags + " " +
+		flags.localCommonFlags + " " +
+		flags.localCFlags + " " +
+		flags.localConlyFlags + " " +
+		flags.systemIncludeFlags
 
-	cflags := strings.Join([]string{
-		commonFlags,
-		flags.cFlags,
-		flags.conlyFlags,
-	}, " ")
+	toolingCppflags := flags.globalCommonFlags + " " +
+		flags.globalToolingCFlags + " " +
+		flags.globalToolingCppFlags + " " +
+		flags.localCommonFlags + " " +
+		flags.localToolingCFlags + " " +
+		flags.localToolingCppFlags + " " +
+		flags.systemIncludeFlags
 
-	toolingCppflags := strings.Join([]string{
-		commonFlags,
-		flags.toolingCFlags,
-		flags.toolingCppFlags,
-	}, " ")
+	cppflags := flags.globalCommonFlags + " " +
+		flags.globalCFlags + " " +
+		flags.globalCppFlags + " " +
+		flags.localCommonFlags + " " +
+		flags.localCFlags + " " +
+		flags.localCppFlags + " " +
+		flags.systemIncludeFlags
 
-	cppflags := strings.Join([]string{
-		commonFlags,
-		flags.cFlags,
-		flags.cppFlags,
-	}, " ")
-
-	asflags := strings.Join([]string{
-		commonFlags,
-		flags.asFlags,
-	}, " ")
+	asflags := flags.globalCommonFlags + " " +
+		flags.globalAsFlags + " " +
+		flags.localCommonFlags + " " +
+		flags.localAsFlags + " " +
+		flags.systemIncludeFlags
 
 	var sAbiDumpFiles android.Paths
 	if flags.sAbiDump {
@@ -396,7 +424,7 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 				Implicits:   cFlagsDeps,
 				OrderOnly:   pathDeps,
 				Args: map[string]string{
-					"asFlags": flags.yasmFlags,
+					"asFlags": flags.globalYasmFlags + " " + flags.localYasmFlags,
 				},
 			})
 			continue
@@ -419,8 +447,9 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 			continue
 		}
 
-		var moduleCflags string
-		var moduleToolingCflags string
+		var moduleFlags string
+		var moduleToolingFlags string
+
 		var ccCmd string
 		tidy := flags.tidy
 		coverage := flags.coverage
@@ -436,19 +465,19 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 			fallthrough
 		case ".S":
 			ccCmd = "clang"
-			moduleCflags = asflags
+			moduleFlags = asflags
 			tidy = false
 			coverage = false
 			dump = false
 			emitXref = false
 		case ".c":
 			ccCmd = "clang"
-			moduleCflags = cflags
-			moduleToolingCflags = toolingCflags
+			moduleFlags = cflags
+			moduleToolingFlags = toolingCflags
 		case ".cpp", ".cc", ".cxx", ".mm":
 			ccCmd = "clang++"
-			moduleCflags = cppflags
-			moduleToolingCflags = toolingCppflags
+			moduleFlags = cppflags
+			moduleToolingFlags = toolingCppflags
 		default:
 			ctx.ModuleErrorf("File %s has unknown extension", srcFile)
 			continue
@@ -474,7 +503,7 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 			Implicits:       cFlagsDeps,
 			OrderOnly:       pathDeps,
 			Args: map[string]string{
-				"cFlags": moduleCflags,
+				"cFlags": moduleFlags,
 				"ccCmd":  ccCmd,
 			},
 		})
@@ -489,7 +518,7 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 				Implicits:   cFlagsDeps,
 				OrderOnly:   pathDeps,
 				Args: map[string]string{
-					"cFlags": moduleCflags,
+					"cFlags": moduleFlags,
 				},
 			})
 			kytheFiles = append(kytheFiles, kytheFile)
@@ -510,7 +539,7 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 				Implicits: cFlagsDeps,
 				OrderOnly: pathDeps,
 				Args: map[string]string{
-					"cFlags":    moduleToolingCflags,
+					"cFlags":    moduleToolingFlags,
 					"tidyFlags": flags.tidyFlags,
 				},
 			})
@@ -529,7 +558,7 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 				Implicits:   cFlagsDeps,
 				OrderOnly:   pathDeps,
 				Args: map[string]string{
-					"cFlags":     moduleToolingCflags,
+					"cFlags":     moduleToolingFlags,
 					"exportDirs": flags.sAbiFlags,
 				},
 			})
@@ -554,9 +583,6 @@ func TransformObjToStaticLib(ctx android.ModuleContext, objFiles android.Paths,
 	arFlags := "crsPD"
 	if !ctx.Darwin() {
 		arFlags += " -format=gnu"
-	}
-	if flags.arFlags != "" {
-		arFlags += " " + flags.arFlags
 	}
 
 	ctx.Build(pctx, android.BuildParams{
@@ -639,7 +665,7 @@ func TransformObjToDynamicBinary(ctx android.ModuleContext,
 			"crtBegin":      crtBegin.String(),
 			"libFlags":      strings.Join(libFlagsList, " "),
 			"extraLibFlags": flags.extraLibFlags,
-			"ldFlags":       flags.ldFlags,
+			"ldFlags":       flags.globalLdFlags + " " + flags.localLdFlags,
 			"crtEnd":        crtEnd.String(),
 		},
 	})
@@ -764,7 +790,7 @@ func TransformSharedObjectToToc(ctx android.ModuleContext, inputFile android.Pat
 
 // Generate a rule for compiling multiple .o files to a .o using ld partial linking
 func TransformObjsToObj(ctx android.ModuleContext, objFiles android.Paths,
-	flags builderFlags, outputFile android.WritablePath) {
+	flags builderFlags, outputFile android.WritablePath, deps android.Paths) {
 
 	ldCmd := "${config.ClangBin}/clang++"
 
@@ -773,9 +799,10 @@ func TransformObjsToObj(ctx android.ModuleContext, objFiles android.Paths,
 		Description: "link " + outputFile.Base(),
 		Output:      outputFile,
 		Inputs:      objFiles,
+		Implicits:   deps,
 		Args: map[string]string{
 			"ldCmd":   ldCmd,
-			"ldFlags": flags.ldFlags,
+			"ldFlags": flags.globalLdFlags + " " + flags.localLdFlags,
 		},
 	})
 }
@@ -862,6 +889,20 @@ func TransformCoverageFilesToZip(ctx android.ModuleContext,
 	}
 
 	return android.OptionalPath{}
+}
+
+func TransformArchiveRepack(ctx android.ModuleContext, inputFile android.Path,
+	outputFile android.WritablePath, objects []string) {
+
+	ctx.Build(pctx, android.BuildParams{
+		Rule:        archiveRepack,
+		Description: "Repack archive " + outputFile.Base(),
+		Output:      outputFile,
+		Input:       inputFile,
+		Args: map[string]string{
+			"objects": strings.Join(objects, " "),
+		},
+	})
 }
 
 func gccCmd(toolchain config.Toolchain, cmd string) string {

@@ -16,6 +16,7 @@ package cc
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"android/soong/android"
@@ -71,6 +72,19 @@ type TestBinaryProperties struct {
 
 	// Add RunCommandTargetPreparer to stop framework before the test and start it after the test.
 	Disable_framework *bool
+
+	// Add MinApiLevelModuleController to auto generated test config. If the device property of
+	// "ro.product.first_api_level" < Test_min_api_level, then skip this module.
+	Test_min_api_level *int64
+
+	// Add MinApiLevelModuleController to auto generated test config. If the device property of
+	// "ro.build.version.sdk" < Test_min_sdk_version, then skip this module.
+	Test_min_sdk_version *int64
+
+	// Flag to indicate whether or not to create test config automatically. If AndroidTest.xml
+	// doesn't exist next to the Android.bp, this attribute doesn't need to be set to true
+	// explicitly.
+	Auto_gen_config *bool
 }
 
 func init() {
@@ -159,7 +173,7 @@ func TestPerSrcMutator(mctx android.BottomUpMutatorContext) {
 		if test, ok := m.linker.(testPerSrc); ok {
 			numTests := len(test.srcs())
 			if test.testPerSrc() && numTests > 0 {
-				if duplicate, found := checkDuplicate(test.srcs()); found {
+				if duplicate, found := android.CheckDuplicate(test.srcs()); found {
 					mctx.PropertyErrorf("srcs", "found a duplicate entry %q", duplicate)
 					return
 				}
@@ -192,17 +206,6 @@ func TestPerSrcMutator(mctx android.BottomUpMutatorContext) {
 	}
 }
 
-func checkDuplicate(values []string) (duplicate string, found bool) {
-	seen := make(map[string]string)
-	for _, v := range values {
-		if duplicate, found = seen[v]; found {
-			return
-		}
-		seen[v] = v
-	}
-	return
-}
-
 type testDecorator struct {
 	Properties TestProperties
 	linker     *baseLinker
@@ -217,20 +220,20 @@ func (test *testDecorator) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 		return flags
 	}
 
-	flags.CFlags = append(flags.CFlags, "-DGTEST_HAS_STD_STRING")
+	flags.Local.CFlags = append(flags.Local.CFlags, "-DGTEST_HAS_STD_STRING")
 	if ctx.Host() {
-		flags.CFlags = append(flags.CFlags, "-O0", "-g")
+		flags.Local.CFlags = append(flags.Local.CFlags, "-O0", "-g")
 
 		switch ctx.Os() {
 		case android.Windows:
-			flags.CFlags = append(flags.CFlags, "-DGTEST_OS_WINDOWS")
+			flags.Local.CFlags = append(flags.Local.CFlags, "-DGTEST_OS_WINDOWS")
 		case android.Linux:
-			flags.CFlags = append(flags.CFlags, "-DGTEST_OS_LINUX")
+			flags.Local.CFlags = append(flags.Local.CFlags, "-DGTEST_OS_LINUX")
 		case android.Darwin:
-			flags.CFlags = append(flags.CFlags, "-DGTEST_OS_MAC")
+			flags.Local.CFlags = append(flags.Local.CFlags, "-DGTEST_OS_MAC")
 		}
 	} else {
-		flags.CFlags = append(flags.CFlags, "-DGTEST_OS_LINUX_ANDROID")
+		flags.Local.CFlags = append(flags.Local.CFlags, "-DGTEST_OS_LINUX_ANDROID")
 	}
 
 	return flags
@@ -314,15 +317,21 @@ func (test *testBinary) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 
 func (test *testBinary) install(ctx ModuleContext, file android.Path) {
 	test.data = android.PathsForModuleSrc(ctx, test.Properties.Data)
+	var api_level_prop string
 	var configs []tradefed.Config
+	var min_level string
 	if Bool(test.Properties.Require_root) {
-		configs = append(configs, tradefed.Preparer{"com.android.tradefed.targetprep.RootTargetPreparer", nil})
+		configs = append(configs, tradefed.Object{"target_preparer", "com.android.tradefed.targetprep.RootTargetPreparer", nil})
+	} else {
+		var options []tradefed.Option
+		options = append(options, tradefed.Option{"force-root", "false"})
+		configs = append(configs, tradefed.Object{"target_preparer", "com.android.tradefed.targetprep.RootTargetPreparer", options})
 	}
 	if Bool(test.Properties.Disable_framework) {
 		var options []tradefed.Option
 		options = append(options, tradefed.Option{"run-command", "stop"})
 		options = append(options, tradefed.Option{"teardown-command", "start"})
-		configs = append(configs, tradefed.Preparer{"com.android.tradefed.targetprep.RunCommandTargetPreparer", options})
+		configs = append(configs, tradefed.Object{"target_preparer", "com.android.tradefed.targetprep.RunCommandTargetPreparer", options})
 	}
 	if Bool(test.testDecorator.Properties.Isolated) {
 		configs = append(configs, tradefed.Option{"not-shardable", "true"})
@@ -330,9 +339,24 @@ func (test *testBinary) install(ctx ModuleContext, file android.Path) {
 	if test.Properties.Test_options.Run_test_as != nil {
 		configs = append(configs, tradefed.Option{"run-test-as", String(test.Properties.Test_options.Run_test_as)})
 	}
+	if test.Properties.Test_min_api_level != nil && test.Properties.Test_min_sdk_version != nil {
+		ctx.PropertyErrorf("test_min_api_level", "'test_min_api_level' and 'test_min_sdk_version' should not be set at the same time.")
+	} else if test.Properties.Test_min_api_level != nil {
+		api_level_prop = "ro.product.first_api_level"
+		min_level = strconv.FormatInt(int64(*test.Properties.Test_min_api_level), 10)
+	} else if test.Properties.Test_min_sdk_version != nil {
+		api_level_prop = "ro.build.version.sdk"
+		min_level = strconv.FormatInt(int64(*test.Properties.Test_min_sdk_version), 10)
+	}
+	if api_level_prop != "" {
+		var options []tradefed.Option
+		options = append(options, tradefed.Option{"min-api-level", min_level})
+		options = append(options, tradefed.Option{"api-level-prop", api_level_prop})
+		configs = append(configs, tradefed.Object{"module_controller", "com.android.tradefed.testtype.suite.module.MinApiLevelModuleController", options})
+	}
 
 	test.testConfig = tradefed.AutoGenNativeTestConfig(ctx, test.Properties.Test_config,
-		test.Properties.Test_config_template, test.Properties.Test_suites, configs)
+		test.Properties.Test_config_template, test.Properties.Test_suites, configs, test.Properties.Auto_gen_config)
 
 	test.binaryDecorator.baseInstaller.dir = "nativetest"
 	test.binaryDecorator.baseInstaller.dir64 = "nativetest64"
@@ -423,6 +447,11 @@ type BenchmarkProperties struct {
 	// Add RootTargetPreparer to auto generated test config. This guarantees the test to run
 	// with root permission.
 	Require_root *bool
+
+	// Flag to indicate whether or not to create test config automatically. If AndroidTest.xml
+	// doesn't exist next to the Android.bp, this attribute doesn't need to be set to true
+	// explicitly.
+	Auto_gen_config *bool
 }
 
 type benchmarkDecorator struct {
@@ -457,10 +486,10 @@ func (benchmark *benchmarkDecorator) install(ctx ModuleContext, file android.Pat
 	benchmark.data = android.PathsForModuleSrc(ctx, benchmark.Properties.Data)
 	var configs []tradefed.Config
 	if Bool(benchmark.Properties.Require_root) {
-		configs = append(configs, tradefed.Preparer{"com.android.tradefed.targetprep.RootTargetPreparer", nil})
+		configs = append(configs, tradefed.Object{"target_preparer", "com.android.tradefed.targetprep.RootTargetPreparer", nil})
 	}
 	benchmark.testConfig = tradefed.AutoGenNativeBenchmarkTestConfig(ctx, benchmark.Properties.Test_config,
-		benchmark.Properties.Test_config_template, benchmark.Properties.Test_suites, configs)
+		benchmark.Properties.Test_config_template, benchmark.Properties.Test_suites, configs, benchmark.Properties.Auto_gen_config)
 
 	benchmark.binaryDecorator.baseInstaller.dir = filepath.Join("benchmarktest", ctx.ModuleName())
 	benchmark.binaryDecorator.baseInstaller.dir64 = filepath.Join("benchmarktest64", ctx.ModuleName())

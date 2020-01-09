@@ -18,21 +18,44 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/google/blueprint/proptools"
+
 	"android/soong/android"
 	"android/soong/rust/config"
 )
 
-func NewBaseCompiler(dir, dir64 string) *baseCompiler {
+func getEdition(compiler *baseCompiler) string {
+	return proptools.StringDefault(compiler.Properties.Edition, config.DefaultEdition)
+}
+
+func getDenyWarnings(compiler *baseCompiler) bool {
+	return BoolDefault(compiler.Properties.Deny_warnings, config.DefaultDenyWarnings)
+}
+
+func (compiler *baseCompiler) setNoStdlibs() {
+	compiler.Properties.No_stdlibs = proptools.BoolPtr(true)
+}
+
+func NewBaseCompiler(dir, dir64 string, location installLocation) *baseCompiler {
 	return &baseCompiler{
-		Properties: BaseCompilerProperties{
-			Edition: &config.DefaultEdition,
-		},
-		dir:   dir,
-		dir64: dir64,
+		Properties: BaseCompilerProperties{},
+		dir:        dir,
+		dir64:      dir64,
+		location:   location,
 	}
 }
 
+type installLocation int
+
+const (
+	InstallInSystem installLocation = 0
+	InstallInData                   = iota
+)
+
 type BaseCompilerProperties struct {
+	// whether to pass "-D warnings" to rustc. Defaults to true.
+	Deny_warnings *bool
+
 	// flags to pass to rustc
 	Flags []string `android:"path,arch_variant"`
 
@@ -54,7 +77,7 @@ type BaseCompilerProperties struct {
 	// list of C static library dependencies
 	Static_libs []string `android:"arch_variant"`
 
-	// crate name (defaults to module name); if library, this must be the expected extern crate name
+	// crate name, required for libraries. This must be the expected extern crate name used in source
 	Crate_name string `android:"arch_variant"`
 
 	// list of features to enable for this crate
@@ -71,6 +94,9 @@ type BaseCompilerProperties struct {
 
 	// install to a subdirectory of the default install path for the module
 	Relative_install_path *string `android:"arch_variant"`
+
+	// whether to suppress inclusion of standard crates - defaults to false
+	No_stdlibs *bool
 }
 
 type baseCompiler struct {
@@ -90,10 +116,15 @@ type baseCompiler struct {
 	dir64    string
 	subDir   string
 	relative string
-	path     android.OutputPath
+	path     android.InstallPath
+	location installLocation
 }
 
 var _ compiler = (*baseCompiler)(nil)
+
+func (compiler *baseCompiler) inData() bool {
+	return compiler.location == InstallInData
+}
 
 func (compiler *baseCompiler) compilerProps() []interface{} {
 	return []interface{}{&compiler.Properties}
@@ -109,11 +140,16 @@ func (compiler *baseCompiler) featuresToFlags(features []string) []string {
 
 func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags) Flags {
 
+	if getDenyWarnings(compiler) {
+		flags.RustFlags = append(flags.RustFlags, "-D warnings")
+	}
 	flags.RustFlags = append(flags.RustFlags, compiler.Properties.Flags...)
 	flags.RustFlags = append(flags.RustFlags, compiler.featuresToFlags(compiler.Properties.Features)...)
-	flags.RustFlags = append(flags.RustFlags, "--edition="+*compiler.Properties.Edition)
+	flags.RustFlags = append(flags.RustFlags, "--edition="+getEdition(compiler))
 	flags.LinkFlags = append(flags.LinkFlags, compiler.Properties.Ld_flags...)
-	flags.GlobalFlags = append(flags.GlobalFlags, ctx.toolchain().ToolchainRustFlags())
+	flags.GlobalRustFlags = append(flags.GlobalRustFlags, config.GlobalRustFlags...)
+	flags.GlobalRustFlags = append(flags.GlobalRustFlags, ctx.toolchain().ToolchainRustFlags())
+	flags.GlobalLinkFlags = append(flags.GlobalLinkFlags, ctx.toolchain().ToolchainLinkFlags())
 
 	if ctx.Host() && !ctx.Windows() {
 		rpath_prefix := `\$$ORIGIN/`
@@ -145,6 +181,35 @@ func (compiler *baseCompiler) compilerDeps(ctx DepsContext, deps Deps) Deps {
 	deps.StaticLibs = append(deps.StaticLibs, compiler.Properties.Static_libs...)
 	deps.SharedLibs = append(deps.SharedLibs, compiler.Properties.Shared_libs...)
 
+	if !Bool(compiler.Properties.No_stdlibs) {
+		for _, stdlib := range config.Stdlibs {
+			// If we're building for host, use the compiler's stdlibs
+			if ctx.Host() {
+				stdlib = stdlib + "_" + ctx.toolchain().RustTriple()
+			}
+
+			// This check is technically insufficient - on the host, where
+			// static linking is the default, if one of our static
+			// dependencies uses a dynamic library, we need to dynamically
+			// link the stdlib as well.
+			if (len(deps.Dylibs) > 0) || (!ctx.Host()) {
+				// Dynamically linked stdlib
+				deps.Dylibs = append(deps.Dylibs, stdlib)
+			}
+		}
+	}
+	return deps
+}
+
+func (compiler *baseCompiler) bionicDeps(ctx DepsContext, deps Deps) Deps {
+	deps.SharedLibs = append(deps.SharedLibs, "liblog")
+	deps.SharedLibs = append(deps.SharedLibs, "libc")
+	deps.SharedLibs = append(deps.SharedLibs, "libm")
+	deps.SharedLibs = append(deps.SharedLibs, "libdl")
+
+	//TODO(b/141331117) libstd requires libgcc on Android
+	deps.StaticLibs = append(deps.StaticLibs, "libgcc")
+
 	return deps
 }
 
@@ -152,12 +217,12 @@ func (compiler *baseCompiler) crateName() string {
 	return compiler.Properties.Crate_name
 }
 
-func (compiler *baseCompiler) installDir(ctx ModuleContext) android.OutputPath {
+func (compiler *baseCompiler) installDir(ctx ModuleContext) android.InstallPath {
 	dir := compiler.dir
 	if ctx.toolchain().Is64Bit() && compiler.dir64 != "" {
 		dir = compiler.dir64
 	}
-	if (!ctx.Host() && !ctx.Arch().Native) || ctx.Target().NativeBridge == android.NativeBridgeEnabled {
+	if !ctx.Host() || ctx.Target().NativeBridge == android.NativeBridgeEnabled {
 		dir = filepath.Join(dir, ctx.Arch().ArchType.String())
 	}
 	return android.PathForModuleInstall(ctx, dir, compiler.subDir,
@@ -180,6 +245,7 @@ func (compiler *baseCompiler) getStemWithoutSuffix(ctx BaseModuleContext) string
 
 	return stem
 }
+
 func (compiler *baseCompiler) relativeInstallPath() string {
 	return String(compiler.Properties.Relative_install_path)
 }

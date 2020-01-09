@@ -36,9 +36,10 @@ type AndroidMkContext interface {
 	Arch() android.Arch
 	Os() android.OsType
 	Host() bool
-	useVndk() bool
+	UseVndk() bool
+	vndkVersion() string
 	static() bool
-	inRecovery() bool
+	InRecovery() bool
 }
 
 type subAndroidMkProvider interface {
@@ -88,10 +89,15 @@ func (c *Module) AndroidMk() android.AndroidMkData {
 					fmt.Fprintln(w, "LOCAL_WHOLE_STATIC_LIBRARIES := "+strings.Join(c.Properties.AndroidMkWholeStaticLibs, " "))
 				}
 				fmt.Fprintln(w, "LOCAL_SOONG_LINK_TYPE :=", c.makeLinkType)
-				if c.useVndk() {
+				if c.UseVndk() {
 					fmt.Fprintln(w, "LOCAL_USE_VNDK := true")
-					if c.isVndk() && !c.static() {
+					if c.IsVndk() && !c.static() {
 						fmt.Fprintln(w, "LOCAL_SOONG_VNDK_VERSION := "+c.vndkVersion())
+						// VNDK libraries available to vendor are not installed because
+						// they are packaged in VNDK APEX and installed by APEX packages (apex/apex.go)
+						if !c.isVndkExt() {
+							fmt.Fprintln(w, "LOCAL_UNINSTALLABLE_MODULE := true")
+						}
 					}
 				}
 			},
@@ -109,17 +115,7 @@ func (c *Module) AndroidMk() android.AndroidMkData {
 	}
 	c.subAndroidMk(&ret, c.installer)
 
-	if c.Target().NativeBridge == android.NativeBridgeEnabled {
-		ret.SubName += nativeBridgeSuffix
-	}
-
-	if c.useVndk() && c.hasVendorVariant() {
-		// .vendor suffix is added only when we will have two variants: core and vendor.
-		// The suffix is not added for vendor-only module.
-		ret.SubName += vendorSuffix
-	} else if c.inRecovery() && !c.onlyInRecovery() {
-		ret.SubName += recoverySuffix
-	}
+	ret.SubName += c.Properties.SubName
 
 	return ret
 }
@@ -157,10 +153,10 @@ func makeOverrideModuleNames(ctx AndroidMkContext, overrides []string) []string 
 func (library *libraryDecorator) androidMkWriteExportedFlags(w io.Writer) {
 	exportedFlags := library.exportedFlags()
 	for _, dir := range library.exportedDirs() {
-		exportedFlags = append(exportedFlags, "-I"+dir)
+		exportedFlags = append(exportedFlags, "-I"+dir.String())
 	}
 	for _, dir := range library.exportedSystemDirs() {
-		exportedFlags = append(exportedFlags, "-isystem "+dir)
+		exportedFlags = append(exportedFlags, "-isystem "+dir.String())
 	}
 	if len(exportedFlags) > 0 {
 		fmt.Fprintln(w, "LOCAL_EXPORT_CFLAGS :=", strings.Join(exportedFlags, " "))
@@ -233,7 +229,7 @@ func (library *libraryDecorator) AndroidMk(ctx AndroidMkContext, ret *android.An
 		})
 	}
 	if len(library.Properties.Stubs.Versions) > 0 &&
-		android.DirectlyInAnyApex(ctx, ctx.Name()) && !ctx.inRecovery() && !ctx.useVndk() &&
+		android.DirectlyInAnyApex(ctx, ctx.Name()) && !ctx.InRecovery() && !ctx.UseVndk() &&
 		!ctx.static() {
 		if !library.buildStubs() {
 			ret.SubName = ".bootstrap"
@@ -312,6 +308,42 @@ func (test *testBinary) AndroidMk(ctx AndroidMkContext, ret *android.AndroidMkDa
 	androidMkWriteTestData(test.data, ctx, ret)
 }
 
+func (fuzz *fuzzBinary) AndroidMk(ctx AndroidMkContext, ret *android.AndroidMkData) {
+	ctx.subAndroidMk(ret, fuzz.binaryDecorator)
+
+	var fuzzFiles []string
+	for _, d := range fuzz.corpus {
+		fuzzFiles = append(fuzzFiles,
+			filepath.Dir(fuzz.corpusIntermediateDir.String())+":corpus/"+d.Base())
+	}
+
+	for _, d := range fuzz.data {
+		fuzzFiles = append(fuzzFiles,
+			filepath.Dir(fuzz.dataIntermediateDir.String())+":data/"+d.Rel())
+	}
+
+	if fuzz.dictionary != nil {
+		fuzzFiles = append(fuzzFiles,
+			filepath.Dir(fuzz.dictionary.String())+":"+fuzz.dictionary.Base())
+	}
+
+	if fuzz.config != nil {
+		fuzzFiles = append(fuzzFiles,
+			filepath.Dir(fuzz.config.String())+":config.json")
+	}
+
+	ret.Extra = append(ret.Extra, func(w io.Writer, outputFile android.Path) {
+		fmt.Fprintln(w, "LOCAL_IS_FUZZ_TARGET := true")
+		if len(fuzzFiles) > 0 {
+			fmt.Fprintln(w, "LOCAL_TEST_DATA := "+strings.Join(fuzzFiles, " "))
+		}
+		if fuzz.installedSharedDeps != nil {
+			fmt.Fprintln(w, "LOCAL_FUZZ_INSTALLED_SHARED_DEPS :="+
+				strings.Join(fuzz.installedSharedDeps, " "))
+		}
+	})
+}
+
 func (test *testLibrary) AndroidMk(ctx AndroidMkContext, ret *android.AndroidMkData) {
 	ctx.subAndroidMk(ret, test.libraryDecorator)
 }
@@ -332,11 +364,10 @@ func (installer *baseInstaller) AndroidMk(ctx AndroidMkContext, ret *android.And
 	}
 
 	ret.Extra = append(ret.Extra, func(w io.Writer, outputFile android.Path) {
-		path := installer.path.RelPathString()
-		dir, file := filepath.Split(path)
+		path, file := filepath.Split(installer.path.ToMakePath().String())
 		stem, suffix, _ := android.SplitFileExt(file)
 		fmt.Fprintln(w, "LOCAL_MODULE_SUFFIX := "+suffix)
-		fmt.Fprintln(w, "LOCAL_MODULE_PATH := $(OUT_DIR)/"+filepath.Clean(dir))
+		fmt.Fprintln(w, "LOCAL_MODULE_PATH := "+path)
 		fmt.Fprintln(w, "LOCAL_MODULE_STEM := "+stem)
 	})
 }
@@ -357,7 +388,6 @@ func (c *stubDecorator) AndroidMk(ctx AndroidMkContext, ret *android.AndroidMkDa
 
 func (c *llndkStubDecorator) AndroidMk(ctx AndroidMkContext, ret *android.AndroidMkData) {
 	ret.Class = "SHARED_LIBRARIES"
-	ret.SubName = vendorSuffix
 
 	ret.Extra = append(ret.Extra, func(w io.Writer, outputFile android.Path) {
 		c.libraryDecorator.androidMkWriteExportedFlags(w)
@@ -378,12 +408,11 @@ func (c *vndkPrebuiltLibraryDecorator) AndroidMk(ctx AndroidMkContext, ret *andr
 	ret.Extra = append(ret.Extra, func(w io.Writer, outputFile android.Path) {
 		c.libraryDecorator.androidMkWriteExportedFlags(w)
 
-		path := c.path.RelPathString()
-		dir, file := filepath.Split(path)
+		path, file := filepath.Split(c.path.ToMakePath().String())
 		stem, suffix, ext := android.SplitFileExt(file)
 		fmt.Fprintln(w, "LOCAL_BUILT_MODULE_STEM := $(LOCAL_MODULE)"+ext)
 		fmt.Fprintln(w, "LOCAL_MODULE_SUFFIX := "+suffix)
-		fmt.Fprintln(w, "LOCAL_MODULE_PATH := $(OUT_DIR)/"+filepath.Clean(dir))
+		fmt.Fprintln(w, "LOCAL_MODULE_PATH := "+path)
 		fmt.Fprintln(w, "LOCAL_MODULE_STEM := "+stem)
 	})
 }

@@ -105,7 +105,7 @@ func (r *robolectricTest) GenerateAndroidBuildActions(ctx android.ModuleContext)
 	r.roboSrcJar = roboSrcJar
 
 	for _, dep := range ctx.GetDirectDepsWithTag(libTag) {
-		r.libs = append(r.libs, ctx.OtherModuleName(dep))
+		r.libs = append(r.libs, dep.(Dependency).BaseModuleName())
 	}
 
 	// TODO: this could all be removed if tradefed was used as the test runner, it will find everything
@@ -121,25 +121,6 @@ func (r *robolectricTest) GenerateAndroidBuildActions(ctx android.ModuleContext)
 		}
 		r.tests = append(r.tests, s)
 	}
-}
-
-func shardTests(paths []string, shards int) [][]string {
-	if shards > len(paths) {
-		shards = len(paths)
-	}
-	if shards == 0 {
-		return nil
-	}
-	ret := make([][]string, 0, shards)
-	shardSize := (len(paths) + shards - 1) / shards
-	for len(paths) > shardSize {
-		ret = append(ret, paths[0:shardSize])
-		paths = paths[shardSize:]
-	}
-	if len(paths) > 0 {
-		ret = append(ret, paths)
-	}
-	return ret
 }
 
 func generateRoboTestConfig(ctx android.ModuleContext, outputFile android.WritablePath, instrumentedApp *AndroidApp) {
@@ -177,32 +158,35 @@ func (r *robolectricTest) generateRoboSrcJar(ctx android.ModuleContext, outputFi
 	TransformResourcesToJar(ctx, outputFile, srcJarArgs, srcJarDeps)
 }
 
-func (r *robolectricTest) AndroidMk() android.AndroidMkData {
-	data := r.Library.AndroidMk()
+func (r *robolectricTest) AndroidMkEntries() []android.AndroidMkEntries {
+	entriesList := r.Library.AndroidMkEntries()
+	entries := &entriesList[0]
 
-	data.Custom = func(w io.Writer, name, prefix, moduleDir string, data android.AndroidMkData) {
-		android.WriteAndroidMkData(w, data)
+	entries.ExtraFooters = []android.AndroidMkExtraFootersFunc{
+		func(w io.Writer, name, prefix, moduleDir string, entries *android.AndroidMkEntries) {
+			if s := r.robolectricProperties.Test_options.Shards; s != nil && *s > 1 {
+				numShards := int(*s)
+				shardSize := (len(r.tests) + numShards - 1) / numShards
+				shards := android.ShardStrings(r.tests, shardSize)
+				for i, shard := range shards {
+					r.writeTestRunner(w, name, "Run"+name+strconv.Itoa(i), shard)
+				}
 
-		if s := r.robolectricProperties.Test_options.Shards; s != nil && *s > 1 {
-			shards := shardTests(r.tests, int(*s))
-			for i, shard := range shards {
-				r.writeTestRunner(w, name, "Run"+name+strconv.Itoa(i), shard)
+				// TODO: add rules to dist the outputs of the individual tests, or combine them together?
+				fmt.Fprintln(w, "")
+				fmt.Fprintln(w, ".PHONY:", "Run"+name)
+				fmt.Fprintln(w, "Run"+name, ": \\")
+				for i := range shards {
+					fmt.Fprintln(w, "   ", "Run"+name+strconv.Itoa(i), "\\")
+				}
+				fmt.Fprintln(w, "")
+			} else {
+				r.writeTestRunner(w, name, "Run"+name, r.tests)
 			}
-
-			// TODO: add rules to dist the outputs of the individual tests, or combine them together?
-			fmt.Fprintln(w, "")
-			fmt.Fprintln(w, ".PHONY:", "Run"+name)
-			fmt.Fprintln(w, "Run"+name, ": \\")
-			for i := range shards {
-				fmt.Fprintln(w, "   ", "Run"+name+strconv.Itoa(i), "\\")
-			}
-			fmt.Fprintln(w, "")
-		} else {
-			r.writeTestRunner(w, name, "Run"+name, r.tests)
-		}
+		},
 	}
 
-	return data
+	return entriesList
 }
 
 func (r *robolectricTest) writeTestRunner(w io.Writer, module, name string, tests []string) {
@@ -233,6 +217,7 @@ func RobolectricTestFactory() android.Module {
 
 	module.AddProperties(
 		&module.Module.properties,
+		&module.Module.deviceProperties,
 		&module.Module.protoProperties,
 		&module.robolectricProperties)
 

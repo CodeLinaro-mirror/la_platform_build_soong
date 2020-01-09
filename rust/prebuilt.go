@@ -42,6 +42,7 @@ func PrebuiltDylibFactory() android.Module {
 func NewPrebuiltDylib(hod android.HostOrDeviceSupported) (*Module, *prebuiltLibraryDecorator) {
 	module, library := NewRustLibrary(hod)
 	library.BuildOnlyDylib()
+	library.setNoStdlibs()
 	library.setDylib()
 	prebuilt := &prebuiltLibraryDecorator{
 		libraryDecorator: library,
@@ -62,4 +63,9 @@ func (prebuilt *prebuiltLibraryDecorator) compile(ctx ModuleContext, flags Flags
 	prebuilt.unstrippedOutputFile = srcPath
 
 	return srcPath
+}
+
+func (prebuilt *prebuiltLibraryDecorator) compilerDeps(ctx DepsContext, deps Deps) Deps {
+	deps = prebuilt.baseCompiler.compilerDeps(ctx, deps)
+	return deps
 }

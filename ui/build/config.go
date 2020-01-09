@@ -15,8 +15,6 @@
 package build
 
 import (
-	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -31,10 +29,11 @@ type Config struct{ *configImpl }
 
 type configImpl struct {
 	// From the environment
-	arguments []string
-	goma      bool
-	environ   *Environment
-	distDir   string
+	arguments     []string
+	goma          bool
+	environ       *Environment
+	distDir       string
+	buildDateTime string
 
 	// From the arguments
 	parallel   int
@@ -145,6 +144,7 @@ func NewConfig(ctx Context, args ...string) Config {
 		"DIST_DIR",
 
 		// Variables that have caused problems in the past
+		"BASH_ENV",
 		"CDPATH",
 		"DISPLAY",
 		"GREP_OPTIONS",
@@ -189,37 +189,41 @@ func NewConfig(ctx Context, args ...string) Config {
 	checkTopDir(ctx)
 
 	if srcDir := absPath(ctx, "."); strings.ContainsRune(srcDir, ' ') {
-		log.Println("You are building in a directory whose absolute path contains a space character:")
-		log.Println()
-		log.Printf("%q\n", srcDir)
-		log.Println()
-		log.Fatalln("Directory names containing spaces are not supported")
+		ctx.Println("You are building in a directory whose absolute path contains a space character:")
+		ctx.Println()
+		ctx.Printf("%q\n", srcDir)
+		ctx.Println()
+		ctx.Fatalln("Directory names containing spaces are not supported")
 	}
 
 	if outDir := ret.OutDir(); strings.ContainsRune(outDir, ' ') {
-		log.Println("The absolute path of your output directory ($OUT_DIR) contains a space character:")
-		log.Println()
-		log.Printf("%q\n", outDir)
-		log.Println()
-		log.Fatalln("Directory names containing spaces are not supported")
+		ctx.Println("The absolute path of your output directory ($OUT_DIR) contains a space character:")
+		ctx.Println()
+		ctx.Printf("%q\n", outDir)
+		ctx.Println()
+		ctx.Fatalln("Directory names containing spaces are not supported")
 	}
 
 	if distDir := ret.DistDir(); strings.ContainsRune(distDir, ' ') {
-		log.Println("The absolute path of your dist directory ($DIST_DIR) contains a space character:")
-		log.Println()
-		log.Printf("%q\n", distDir)
-		log.Println()
-		log.Fatalln("Directory names containing spaces are not supported")
+		ctx.Println("The absolute path of your dist directory ($DIST_DIR) contains a space character:")
+		ctx.Println()
+		ctx.Printf("%q\n", distDir)
+		ctx.Println()
+		ctx.Fatalln("Directory names containing spaces are not supported")
 	}
 
 	// Configure Java-related variables, including adding it to $PATH
 	java8Home := filepath.Join("prebuilts/jdk/jdk8", ret.HostPrebuiltTag())
 	java9Home := filepath.Join("prebuilts/jdk/jdk9", ret.HostPrebuiltTag())
+	java11Home := filepath.Join("prebuilts/jdk/jdk11", ret.HostPrebuiltTag())
 	javaHome := func() string {
 		if override, ok := ret.environ.Get("OVERRIDE_ANDROID_JAVA_HOME"); ok {
 			return override
 		}
-		return java9Home
+		if toolchain11, ok := ret.environ.Get("EXPERIMENTAL_USE_OPENJDK11_TOOLCHAIN"); ok && toolchain11 != "true" {
+			ctx.Fatalln("The environment variable EXPERIMENTAL_USE_OPENJDK11_TOOLCHAIN is no longer supported. An OpenJDK 11 toolchain is now the global default.")
+		}
+		return java11Home
 	}()
 	absJavaHome := absPath(ctx, javaHome)
 
@@ -229,27 +233,25 @@ func NewConfig(ctx Context, args ...string) Config {
 	if path, ok := ret.environ.Get("PATH"); ok && path != "" {
 		newPath = append(newPath, path)
 	}
+
 	ret.environ.Unset("OVERRIDE_ANDROID_JAVA_HOME")
 	ret.environ.Set("JAVA_HOME", absJavaHome)
 	ret.environ.Set("ANDROID_JAVA_HOME", javaHome)
 	ret.environ.Set("ANDROID_JAVA8_HOME", java8Home)
 	ret.environ.Set("ANDROID_JAVA9_HOME", java9Home)
+	ret.environ.Set("ANDROID_JAVA11_HOME", java11Home)
 	ret.environ.Set("PATH", strings.Join(newPath, string(filepath.ListSeparator)))
 
 	outDir := ret.OutDir()
 	buildDateTimeFile := filepath.Join(outDir, "build_date.txt")
-	var content string
 	if buildDateTime, ok := ret.environ.Get("BUILD_DATETIME"); ok && buildDateTime != "" {
-		content = buildDateTime
+		ret.buildDateTime = buildDateTime
 	} else {
-		content = strconv.FormatInt(time.Now().Unix(), 10)
+		ret.buildDateTime = strconv.FormatInt(time.Now().Unix(), 10)
 	}
+
 	if ctx.Metrics != nil {
-		ctx.Metrics.SetBuildDateTime(content)
-	}
-	err := ioutil.WriteFile(buildDateTimeFile, []byte(content), 0777)
-	if err != nil {
-		ctx.Fatalln("Failed to write BUILD_DATETIME to file:", err)
+		ctx.Metrics.SetBuildDateTime(ret.buildDateTime)
 	}
 	ret.environ.Set("BUILD_DATETIME_FILE", buildDateTimeFile)
 
@@ -760,6 +762,10 @@ func (c *configImpl) StartRBE() bool {
 		}
 	}
 	return true
+}
+
+func (c *configImpl) UseRemoteBuild() bool {
+	return c.UseGoma() || c.UseRBE()
 }
 
 // RemoteParallel controls how many remote jobs (i.e., commands which contain

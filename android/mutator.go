@@ -15,6 +15,8 @@
 package android
 
 import (
+	"reflect"
+
 	"github.com/google/blueprint"
 	"github.com/google/blueprint/proptools"
 )
@@ -76,16 +78,18 @@ var preArch = []RegisterMutatorFunc{
 	registerLoadHookMutator,
 	RegisterNamespaceMutator,
 	// Rename package module types.
-	registerPackageRenamer,
+	RegisterPackageRenamer,
 	RegisterPrebuiltsPreArchMutators,
-	registerVisibilityRuleChecker,
+	RegisterVisibilityRuleChecker,
 	RegisterDefaultsPreArchMutators,
-	registerVisibilityRuleGatherer,
+	RegisterVisibilityRuleGatherer,
 }
 
 func registerArchMutator(ctx RegisterMutatorsContext) {
+	ctx.BottomUp("os", osMutator).Parallel()
 	ctx.BottomUp("arch", archMutator).Parallel()
 	ctx.TopDown("arch_hooks", archHookMutator).Parallel()
+	ctx.BottomUp("image", imageMutator).Parallel()
 }
 
 var preDeps = []RegisterMutatorFunc{
@@ -95,7 +99,7 @@ var preDeps = []RegisterMutatorFunc{
 var postDeps = []RegisterMutatorFunc{
 	registerPathDepsMutator,
 	RegisterPrebuiltsPostDepsMutators,
-	registerVisibilityRuleEnforcer,
+	RegisterVisibilityRuleEnforcer,
 	registerNeverallowMutator,
 	RegisterOverridePostDepsMutators,
 }
@@ -121,7 +125,7 @@ type TopDownMutatorContext interface {
 
 	Rename(name string)
 
-	CreateModule(blueprint.ModuleFactory, ...interface{})
+	CreateModule(ModuleFactory, ...interface{}) Module
 }
 
 type topDownMutatorContext struct {
@@ -140,14 +144,15 @@ type BottomUpMutatorContext interface {
 
 	AddDependency(module blueprint.Module, tag blueprint.DependencyTag, name ...string)
 	AddReverseDependency(module blueprint.Module, tag blueprint.DependencyTag, name string)
-	CreateVariations(...string) []blueprint.Module
-	CreateLocalVariations(...string) []blueprint.Module
+	CreateVariations(...string) []Module
+	CreateLocalVariations(...string) []Module
 	SetDependencyVariation(string)
 	SetDefaultDependencyVariation(*string)
 	AddVariationDependencies([]blueprint.Variation, blueprint.DependencyTag, ...string)
 	AddFarVariationDependencies([]blueprint.Variation, blueprint.DependencyTag, ...string)
 	AddInterVariantDependency(tag blueprint.DependencyTag, from, to blueprint.Module)
 	ReplaceDependencies(string)
+	AliasVariation(variationName string)
 }
 
 type bottomUpMutatorContext struct {
@@ -243,9 +248,25 @@ func (t *topDownMutatorContext) Rename(name string) {
 	t.Module().base().commonProperties.DebugName = name
 }
 
-func (t *topDownMutatorContext) CreateModule(factory blueprint.ModuleFactory, props ...interface{}) {
-	inherited := []interface{}{&t.Module().base().commonProperties, &t.Module().base().variableProperties}
-	t.bp.CreateModule(factory, append(inherited, props...)...)
+func (t *topDownMutatorContext) CreateModule(factory ModuleFactory, props ...interface{}) Module {
+	inherited := []interface{}{&t.Module().base().commonProperties}
+	module := t.bp.CreateModule(ModuleFactoryAdaptor(factory), append(inherited, props...)...).(Module)
+
+	if t.Module().base().variableProperties != nil && module.base().variableProperties != nil {
+		src := t.Module().base().variableProperties
+		dst := []interface{}{
+			module.base().variableProperties,
+			// Put an empty copy of the src properties into dst so that properties in src that are not in dst
+			// don't cause a "failed to find property to extend" error.
+			proptools.CloneEmptyProperties(reflect.ValueOf(src).Elem()).Interface(),
+		}
+		err := proptools.AppendMatchingProperties(dst, src, nil)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	return module
 }
 
 func (b *bottomUpMutatorContext) MutatorName() string {
@@ -265,28 +286,32 @@ func (b *bottomUpMutatorContext) AddReverseDependency(module blueprint.Module, t
 	b.bp.AddReverseDependency(module, tag, name)
 }
 
-func (b *bottomUpMutatorContext) CreateVariations(variations ...string) []blueprint.Module {
+func (b *bottomUpMutatorContext) CreateVariations(variations ...string) []Module {
 	modules := b.bp.CreateVariations(variations...)
 
+	aModules := make([]Module, len(modules))
 	for i := range variations {
-		base := modules[i].(Module).base()
+		aModules[i] = modules[i].(Module)
+		base := aModules[i].base()
 		base.commonProperties.DebugMutators = append(base.commonProperties.DebugMutators, b.MutatorName())
 		base.commonProperties.DebugVariations = append(base.commonProperties.DebugVariations, variations[i])
 	}
 
-	return modules
+	return aModules
 }
 
-func (b *bottomUpMutatorContext) CreateLocalVariations(variations ...string) []blueprint.Module {
+func (b *bottomUpMutatorContext) CreateLocalVariations(variations ...string) []Module {
 	modules := b.bp.CreateLocalVariations(variations...)
 
+	aModules := make([]Module, len(modules))
 	for i := range variations {
-		base := modules[i].(Module).base()
+		aModules[i] = modules[i].(Module)
+		base := aModules[i].base()
 		base.commonProperties.DebugMutators = append(base.commonProperties.DebugMutators, b.MutatorName())
 		base.commonProperties.DebugVariations = append(base.commonProperties.DebugVariations, variations[i])
 	}
 
-	return modules
+	return aModules
 }
 
 func (b *bottomUpMutatorContext) SetDependencyVariation(variation string) {
@@ -315,4 +340,8 @@ func (b *bottomUpMutatorContext) AddInterVariantDependency(tag blueprint.Depende
 
 func (b *bottomUpMutatorContext) ReplaceDependencies(name string) {
 	b.bp.ReplaceDependencies(name)
+}
+
+func (b *bottomUpMutatorContext) AliasVariation(variationName string) {
+	b.bp.AliasVariation(variationName)
 }

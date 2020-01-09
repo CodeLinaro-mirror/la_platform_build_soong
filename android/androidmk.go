@@ -61,7 +61,7 @@ type AndroidMkExtraFunc func(w io.Writer, outputFile Path)
 
 // Allows modules to customize their Android*.mk output.
 type AndroidMkEntriesProvider interface {
-	AndroidMkEntries() AndroidMkEntries
+	AndroidMkEntries() []AndroidMkEntries
 	BaseModuleName() string
 }
 
@@ -80,12 +80,14 @@ type AndroidMkEntries struct {
 	footer bytes.Buffer
 
 	ExtraEntries []AndroidMkExtraEntriesFunc
+	ExtraFooters []AndroidMkExtraFootersFunc
 
 	EntryMap   map[string][]string
 	entryOrder []string
 }
 
 type AndroidMkExtraEntriesFunc func(entries *AndroidMkEntries)
+type AndroidMkExtraFootersFunc func(w io.Writer, name, prefix, moduleDir string, entries *AndroidMkEntries)
 
 func (a *AndroidMkEntries) SetString(name, value string) {
 	if _, ok := a.EntryMap[name]; !ok {
@@ -94,12 +96,30 @@ func (a *AndroidMkEntries) SetString(name, value string) {
 	a.EntryMap[name] = []string{value}
 }
 
+func (a *AndroidMkEntries) SetPath(name string, path Path) {
+	if _, ok := a.EntryMap[name]; !ok {
+		a.entryOrder = append(a.entryOrder, name)
+	}
+	a.EntryMap[name] = []string{path.String()}
+}
+
 func (a *AndroidMkEntries) SetBoolIfTrue(name string, flag bool) {
 	if flag {
 		if _, ok := a.EntryMap[name]; !ok {
 			a.entryOrder = append(a.entryOrder, name)
 		}
 		a.EntryMap[name] = []string{"true"}
+	}
+}
+
+func (a *AndroidMkEntries) SetBool(name string, flag bool) {
+	if _, ok := a.EntryMap[name]; !ok {
+		a.entryOrder = append(a.entryOrder, name)
+	}
+	if flag {
+		a.EntryMap[name] = []string{"true"}
+	} else {
+		a.EntryMap[name] = []string{"false"}
 	}
 }
 
@@ -179,19 +199,19 @@ func (a *AndroidMkEntries) fillInEntries(config Config, bpPath string, mod bluep
 	switch amod.Os().Class {
 	case Host:
 		// Make cannot identify LOCAL_MODULE_HOST_ARCH:= common.
-		if archStr != "common" {
+		if amod.Arch().ArchType != Common {
 			a.SetString("LOCAL_MODULE_HOST_ARCH", archStr)
 		}
 		host = true
 	case HostCross:
 		// Make cannot identify LOCAL_MODULE_HOST_CROSS_ARCH:= common.
-		if archStr != "common" {
+		if amod.Arch().ArchType != Common {
 			a.SetString("LOCAL_MODULE_HOST_CROSS_ARCH", archStr)
 		}
 		host = true
 	case Device:
 		// Make cannot identify LOCAL_MODULE_TARGET_ARCH:= common.
-		if archStr != "common" {
+		if amod.Arch().ArchType != Common {
 			if amod.Target().NativeBridge {
 				hostArchStr := amod.Target().NativeBridgeHostArchName
 				if hostArchStr != "" {
@@ -210,9 +230,6 @@ func (a *AndroidMkEntries) fillInEntries(config Config, bpPath string, mod bluep
 		}
 		a.SetBoolIfTrue("LOCAL_ODM_MODULE", Bool(amod.commonProperties.Device_specific))
 		a.SetBoolIfTrue("LOCAL_PRODUCT_MODULE", Bool(amod.commonProperties.Product_specific))
-		// TODO(b/135957588) product_services_specific is matched to LOCAL_PRODUCT_MODULE
-		// as a workaround. Remove this after clearing all Android.bp
-		a.SetBoolIfTrue("LOCAL_PRODUCT_MODULE", Bool(amod.commonProperties.Product_services_specific))
 		a.SetBoolIfTrue("LOCAL_SYSTEM_EXT_MODULE", Bool(amod.commonProperties.System_ext_specific))
 		if amod.commonProperties.Owner != nil {
 			a.SetString("LOCAL_MODULE_OWNER", *amod.commonProperties.Owner)
@@ -254,14 +271,30 @@ func (a *AndroidMkEntries) fillInEntries(config Config, bpPath string, mod bluep
 
 	// Write to footer.
 	fmt.Fprintln(&a.footer, "include "+a.Include)
+	blueprintDir := filepath.Dir(bpPath)
+	for _, footerFunc := range a.ExtraFooters {
+		footerFunc(&a.footer, name, prefix, blueprintDir, a)
+	}
 }
 
 func (a *AndroidMkEntries) write(w io.Writer) {
+	if a.Disabled {
+		return
+	}
+
+	if !a.OutputFile.Valid() {
+		return
+	}
+
 	w.Write(a.header.Bytes())
 	for _, name := range a.entryOrder {
 		fmt.Fprintln(w, name+" := "+strings.Join(a.EntryMap[name], " "))
 	}
 	w.Write(a.footer.Bytes())
+}
+
+func (a *AndroidMkEntries) FooterLinesForTests() []string {
+	return strings.Split(string(a.footer.Bytes()), "\n")
 }
 
 func AndroidMkSingleton() Singleton {
@@ -477,10 +510,10 @@ func translateAndroidMkEntriesModule(ctx SingletonContext, w io.Writer, mod blue
 		return nil
 	}
 
-	entries := provider.AndroidMkEntries()
-	entries.fillInEntries(ctx.Config(), ctx.BlueprintFile(mod), mod)
-
-	entries.write(w)
+	for _, entries := range provider.AndroidMkEntries() {
+		entries.fillInEntries(ctx.Config(), ctx.BlueprintFile(mod), mod)
+		entries.write(w)
+	}
 
 	return nil
 }

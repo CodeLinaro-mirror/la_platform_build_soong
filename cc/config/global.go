@@ -48,6 +48,8 @@ var (
 		"-fno-strict-aliasing",
 
 		"-Werror=date-time",
+		"-Werror=pragma-pack",
+		"-Werror=pragma-pack-suspicious-include",
 	}
 
 	commonGlobalConlyflags = []string{}
@@ -108,6 +110,7 @@ var (
 	noOverrideGlobalCflags = []string{
 		"-Werror=int-to-pointer-cast",
 		"-Werror=pointer-to-int-cast",
+		"-Werror=fortify-source",
 	}
 
 	IllegalFlags = []string{
@@ -123,8 +126,8 @@ var (
 
 	// prebuilts/clang default settings.
 	ClangDefaultBase         = "prebuilts/clang/host"
-	ClangDefaultVersion      = "clang-r365631"
-	ClangDefaultShortVersion = "9.0.6"
+	ClangDefaultVersion      = "clang-r370808"
+	ClangDefaultShortVersion = "10.0.1"
 
 	// Directories with warnings from Android.bp files.
 	WarningAllowedProjects = []string{
