@@ -15,6 +15,8 @@
 package config
 
 import (
+	"strings"
+
 	"android/soong/android"
 	_ "android/soong/cc/config"
 )
@@ -26,15 +28,36 @@ var (
 	RustDefaultBase    = "prebuilts/rust/"
 	DefaultEdition     = "2018"
 	Stdlibs            = []string{
-		"libarena",
-		"libfmt_macros",
-		"libgraphviz",
-		"libserialize",
 		"libstd",
-		"libsyntax",
-		"libsyntax_ext",
-		"libsyntax_pos",
 		"libterm",
+		"libtest",
+	}
+
+	DefaultDenyWarnings = true
+
+	GlobalRustFlags = []string{
+		"--remap-path-prefix $$(pwd)=",
+		"-C codegen-units=1",
+		"-C opt-level=3",
+		"-C relocation-model=pic",
+	}
+
+	deviceGlobalRustFlags = []string{}
+
+	deviceGlobalLinkFlags = []string{
+		"-Bdynamic",
+		"-nostdlib",
+		"-Wl,-z,noexecstack",
+		"-Wl,-z,relro",
+		"-Wl,-z,now",
+		"-Wl,--build-id=md5",
+		"-Wl,--warn-shared-textrel",
+		"-Wl,--fatal-warnings",
+
+		"-Wl,--pack-dyn-relocs=android+relr",
+		"-Wl,--use-android-relr-tags",
+		"-Wl,--no-undefined",
+		"-Wl,--hash-style=gnu",
 	}
 )
 
@@ -62,4 +85,7 @@ func init() {
 	pctx.ImportAs("ccConfig", "android/soong/cc/config")
 	pctx.StaticVariable("RustLinker", "${ccConfig.ClangBin}/clang++")
 	pctx.StaticVariable("RustLinkerArgs", "-B ${ccConfig.ClangBin} -fuse-ld=lld")
+
+	pctx.StaticVariable("DeviceGlobalLinkFlags", strings.Join(deviceGlobalLinkFlags, " "))
+
 }

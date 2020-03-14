@@ -75,12 +75,10 @@ func GetConfig(name string) PathConfig {
 
 var Configuration = map[string]PathConfig{
 	"bash":     Allowed,
-	"bc":       Allowed,
 	"dd":       Allowed,
 	"diff":     Allowed,
 	"dlv":      Allowed,
 	"expr":     Allowed,
-	"find":     Allowed,
 	"fuser":    Allowed,
 	"getopt":   Allowed,
 	"git":      Allowed,
@@ -94,6 +92,7 @@ var Configuration = map[string]PathConfig{
 	"m4":       Log,
 	"openssl":  Allowed,
 	"patch":    Allowed,
+        "perl":     Log,
 	"pstree":   Allowed,
 	"python3":  Allowed,
 	"realpath": Allowed,
@@ -102,7 +101,6 @@ var Configuration = map[string]PathConfig{
 	"tr":       Allowed,
 	"unzip":    Allowed,
 	"zip":      Allowed,
-	"zipinfo":  Allowed,
 
 	// Host toolchain is removed. In-tree toolchain should be used instead.
 	// GCC also can't find cc1 with this implementation.

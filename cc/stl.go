@@ -20,13 +20,13 @@ import (
 	"strconv"
 )
 
-func getNdkStlFamily(m *Module) string {
+func getNdkStlFamily(m LinkableInterface) string {
 	family, _ := getNdkStlFamilyAndLinkType(m)
 	return family
 }
 
-func getNdkStlFamilyAndLinkType(m *Module) (string, string) {
-	stl := m.stl.Properties.SelectedStl
+func getNdkStlFamilyAndLinkType(m LinkableInterface) (string, string) {
+	stl := m.SelectedStl()
 	switch stl {
 	case "ndk_libc++_shared":
 		return "libc++", "shared"
@@ -175,7 +175,7 @@ func (stl *stl) deps(ctx BaseModuleContext, deps Deps) Deps {
 				deps.StaticLibs = append(deps.StaticLibs, "libunwind_llvm")
 			}
 			if ctx.staticBinary() {
-				deps.StaticLibs = append(deps.StaticLibs, "libm", "libc", "libdl")
+				deps.StaticLibs = append(deps.StaticLibs, "libm", "libc")
 			}
 		}
 	case "":
@@ -215,25 +215,25 @@ func (stl *stl) flags(ctx ModuleContext, flags Flags) Flags {
 			// these availability attributes are meaningless for us but cause
 			// build breaks when we try to use code that would not be available
 			// in the system's dylib.
-			flags.CppFlags = append(flags.CppFlags,
+			flags.Local.CppFlags = append(flags.Local.CppFlags,
 				"-D_LIBCPP_DISABLE_AVAILABILITY")
 		}
 
 		if !ctx.toolchain().Bionic() {
-			flags.CppFlags = append(flags.CppFlags, "-nostdinc++")
-			flags.extraLibFlags = append(flags.extraLibFlags, "-nodefaultlibs")
-			if ctx.staticBinary() {
-				flags.extraLibFlags = append(flags.extraLibFlags, hostStaticGccLibs[ctx.Os()]...)
-			} else {
-				flags.extraLibFlags = append(flags.extraLibFlags, hostDynamicGccLibs[ctx.Os()]...)
-			}
+			flags.Local.CppFlags = append(flags.Local.CppFlags, "-nostdinc++")
+			flags.extraLibFlags = append(flags.extraLibFlags, "-nostdlib++")
 			if ctx.Windows() {
+				if stl.Properties.SelectedStl == "libc++_static" {
+					// These are transitively needed by libc++_static.
+					flags.extraLibFlags = append(flags.extraLibFlags,
+						"-lmsvcrt", "-lucrt")
+				}
 				// Use SjLj exceptions for 32-bit.  libgcc_eh implements SjLj
 				// exception model for 32-bit.
 				if ctx.Arch().ArchType == android.X86 {
-					flags.CppFlags = append(flags.CppFlags, "-fsjlj-exceptions")
+					flags.Local.CppFlags = append(flags.Local.CppFlags, "-fsjlj-exceptions")
 				}
-				flags.CppFlags = append(flags.CppFlags,
+				flags.Local.CppFlags = append(flags.Local.CppFlags,
 					// Disable visiblity annotations since we're using static
 					// libc++.
 					"-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
@@ -243,52 +243,28 @@ func (stl *stl) flags(ctx ModuleContext, flags Flags) Flags {
 			}
 		} else {
 			if ctx.Arch().ArchType == android.Arm {
-				flags.LdFlags = append(flags.LdFlags, "-Wl,--exclude-libs,libunwind_llvm.a")
+				flags.Local.LdFlags = append(flags.Local.LdFlags, "-Wl,--exclude-libs,libunwind_llvm.a")
 			}
 		}
 	case "libstdc++":
 		// Nothing
 	case "ndk_system":
 		ndkSrcRoot := android.PathForSource(ctx, "prebuilts/ndk/current/sources/cxx-stl/system/include")
-		flags.CFlags = append(flags.CFlags, "-isystem "+ndkSrcRoot.String())
+		flags.Local.CFlags = append(flags.Local.CFlags, "-isystem "+ndkSrcRoot.String())
 	case "ndk_libc++_shared", "ndk_libc++_static":
 		if ctx.Arch().ArchType == android.Arm {
 			// Make sure the _Unwind_XXX symbols are not re-exported.
-			flags.LdFlags = append(flags.LdFlags, "-Wl,--exclude-libs,libunwind.a")
+			flags.Local.LdFlags = append(flags.Local.LdFlags, "-Wl,--exclude-libs,libunwind.a")
 		}
 	case "":
 		// None or error.
 		if !ctx.toolchain().Bionic() {
-			flags.CppFlags = append(flags.CppFlags, "-nostdinc++")
-			flags.extraLibFlags = append(flags.extraLibFlags, "-nodefaultlibs")
-			if ctx.staticBinary() {
-				flags.extraLibFlags = append(flags.extraLibFlags, hostStaticGccLibs[ctx.Os()]...)
-			} else {
-				flags.extraLibFlags = append(flags.extraLibFlags, hostDynamicGccLibs[ctx.Os()]...)
-			}
+			flags.Local.CppFlags = append(flags.Local.CppFlags, "-nostdinc++")
+			flags.extraLibFlags = append(flags.extraLibFlags, "-nostdlib++")
 		}
 	default:
 		panic(fmt.Errorf("Unknown stl: %q", stl.Properties.SelectedStl))
 	}
 
 	return flags
-}
-
-var hostDynamicGccLibs, hostStaticGccLibs map[android.OsType][]string
-
-func init() {
-	hostDynamicGccLibs = map[android.OsType][]string{
-		android.Fuchsia: []string{"-lc", "-lunwind"},
-		android.Linux:   []string{"-lgcc_s", "-lgcc", "-lc", "-lgcc_s", "-lgcc"},
-		android.Darwin:  []string{"-lc", "-lSystem"},
-		android.Windows: []string{"-Wl,--start-group", "-lmingw32", "-lgcc", "-lgcc_eh",
-			"-lmoldname", "-lmingwex", "-lmsvcrt", "-lucrt", "-lpthread",
-			"-ladvapi32", "-lshell32", "-luser32", "-lkernel32", "-lpsapi",
-			"-Wl,--end-group"},
-	}
-	hostStaticGccLibs = map[android.OsType][]string{
-		android.Linux:   []string{"-Wl,--start-group", "-lgcc", "-lgcc_eh", "-lc", "-Wl,--end-group"},
-		android.Darwin:  []string{"NO_STATIC_HOST_BINARIES_ON_DARWIN"},
-		android.Windows: []string{"NO_STATIC_HOST_BINARIES_ON_WINDOWS"},
-	}
 }

@@ -147,15 +147,17 @@ type ModuleContext interface {
 	ExpandSource(srcFile, prop string) Path
 	ExpandOptionalSource(srcFile *string, prop string) OptionalPath
 
-	InstallExecutable(installPath OutputPath, name string, srcPath Path, deps ...Path) OutputPath
-	InstallFile(installPath OutputPath, name string, srcPath Path, deps ...Path) OutputPath
-	InstallSymlink(installPath OutputPath, name string, srcPath OutputPath) OutputPath
-	InstallAbsoluteSymlink(installPath OutputPath, name string, absPath string) OutputPath
+	InstallExecutable(installPath InstallPath, name string, srcPath Path, deps ...Path) InstallPath
+	InstallFile(installPath InstallPath, name string, srcPath Path, deps ...Path) InstallPath
+	InstallSymlink(installPath InstallPath, name string, srcPath InstallPath) InstallPath
+	InstallAbsoluteSymlink(installPath InstallPath, name string, absPath string) InstallPath
 	CheckbuildFile(srcPath Path)
 
 	InstallInData() bool
+	InstallInTestcases() bool
 	InstallInSanitizerDir() bool
 	InstallInRecovery() bool
+	InstallInRoot() bool
 	InstallBypassMake() bool
 
 	RequiredModuleNames() []string
@@ -192,8 +194,10 @@ type Module interface {
 	Enabled() bool
 	Target() Target
 	InstallInData() bool
+	InstallInTestcases() bool
 	InstallInSanitizerDir() bool
 	InstallInRecovery() bool
+	InstallInRoot() bool
 	InstallBypassMake() bool
 	SkipInstall()
 	ExportedToMake() bool
@@ -298,9 +302,6 @@ type commonProperties struct {
 	// If a module does not specify the `visibility` property then it uses the
 	// `default_visibility` property of the `package` module in the module's package.
 	//
-	// If a module does not specify the `visibility` property then it uses the
-	// `default_visibility` property of the `package` module in the module's package.
-	//
 	// If the `default_visibility` property is not set for the module's package then
 	// it will use the `default_visibility` of its closest ancestor package for which
 	// a `default_visibility` property is specified.
@@ -361,11 +362,6 @@ type commonProperties struct {
 	// /system/product if product partition does not exist).
 	Product_specific *bool
 
-	// TODO(b/135957588) Product_services_specific will be removed once we clear all Android.bp
-	// files that have 'product_services_specific: true'. This will be converted to
-	// Product_speicific as a workaround.
-	Product_services_specific *bool
-
 	// whether this module extends system. When set to true, it is installed into /system_ext
 	// (or /system/system_ext if system_ext partition does not exist).
 	System_ext_specific *bool
@@ -413,6 +409,7 @@ type commonProperties struct {
 	} `android:"arch_variant"`
 
 	// Set by TargetMutator
+	CompileOS           OsType   `blueprint:"mutated"`
 	CompileTarget       Target   `blueprint:"mutated"`
 	CompileMultiTargets []Target `blueprint:"mutated"`
 	CompilePrimary      bool     `blueprint:"mutated"`
@@ -431,6 +428,9 @@ type commonProperties struct {
 	DebugName       string   `blueprint:"mutated"`
 	DebugMutators   []string `blueprint:"mutated"`
 	DebugVariations []string `blueprint:"mutated"`
+
+	// set by ImageMutator
+	ImageVariation string `blueprint:"mutated"`
 }
 
 type hostAndDeviceProperties struct {
@@ -510,8 +510,19 @@ func InitAndroidModule(m Module) {
 
 	m.AddProperties(
 		&base.nameProperties,
-		&base.commonProperties,
-		&base.variableProperties)
+		&base.commonProperties)
+
+	// Allow tests to override the default product variables
+	if base.variableProperties == nil {
+		base.variableProperties = zeroProductVariables
+	}
+
+	// Filter the product variables properties to the ones that exist on this module
+	base.variableProperties = createVariableProperties(m.GetProperties(), base.variableProperties)
+	if base.variableProperties != nil {
+		m.AddProperties(base.variableProperties)
+	}
+
 	base.generalProperties = m.GetProperties()
 	base.customizableProperties = m.GetProperties()
 
@@ -593,7 +604,7 @@ type ModuleBase struct {
 
 	nameProperties          nameProperties
 	commonProperties        commonProperties
-	variableProperties      variableProperties
+	variableProperties      interface{}
 	hostAndDeviceProperties hostAndDeviceProperties
 	generalProperties       []interface{}
 	archProperties          [][]interface{}
@@ -704,12 +715,6 @@ func (m *ModuleBase) visibility() []string {
 	}
 }
 
-func (m *ModuleBase) SetTarget(target Target, multiTargets []Target, primary bool) {
-	m.commonProperties.CompileTarget = target
-	m.commonProperties.CompileMultiTargets = multiTargets
-	m.commonProperties.CompilePrimary = primary
-}
-
 func (m *ModuleBase) Target() Target {
 	return m.commonProperties.CompileTarget
 }
@@ -768,6 +773,13 @@ func (m *ModuleBase) DeviceSupported() bool {
 		m.commonProperties.HostOrDeviceSupported == HostAndDeviceSupported &&
 			(m.hostAndDeviceProperties.Device_supported == nil ||
 				*m.hostAndDeviceProperties.Device_supported)
+}
+
+func (m *ModuleBase) HostSupported() bool {
+	return m.commonProperties.HostOrDeviceSupported == HostSupported ||
+		m.commonProperties.HostOrDeviceSupported == HostAndDeviceSupported &&
+			(m.hostAndDeviceProperties.Host_supported != nil &&
+				*m.hostAndDeviceProperties.Host_supported)
 }
 
 func (m *ModuleBase) Platform() bool {
@@ -832,12 +844,20 @@ func (m *ModuleBase) InstallInData() bool {
 	return false
 }
 
+func (m *ModuleBase) InstallInTestcases() bool {
+	return false
+}
+
 func (m *ModuleBase) InstallInSanitizerDir() bool {
 	return false
 }
 
 func (m *ModuleBase) InstallInRecovery() bool {
 	return Bool(m.commonProperties.Recovery)
+}
+
+func (m *ModuleBase) InstallInRoot() bool {
+	return false
 }
 
 func (m *ModuleBase) InstallBypassMake() bool {
@@ -850,6 +870,21 @@ func (m *ModuleBase) Owner() string {
 
 func (m *ModuleBase) NoticeFile() OptionalPath {
 	return m.noticeFile
+}
+
+func (m *ModuleBase) setImageVariation(variant string) {
+	m.commonProperties.ImageVariation = variant
+}
+
+func (m *ModuleBase) ImageVariation() blueprint.Variation {
+	return blueprint.Variation{
+		Mutator:   "image",
+		Variation: m.base().commonProperties.ImageVariation,
+	}
+}
+
+func (m *ModuleBase) InRecovery() bool {
+	return m.base().commonProperties.ImageVariation == RecoveryVariation
 }
 
 func (m *ModuleBase) generateModuleTarget(ctx ModuleContext) {
@@ -1177,6 +1212,12 @@ func (m *moduleContext) Variable(pctx PackageContext, name, value string) {
 func (m *moduleContext) Rule(pctx PackageContext, name string, params blueprint.RuleParams,
 	argNames ...string) blueprint.Rule {
 
+	if (m.config.UseGoma() || m.config.UseRBE()) && params.Pool == nil {
+		// When USE_GOMA=true or USE_RBE=true are set and the rule is not supported by goma/RBE, restrict
+		// jobs to the local parallelism value
+		params.Pool = localPool
+	}
+
 	rule := m.bp.Rule(pctx.PackageContext, name, params, argNames...)
 
 	if m.config.captureBuild {
@@ -1495,8 +1536,25 @@ func (m *ModuleBase) EnableNativeBridgeSupportByDefault() {
 	m.commonProperties.Native_bridge_supported = boolPtr(true)
 }
 
+func (m *ModuleBase) MakeAsSystemExt() {
+	m.commonProperties.Vendor = boolPtr(false)
+	m.commonProperties.Proprietary = boolPtr(false)
+	m.commonProperties.Soc_specific = boolPtr(false)
+	m.commonProperties.Product_specific = boolPtr(false)
+	m.commonProperties.System_ext_specific = boolPtr(true)
+}
+
+// IsNativeBridgeSupported returns true if "native_bridge_supported" is explicitly set as "true"
+func (m *ModuleBase) IsNativeBridgeSupported() bool {
+	return proptools.Bool(m.commonProperties.Native_bridge_supported)
+}
+
 func (m *moduleContext) InstallInData() bool {
 	return m.module.InstallInData()
+}
+
+func (m *moduleContext) InstallInTestcases() bool {
+	return m.module.InstallInTestcases()
 }
 
 func (m *moduleContext) InstallInSanitizerDir() bool {
@@ -1507,11 +1565,15 @@ func (m *moduleContext) InstallInRecovery() bool {
 	return m.module.InstallInRecovery()
 }
 
+func (m *moduleContext) InstallInRoot() bool {
+	return m.module.InstallInRoot()
+}
+
 func (m *moduleContext) InstallBypassMake() bool {
 	return m.module.InstallBypassMake()
 }
 
-func (m *moduleContext) skipInstall(fullInstallPath OutputPath) bool {
+func (m *moduleContext) skipInstall(fullInstallPath InstallPath) bool {
 	if m.module.base().commonProperties.SkipInstall {
 		return true
 	}
@@ -1536,18 +1598,18 @@ func (m *moduleContext) skipInstall(fullInstallPath OutputPath) bool {
 	return false
 }
 
-func (m *moduleContext) InstallFile(installPath OutputPath, name string, srcPath Path,
-	deps ...Path) OutputPath {
+func (m *moduleContext) InstallFile(installPath InstallPath, name string, srcPath Path,
+	deps ...Path) InstallPath {
 	return m.installFile(installPath, name, srcPath, Cp, deps)
 }
 
-func (m *moduleContext) InstallExecutable(installPath OutputPath, name string, srcPath Path,
-	deps ...Path) OutputPath {
+func (m *moduleContext) InstallExecutable(installPath InstallPath, name string, srcPath Path,
+	deps ...Path) InstallPath {
 	return m.installFile(installPath, name, srcPath, CpExecutable, deps)
 }
 
-func (m *moduleContext) installFile(installPath OutputPath, name string, srcPath Path,
-	rule blueprint.Rule, deps []Path) OutputPath {
+func (m *moduleContext) installFile(installPath InstallPath, name string, srcPath Path,
+	rule blueprint.Rule, deps []Path) InstallPath {
 
 	fullInstallPath := installPath.Join(m, name)
 	m.module.base().hooks.runInstallHooks(m, fullInstallPath, false)
@@ -1582,7 +1644,7 @@ func (m *moduleContext) installFile(installPath OutputPath, name string, srcPath
 	return fullInstallPath
 }
 
-func (m *moduleContext) InstallSymlink(installPath OutputPath, name string, srcPath OutputPath) OutputPath {
+func (m *moduleContext) InstallSymlink(installPath InstallPath, name string, srcPath InstallPath) InstallPath {
 	fullInstallPath := installPath.Join(m, name)
 	m.module.base().hooks.runInstallHooks(m, fullInstallPath, true)
 
@@ -1611,7 +1673,7 @@ func (m *moduleContext) InstallSymlink(installPath OutputPath, name string, srcP
 
 // installPath/name -> absPath where absPath might be a path that is available only at runtime
 // (e.g. /apex/...)
-func (m *moduleContext) InstallAbsoluteSymlink(installPath OutputPath, name string, absPath string) OutputPath {
+func (m *moduleContext) InstallAbsoluteSymlink(installPath InstallPath, name string, absPath string) InstallPath {
 	fullInstallPath := installPath.Join(m, name)
 	m.module.base().hooks.runInstallHooks(m, fullInstallPath, true)
 
@@ -1733,7 +1795,7 @@ type SourceFileProducer interface {
 }
 
 // A module that implements OutputFileProducer can be referenced from any property that is tagged with `android:"path"`
-// using the ":module" syntax or ":module{.tag}" syntax and provides a list of otuput files to be used as if they were
+// using the ":module" syntax or ":module{.tag}" syntax and provides a list of output files to be used as if they were
 // listed in the property.
 type OutputFileProducer interface {
 	OutputFiles(tag string) (Paths, error)

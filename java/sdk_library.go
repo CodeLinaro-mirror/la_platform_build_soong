@@ -79,9 +79,6 @@ func init() {
 }
 
 type sdkLibraryProperties struct {
-	// list of optional source files that are part of API but not part of runtime library.
-	Api_srcs []string `android:"arch_variant"`
-
 	// List of Java libraries that will be in the classpath when building stubs
 	Stub_only_libs []string `android:"arch_variant"`
 
@@ -197,65 +194,65 @@ func (module *SdkLibrary) GenerateAndroidBuildActions(ctx android.ModuleContext)
 	})
 }
 
-func (module *SdkLibrary) AndroidMk() android.AndroidMkData {
-	data := module.Library.AndroidMk()
-	data.Required = append(data.Required, module.xmlFileName())
+func (module *SdkLibrary) AndroidMkEntries() []android.AndroidMkEntries {
+	entriesList := module.Library.AndroidMkEntries()
+	entries := &entriesList[0]
+	entries.Required = append(entries.Required, module.xmlFileName())
 
-	data.Custom = func(w io.Writer, name, prefix, moduleDir string, data android.AndroidMkData) {
-		android.WriteAndroidMkData(w, data)
-
-		module.Library.AndroidMkHostDex(w, name, data)
-		if !Bool(module.sdkLibraryProperties.No_dist) {
-			// Create a phony module that installs the impl library, for the case when this lib is
-			// in PRODUCT_PACKAGES.
-			owner := module.ModuleBase.Owner()
-			if owner == "" {
-				if Bool(module.sdkLibraryProperties.Core_lib) {
-					owner = "core"
-				} else {
-					owner = "android"
+	entries.ExtraFooters = []android.AndroidMkExtraFootersFunc{
+		func(w io.Writer, name, prefix, moduleDir string, entries *android.AndroidMkEntries) {
+			if !Bool(module.sdkLibraryProperties.No_dist) {
+				// Create a phony module that installs the impl library, for the case when this lib is
+				// in PRODUCT_PACKAGES.
+				owner := module.ModuleBase.Owner()
+				if owner == "" {
+					if Bool(module.sdkLibraryProperties.Core_lib) {
+						owner = "core"
+					} else {
+						owner = "android"
+					}
+				}
+				// Create dist rules to install the stubs libs to the dist dir
+				if len(module.publicApiStubsPath) == 1 {
+					fmt.Fprintln(w, "$(call dist-for-goals,sdk win_sdk,"+
+						module.publicApiStubsImplPath.Strings()[0]+
+						":"+path.Join("apistubs", owner, "public",
+						module.BaseModuleName()+".jar")+")")
+				}
+				if len(module.systemApiStubsPath) == 1 {
+					fmt.Fprintln(w, "$(call dist-for-goals,sdk win_sdk,"+
+						module.systemApiStubsImplPath.Strings()[0]+
+						":"+path.Join("apistubs", owner, "system",
+						module.BaseModuleName()+".jar")+")")
+				}
+				if len(module.testApiStubsPath) == 1 {
+					fmt.Fprintln(w, "$(call dist-for-goals,sdk win_sdk,"+
+						module.testApiStubsImplPath.Strings()[0]+
+						":"+path.Join("apistubs", owner, "test",
+						module.BaseModuleName()+".jar")+")")
+				}
+				if module.publicApiFilePath != nil {
+					fmt.Fprintln(w, "$(call dist-for-goals,sdk win_sdk,"+
+						module.publicApiFilePath.String()+
+						":"+path.Join("apistubs", owner, "public", "api",
+						module.BaseModuleName()+".txt")+")")
+				}
+				if module.systemApiFilePath != nil {
+					fmt.Fprintln(w, "$(call dist-for-goals,sdk win_sdk,"+
+						module.systemApiFilePath.String()+
+						":"+path.Join("apistubs", owner, "system", "api",
+						module.BaseModuleName()+".txt")+")")
+				}
+				if module.testApiFilePath != nil {
+					fmt.Fprintln(w, "$(call dist-for-goals,sdk win_sdk,"+
+						module.testApiFilePath.String()+
+						":"+path.Join("apistubs", owner, "test", "api",
+						module.BaseModuleName()+".txt")+")")
 				}
 			}
-			// Create dist rules to install the stubs libs to the dist dir
-			if len(module.publicApiStubsPath) == 1 {
-				fmt.Fprintln(w, "$(call dist-for-goals,sdk win_sdk,"+
-					module.publicApiStubsImplPath.Strings()[0]+
-					":"+path.Join("apistubs", owner, "public",
-					module.BaseModuleName()+".jar")+")")
-			}
-			if len(module.systemApiStubsPath) == 1 {
-				fmt.Fprintln(w, "$(call dist-for-goals,sdk win_sdk,"+
-					module.systemApiStubsImplPath.Strings()[0]+
-					":"+path.Join("apistubs", owner, "system",
-					module.BaseModuleName()+".jar")+")")
-			}
-			if len(module.testApiStubsPath) == 1 {
-				fmt.Fprintln(w, "$(call dist-for-goals,sdk win_sdk,"+
-					module.testApiStubsImplPath.Strings()[0]+
-					":"+path.Join("apistubs", owner, "test",
-					module.BaseModuleName()+".jar")+")")
-			}
-			if module.publicApiFilePath != nil {
-				fmt.Fprintln(w, "$(call dist-for-goals,sdk win_sdk,"+
-					module.publicApiFilePath.String()+
-					":"+path.Join("apistubs", owner, "public", "api",
-					module.BaseModuleName()+".txt")+")")
-			}
-			if module.systemApiFilePath != nil {
-				fmt.Fprintln(w, "$(call dist-for-goals,sdk win_sdk,"+
-					module.systemApiFilePath.String()+
-					":"+path.Join("apistubs", owner, "system", "api",
-					module.BaseModuleName()+".txt")+")")
-			}
-			if module.testApiFilePath != nil {
-				fmt.Fprintln(w, "$(call dist-for-goals,sdk win_sdk,"+
-					module.testApiFilePath.String()+
-					":"+path.Join("apistubs", owner, "test", "api",
-					module.BaseModuleName()+".txt")+")")
-			}
-		}
+		},
 	}
-	return data
+	return entriesList
 }
 
 // Module name of the stubs library
@@ -296,6 +293,8 @@ func (module *SdkLibrary) implPath() string {
 		partition = "odm"
 	} else if module.ProductSpecific() {
 		partition = "product"
+	} else if module.SystemExtSpecific() {
+		partition = "system_ext"
 	}
 	return "/" + partition + "/framework/" + module.implName() + ".jar"
 }
@@ -366,17 +365,18 @@ func (module *SdkLibrary) latestRemovedApiFilegroupName(apiScope apiScope) strin
 // Creates a static java library that has API stubs
 func (module *SdkLibrary) createStubsLibrary(mctx android.LoadHookContext, apiScope apiScope) {
 	props := struct {
-		Name              *string
-		Srcs              []string
-		Sdk_version       *string
-		Libs              []string
-		Soc_specific      *bool
-		Device_specific   *bool
-		Product_specific  *bool
-		Compile_dex       *bool
-		System_modules    *string
-		Java_version      *string
-		Product_variables struct {
+		Name                *string
+		Srcs                []string
+		Sdk_version         *string
+		Libs                []string
+		Soc_specific        *bool
+		Device_specific     *bool
+		Product_specific    *bool
+		System_ext_specific *bool
+		Compile_dex         *bool
+		System_modules      *string
+		Java_version        *string
+		Product_variables   struct {
 			Unbundled_build struct {
 				Enabled *bool
 			}
@@ -420,9 +420,11 @@ func (module *SdkLibrary) createStubsLibrary(mctx android.LoadHookContext, apiSc
 		props.Device_specific = proptools.BoolPtr(true)
 	} else if module.ProductSpecific() {
 		props.Product_specific = proptools.BoolPtr(true)
+	} else if module.SystemExtSpecific() {
+		props.System_ext_specific = proptools.BoolPtr(true)
 	}
 
-	mctx.CreateModule(android.ModuleFactoryAdaptor(LibraryFactory), &props)
+	mctx.CreateModule(LibraryFactory, &props)
 }
 
 // Creates a droiddoc module that creates stubs source files from the given full source
@@ -461,7 +463,6 @@ func (module *SdkLibrary) createDocs(mctx android.LoadHookContext, apiScope apiS
 
 	props.Name = proptools.StringPtr(module.docsName(apiScope))
 	props.Srcs = append(props.Srcs, module.Library.Module.properties.Srcs...)
-	props.Srcs = append(props.Srcs, module.sdkLibraryProperties.Api_srcs...)
 	props.Sdk_version = proptools.StringPtr(sdkVersion)
 	props.Installable = proptools.BoolPtr(false)
 	// A droiddoc module has only one Libs property and doesn't distinguish between
@@ -522,7 +523,7 @@ func (module *SdkLibrary) createDocs(mctx android.LoadHookContext, apiScope apiS
 		module.latestRemovedApiFilegroupName(apiScope))
 	props.Check_api.Ignore_missing_latest_api = proptools.BoolPtr(true)
 
-	mctx.CreateModule(android.ModuleFactoryAdaptor(DroidstubsFactory), &props)
+	mctx.CreateModule(DroidstubsFactory, &props)
 }
 
 // Creates the xml file that publicizes the runtime library
@@ -560,17 +561,18 @@ func (module *SdkLibrary) createXmlFile(mctx android.LoadHookContext) {
 	genruleProps.Name = proptools.StringPtr(module.xmlFileName() + "-gen")
 	genruleProps.Cmd = proptools.StringPtr("echo '" + xmlContent + "' > $(out)")
 	genruleProps.Out = []string{module.xmlFileName()}
-	mctx.CreateModule(android.ModuleFactoryAdaptor(genrule.GenRuleFactory), &genruleProps)
+	mctx.CreateModule(genrule.GenRuleFactory, &genruleProps)
 
 	// creates a prebuilt_etc module to actually place the xml file under
 	// <partition>/etc/permissions
 	etcProps := struct {
-		Name             *string
-		Src              *string
-		Sub_dir          *string
-		Soc_specific     *bool
-		Device_specific  *bool
-		Product_specific *bool
+		Name                *string
+		Src                 *string
+		Sub_dir             *string
+		Soc_specific        *bool
+		Device_specific     *bool
+		Product_specific    *bool
+		System_ext_specific *bool
 	}{}
 	etcProps.Name = proptools.StringPtr(module.xmlFileName())
 	etcProps.Src = proptools.StringPtr(":" + module.xmlFileName() + "-gen")
@@ -581,8 +583,10 @@ func (module *SdkLibrary) createXmlFile(mctx android.LoadHookContext) {
 		etcProps.Device_specific = proptools.BoolPtr(true)
 	} else if module.ProductSpecific() {
 		etcProps.Product_specific = proptools.BoolPtr(true)
+	} else if module.SystemExtSpecific() {
+		etcProps.System_ext_specific = proptools.BoolPtr(true)
 	}
-	mctx.CreateModule(android.ModuleFactoryAdaptor(android.PrebuiltEtcFactory), &etcProps)
+	mctx.CreateModule(android.PrebuiltEtcFactory, &etcProps)
 }
 
 func (module *SdkLibrary) PrebuiltJars(ctx android.BaseModuleContext, sdkVersion string) android.Paths {
@@ -799,10 +803,11 @@ func (module *sdkLibraryImport) Name() string {
 func (module *sdkLibraryImport) createInternalModules(mctx android.LoadHookContext) {
 	// Creates a java import for the jar with ".stubs" suffix
 	props := struct {
-		Name             *string
-		Soc_specific     *bool
-		Device_specific  *bool
-		Product_specific *bool
+		Name                *string
+		Soc_specific        *bool
+		Device_specific     *bool
+		Product_specific    *bool
+		System_ext_specific *bool
 	}{}
 
 	props.Name = proptools.StringPtr(module.BaseModuleName() + sdkStubsLibrarySuffix)
@@ -813,9 +818,11 @@ func (module *sdkLibraryImport) createInternalModules(mctx android.LoadHookConte
 		props.Device_specific = proptools.BoolPtr(true)
 	} else if module.ProductSpecific() {
 		props.Product_specific = proptools.BoolPtr(true)
+	} else if module.SystemExtSpecific() {
+		props.System_ext_specific = proptools.BoolPtr(true)
 	}
 
-	mctx.CreateModule(android.ModuleFactoryAdaptor(ImportFactory), &props, &module.properties)
+	mctx.CreateModule(ImportFactory, &props, &module.properties)
 
 	javaSdkLibraries := javaSdkLibraries(mctx.Config())
 	javaSdkLibrariesLock.Lock()

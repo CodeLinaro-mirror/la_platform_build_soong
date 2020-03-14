@@ -93,6 +93,20 @@ func SortedStringKeys(m interface{}) []string {
 	return s
 }
 
+func SortedStringMapValues(m interface{}) []string {
+	v := reflect.ValueOf(m)
+	if v.Kind() != reflect.Map {
+		panic(fmt.Sprintf("%#v is not a map", m))
+	}
+	keys := v.MapKeys()
+	s := make([]string, 0, len(keys))
+	for _, key := range keys {
+		s = append(s, v.MapIndex(key).String())
+	}
+	sort.Strings(s)
+	return s
+}
+
 func IndexList(s string, list []string) int {
 	for i, l := range list {
 		if l == s {
@@ -318,4 +332,48 @@ func SplitFileExt(name string) (string, string, string) {
 	suffix = ext + suffix
 
 	return root, suffix, ext
+}
+
+// ShardPaths takes a Paths, and returns a slice of Paths where each one has at most shardSize paths.
+func ShardPaths(paths Paths, shardSize int) []Paths {
+	if len(paths) == 0 {
+		return nil
+	}
+	ret := make([]Paths, 0, (len(paths)+shardSize-1)/shardSize)
+	for len(paths) > shardSize {
+		ret = append(ret, paths[0:shardSize])
+		paths = paths[shardSize:]
+	}
+	if len(paths) > 0 {
+		ret = append(ret, paths)
+	}
+	return ret
+}
+
+// ShardStrings takes a slice of strings, and returns a slice of slices of strings where each one has at most shardSize
+// elements.
+func ShardStrings(s []string, shardSize int) [][]string {
+	if len(s) == 0 {
+		return nil
+	}
+	ret := make([][]string, 0, (len(s)+shardSize-1)/shardSize)
+	for len(s) > shardSize {
+		ret = append(ret, s[0:shardSize])
+		s = s[shardSize:]
+	}
+	if len(s) > 0 {
+		ret = append(ret, s)
+	}
+	return ret
+}
+
+func CheckDuplicate(values []string) (duplicate string, found bool) {
+	seen := make(map[string]string)
+	for _, v := range values {
+		if duplicate, found = seen[v]; found {
+			return
+		}
+		seen[v] = v
+	}
+	return
 }

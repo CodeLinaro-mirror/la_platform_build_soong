@@ -89,9 +89,14 @@ type config struct {
 	ConfigFileName           string
 	ProductVariablesFileName string
 
-	Targets              map[OsType][]Target
-	BuildOsVariant       string
-	BuildOsCommonVariant string
+	Targets             map[OsType][]Target
+	BuildOSTarget       Target // the Target for tools run on the build machine
+	BuildOSCommonTarget Target // the Target for common (java) tools run on the build machine
+	AndroidCommonTarget Target // the Target for common modules for the Android device
+
+	// multilibConflicts for an ArchType is true if there is earlier configured device architecture with the same
+	// multilib value.
+	multilibConflicts map[ArchType]bool
 
 	deviceConfig *deviceConfig
 
@@ -107,8 +112,6 @@ type config struct {
 
 	captureBuild      bool // true for tests, saves build parameters for each module
 	ignoreEnvironment bool // true for tests, returns empty from all Getenv calls
-
-	targetOpenJDK9 bool // Target 1.9
 
 	stopBefore bootstrap.StopBefore
 
@@ -209,9 +212,9 @@ func TestConfig(buildDir string, env map[string]string) Config {
 	config := &config{
 		productVariables: productVariables{
 			DeviceName:                  stringPtr("test_device"),
-			Platform_sdk_version:        intPtr(26),
+			Platform_sdk_version:        intPtr(30),
 			DeviceSystemSdkVersions:     []string{"14", "15"},
-			Platform_systemsdk_versions: []string{"25", "26"},
+			Platform_systemsdk_versions: []string{"29", "30"},
 			AAPTConfig:                  []string{"normal", "large", "xlarge", "hdpi", "xhdpi", "xxhdpi"},
 			AAPTPreferredConfig:         stringPtr("xhdpi"),
 			AAPTCharacteristics:         stringPtr("nosdcard"),
@@ -240,10 +243,10 @@ func TestArchConfigNativeBridge(buildDir string, env map[string]string) Config {
 	config := testConfig.config
 
 	config.Targets[Android] = []Target{
-		{Android, Arch{ArchType: X86_64, ArchVariant: "silvermont", Native: true, Abi: []string{"arm64-v8a"}}, NativeBridgeDisabled, "", ""},
-		{Android, Arch{ArchType: X86, ArchVariant: "silvermont", Native: true, Abi: []string{"armeabi-v7a"}}, NativeBridgeDisabled, "", ""},
-		{Android, Arch{ArchType: Arm64, ArchVariant: "armv8-a", Native: true, Abi: []string{"arm64-v8a"}}, NativeBridgeEnabled, "x86_64", "arm64"},
-		{Android, Arch{ArchType: Arm, ArchVariant: "armv7-a-neon", Native: true, Abi: []string{"armeabi-v7a"}}, NativeBridgeEnabled, "x86", "arm"},
+		{Android, Arch{ArchType: X86_64, ArchVariant: "silvermont", Abi: []string{"arm64-v8a"}}, NativeBridgeDisabled, "", ""},
+		{Android, Arch{ArchType: X86, ArchVariant: "silvermont", Abi: []string{"armeabi-v7a"}}, NativeBridgeDisabled, "", ""},
+		{Android, Arch{ArchType: Arm64, ArchVariant: "armv8-a", Abi: []string{"arm64-v8a"}}, NativeBridgeEnabled, "x86_64", "arm64"},
+		{Android, Arch{ArchType: Arm, ArchVariant: "armv7-a-neon", Abi: []string{"armeabi-v7a"}}, NativeBridgeEnabled, "x86", "arm"},
 	}
 
 	return testConfig
@@ -255,7 +258,7 @@ func TestArchConfigFuchsia(buildDir string, env map[string]string) Config {
 
 	config.Targets = map[OsType][]Target{
 		Fuchsia: []Target{
-			{Fuchsia, Arch{ArchType: Arm64, ArchVariant: "", Native: true}, NativeBridgeDisabled, "", ""},
+			{Fuchsia, Arch{ArchType: Arm64, ArchVariant: ""}, NativeBridgeDisabled, "", ""},
 		},
 		BuildOs: []Target{
 			{BuildOs, Arch{ArchType: X86_64}, NativeBridgeDisabled, "", ""},
@@ -272,8 +275,8 @@ func TestArchConfig(buildDir string, env map[string]string) Config {
 
 	config.Targets = map[OsType][]Target{
 		Android: []Target{
-			{Android, Arch{ArchType: Arm64, ArchVariant: "armv8-a", Native: true, Abi: []string{"arm64-v8a"}}, NativeBridgeDisabled, "", ""},
-			{Android, Arch{ArchType: Arm, ArchVariant: "armv7-a-neon", Native: true, Abi: []string{"armeabi-v7a"}}, NativeBridgeDisabled, "", ""},
+			{Android, Arch{ArchType: Arm64, ArchVariant: "armv8-a", Abi: []string{"arm64-v8a"}}, NativeBridgeDisabled, "", ""},
+			{Android, Arch{ArchType: Arm, ArchVariant: "armv7-a-neon", Abi: []string{"armeabi-v7a"}}, NativeBridgeDisabled, "", ""},
 		},
 		BuildOs: []Target{
 			{BuildOs, Arch{ArchType: X86_64}, NativeBridgeDisabled, "", ""},
@@ -285,8 +288,9 @@ func TestArchConfig(buildDir string, env map[string]string) Config {
 		config.Targets[BuildOs] = config.Targets[BuildOs][:1]
 	}
 
-	config.BuildOsVariant = config.Targets[BuildOs][0].String()
-	config.BuildOsCommonVariant = getCommonTargets(config.Targets[BuildOs])[0].String()
+	config.BuildOSTarget = config.Targets[BuildOs][0]
+	config.BuildOSCommonTarget = getCommonTargets(config.Targets[BuildOs])[0]
+	config.AndroidCommonTarget = getCommonTargets(config.Targets[Android])[0]
 	config.TestProductVariables.DeviceArch = proptools.StringPtr("arm64")
 	config.TestProductVariables.DeviceArchVariant = proptools.StringPtr("armv8-a")
 	config.TestProductVariables.DeviceSecondaryArch = proptools.StringPtr("arm")
@@ -305,8 +309,9 @@ func NewConfig(srcDir, buildDir string) (Config, error) {
 
 		env: originalEnv,
 
-		srcDir:   srcDir,
-		buildDir: buildDir,
+		srcDir:            srcDir,
+		buildDir:          buildDir,
+		multilibConflicts: make(map[ArchType]bool),
 	}
 
 	config.deviceConfig = &deviceConfig{
@@ -360,9 +365,20 @@ func NewConfig(srcDir, buildDir string) (Config, error) {
 		targets[Android] = androidTargets
 	}
 
+	multilib := make(map[string]bool)
+	for _, target := range targets[Android] {
+		if seen := multilib[target.Arch.ArchType.Multilib]; seen {
+			config.multilibConflicts[target.Arch.ArchType] = true
+		}
+		multilib[target.Arch.ArchType.Multilib] = true
+	}
+
 	config.Targets = targets
-	config.BuildOsVariant = targets[BuildOs][0].String()
-	config.BuildOsCommonVariant = getCommonTargets(targets[BuildOs])[0].String()
+	config.BuildOSTarget = config.Targets[BuildOs][0]
+	config.BuildOSCommonTarget = getCommonTargets(config.Targets[BuildOs])[0]
+	if len(config.Targets[Android]) > 0 {
+		config.AndroidCommonTarget = getCommonTargets(config.Targets[Android])[0]
+	}
 
 	if err := config.fromEnv(); err != nil {
 		return Config{}, err
@@ -373,13 +389,10 @@ func NewConfig(srcDir, buildDir string) (Config, error) {
 
 func (c *config) fromEnv() error {
 	switch c.Getenv("EXPERIMENTAL_JAVA_LANGUAGE_LEVEL_9") {
-	case "":
-		// Nothing, this is the default
-	case "true":
-		// Use -source 9 -target 9
-		c.targetOpenJDK9 = true
+	case "", "true":
+		// Do nothing
 	default:
-		return fmt.Errorf(`Invalid value for EXPERIMENTAL_JAVA_LANGUAGE_LEVEL_9, should be "" or "true"`)
+		return fmt.Errorf("The environment variable EXPERIMENTAL_JAVA_LANGUAGE_LEVEL_9 is no longer supported. Java language level 9 is now the global default.")
 	}
 
 	return nil
@@ -403,6 +416,18 @@ var _ bootstrap.ConfigBlueprintToolLocation = (*config)(nil)
 
 func (c *config) HostToolPath(ctx PathContext, tool string) Path {
 	return PathForOutput(ctx, "host", c.PrebuiltOS(), "bin", tool)
+}
+
+func (c *config) HostJNIToolPath(ctx PathContext, path string) Path {
+	ext := ".so"
+	if runtime.GOOS == "darwin" {
+		ext = ".dylib"
+	}
+	return PathForOutput(ctx, "host", c.PrebuiltOS(), "lib64", path+ext)
+}
+
+func (c *config) HostJavaToolPath(ctx PathContext, path string) Path {
+	return PathForOutput(ctx, "host", c.PrebuiltOS(), "framework", path)
 }
 
 // HostSystemTool looks for non-hermetic tools from the system we're running on.
@@ -760,11 +785,6 @@ func (c *config) EmitXrefRules() bool {
 	return c.XrefCorpusName() != ""
 }
 
-// Returns true if -source 1.9 -target 1.9 is being passed to javac
-func (c *config) TargetOpenJDK9() bool {
-	return c.targetOpenJDK9
-}
-
 func (c *config) ClangTidy() bool {
 	return Bool(c.productVariables.ClangTidy)
 }
@@ -800,7 +820,7 @@ func (c *config) ArtUseReadBarrier() bool {
 func (c *config) EnforceRROForModule(name string) bool {
 	enforceList := c.productVariables.EnforceRROTargets
 	if enforceList != nil {
-		if len(enforceList) == 1 && (enforceList)[0] == "*" {
+		if InList("*", enforceList) {
 			return true
 		}
 		return InList(name, enforceList)
@@ -850,6 +870,10 @@ func (c *config) FrameworksBaseDirExists(ctx PathContext) bool {
 
 func (c *config) VndkSnapshotBuildArtifacts() bool {
 	return Bool(c.productVariables.VndkSnapshotBuildArtifacts)
+}
+
+func (c *config) HasMultilibConflict(arch ArchType) bool {
+	return c.multilibConflicts[arch]
 }
 
 func (c *deviceConfig) Arches() []Arch {
@@ -1009,19 +1033,6 @@ func findOverrideValue(overrides []string, name string, errorMsg string) (newVal
 	return "", false
 }
 
-// SecondArchIsTranslated returns true if the primary device arch is X86 or X86_64 and the device also has an arch
-// that is Arm or Arm64.
-func (c *config) SecondArchIsTranslated() bool {
-	deviceTargets := c.Targets[Android]
-	if len(deviceTargets) < 2 {
-		return false
-	}
-
-	arch := deviceTargets[0].Arch
-
-	return (arch.ArchType == X86 || arch.ArchType == X86_64) && hasArmAndroidArch(deviceTargets)
-}
-
 func (c *config) IntegerOverflowDisabledForPath(path string) bool {
 	if c.productVariables.IntegerOverflowExcludePaths == nil {
 		return false
@@ -1086,6 +1097,14 @@ func (c *config) EnforceSystemCertificate() bool {
 
 func (c *config) EnforceSystemCertificateWhitelist() []string {
 	return c.productVariables.EnforceSystemCertificateWhitelist
+}
+
+func (c *config) EnforceProductPartitionInterface() bool {
+	return Bool(c.productVariables.EnforceProductPartitionInterface)
+}
+
+func (c *config) InstallExtraFlattenedApexes() bool {
+	return Bool(c.productVariables.InstallExtraFlattenedApexes)
 }
 
 func (c *config) ProductHiddenAPIStubs() []string {

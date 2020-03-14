@@ -145,6 +145,18 @@ func GatherRequiredDepsForTest(os android.OsType) string {
 			symbol_file: "",
 		}
 		cc_library {
+			name: "libft2",
+			no_libcrt: true,
+			nocrt: true,
+			system_shared_libs: [],
+			recovery_available: true,
+		}
+		llndk_library {
+			name: "libft2",
+			symbol_file: "",
+			vendor_available: false,
+		}
+		cc_library {
 			name: "libc++_static",
 			no_libcrt: true,
 			nocrt: true,
@@ -190,6 +202,7 @@ func GatherRequiredDepsForTest(os android.OsType) string {
 			name: "crtbegin_so",
 			recovery_available: true,
 			vendor_available: true,
+			stl: "none",
 		}
 
 		cc_object {
@@ -208,6 +221,7 @@ func GatherRequiredDepsForTest(os android.OsType) string {
 			name: "crtend_so",
 			recovery_available: true,
 			vendor_available: true,
+			stl: "none",
 		}
 
 		cc_object {
@@ -239,23 +253,25 @@ func CreateTestContext(bp string, fs map[string][]byte,
 	os android.OsType) *android.TestContext {
 
 	ctx := android.NewTestArchContext()
-	ctx.RegisterModuleType("cc_binary", android.ModuleFactoryAdaptor(BinaryFactory))
-	ctx.RegisterModuleType("cc_binary_host", android.ModuleFactoryAdaptor(binaryHostFactory))
-	ctx.RegisterModuleType("cc_fuzz", android.ModuleFactoryAdaptor(FuzzFactory))
-	ctx.RegisterModuleType("cc_library", android.ModuleFactoryAdaptor(LibraryFactory))
-	ctx.RegisterModuleType("cc_library_shared", android.ModuleFactoryAdaptor(LibrarySharedFactory))
-	ctx.RegisterModuleType("cc_library_static", android.ModuleFactoryAdaptor(LibraryStaticFactory))
-	ctx.RegisterModuleType("cc_library_headers", android.ModuleFactoryAdaptor(LibraryHeaderFactory))
-	ctx.RegisterModuleType("cc_test", android.ModuleFactoryAdaptor(TestFactory))
-	ctx.RegisterModuleType("toolchain_library", android.ModuleFactoryAdaptor(ToolchainLibraryFactory))
-	ctx.RegisterModuleType("llndk_library", android.ModuleFactoryAdaptor(LlndkLibraryFactory))
-	ctx.RegisterModuleType("llndk_headers", android.ModuleFactoryAdaptor(llndkHeadersFactory))
-	ctx.RegisterModuleType("vendor_public_library", android.ModuleFactoryAdaptor(vendorPublicLibraryFactory))
-	ctx.RegisterModuleType("cc_object", android.ModuleFactoryAdaptor(ObjectFactory))
-	ctx.RegisterModuleType("filegroup", android.ModuleFactoryAdaptor(android.FileGroupFactory))
-	ctx.RegisterModuleType("vndk_prebuilt_shared", android.ModuleFactoryAdaptor(vndkPrebuiltSharedFactory))
+	ctx.RegisterModuleType("cc_defaults", defaultsFactory)
+	ctx.RegisterModuleType("cc_binary", BinaryFactory)
+	ctx.RegisterModuleType("cc_binary_host", binaryHostFactory)
+	ctx.RegisterModuleType("cc_fuzz", FuzzFactory)
+	ctx.RegisterModuleType("cc_library", LibraryFactory)
+	ctx.RegisterModuleType("cc_library_shared", LibrarySharedFactory)
+	ctx.RegisterModuleType("cc_library_static", LibraryStaticFactory)
+	ctx.RegisterModuleType("cc_library_headers", LibraryHeaderFactory)
+	ctx.RegisterModuleType("cc_test", TestFactory)
+	ctx.RegisterModuleType("toolchain_library", ToolchainLibraryFactory)
+	ctx.RegisterModuleType("llndk_library", LlndkLibraryFactory)
+	ctx.RegisterModuleType("llndk_headers", llndkHeadersFactory)
+	ctx.RegisterModuleType("ndk_library", NdkLibraryFactory)
+	ctx.RegisterModuleType("vendor_public_library", vendorPublicLibraryFactory)
+	ctx.RegisterModuleType("cc_object", ObjectFactory)
+	ctx.RegisterModuleType("filegroup", android.FileGroupFactory)
+	ctx.RegisterModuleType("vndk_prebuilt_shared", VndkPrebuiltSharedFactory)
+	ctx.RegisterModuleType("vndk_libraries_txt", VndkLibrariesTxtFactory)
 	ctx.PreDepsMutators(func(ctx android.RegisterMutatorsContext) {
-		ctx.BottomUp("image", ImageMutator).Parallel()
 		ctx.BottomUp("link", LinkageMutator).Parallel()
 		ctx.BottomUp("vndk", VndkMutator).Parallel()
 		ctx.BottomUp("version", VersionMutator).Parallel()
@@ -264,7 +280,8 @@ func CreateTestContext(bp string, fs map[string][]byte,
 	ctx.PostDepsMutators(func(ctx android.RegisterMutatorsContext) {
 		ctx.TopDown("double_loadable", checkDoubleLoadableLibraries).Parallel()
 	})
-	ctx.RegisterSingletonType("vndk-snapshot", android.SingletonFactoryAdaptor(VndkSnapshotSingleton))
+	ctx.PreArchMutators(android.RegisterDefaultsPreArchMutators)
+	ctx.RegisterSingletonType("vndk-snapshot", VndkSnapshotSingleton)
 
 	// add some modules that are required by the compiler and/or linker
 	bp = bp + GatherRequiredDepsForTest(os)
@@ -274,6 +291,7 @@ func CreateTestContext(bp string, fs map[string][]byte,
 		"foo.c":       nil,
 		"foo.lds":     nil,
 		"bar.c":       nil,
+		"baz.c":       nil,
 		"baz.o":       nil,
 		"a.proto":     nil,
 		"b.aidl":      nil,

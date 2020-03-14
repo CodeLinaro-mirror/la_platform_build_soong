@@ -30,7 +30,7 @@ type platformCompatConfig struct {
 	android.ModuleBase
 
 	properties     platformCompatConfigProperties
-	installDirPath android.OutputPath
+	installDirPath android.InstallPath
 	configFile     android.OutputPath
 }
 
@@ -71,18 +71,18 @@ func (p *platformCompatConfig) GenerateAndroidBuildActions(ctx android.ModuleCon
 
 }
 
-func (p *platformCompatConfig) AndroidMkEntries() android.AndroidMkEntries {
-	return android.AndroidMkEntries{
+func (p *platformCompatConfig) AndroidMkEntries() []android.AndroidMkEntries {
+	return []android.AndroidMkEntries{android.AndroidMkEntries{
 		Class:      "ETC",
 		OutputFile: android.OptionalPathForPath(p.configFile),
 		Include:    "$(BUILD_PREBUILT)",
 		ExtraEntries: []android.AndroidMkExtraEntriesFunc{
 			func(entries *android.AndroidMkEntries) {
-				entries.SetString("LOCAL_MODULE_PATH", "$(OUT_DIR)/"+p.installDirPath.RelPathString())
+				entries.SetString("LOCAL_MODULE_PATH", p.installDirPath.ToMakePath().String())
 				entries.SetString("LOCAL_INSTALLED_MODULE_STEM", p.configFile.Base())
 			},
 		},
-	}
+	}}
 }
 
 func platformCompatConfigFactory() android.Module {

@@ -29,15 +29,10 @@ func makeVarsProvider(ctx android.MakeVarsContext) {
 	ctx.Strict("TARGET_DEFAULT_BOOTCLASSPATH_LIBRARIES", strings.Join(DefaultBootclasspathLibraries, " "))
 	ctx.Strict("DEFAULT_SYSTEM_MODULES", DefaultSystemModules)
 
-	if ctx.Config().TargetOpenJDK9() {
-		ctx.Strict("DEFAULT_JAVA_LANGUAGE_VERSION", "1.9")
-	} else {
-		ctx.Strict("DEFAULT_JAVA_LANGUAGE_VERSION", "1.8")
-	}
-
 	ctx.Strict("ANDROID_JAVA_HOME", "${JavaHome}")
 	ctx.Strict("ANDROID_JAVA8_HOME", "prebuilts/jdk/jdk8/${hostPrebuiltTag}")
 	ctx.Strict("ANDROID_JAVA9_HOME", "prebuilts/jdk/jdk9/${hostPrebuiltTag}")
+	ctx.Strict("ANDROID_JAVA11_HOME", "prebuilts/jdk/jdk11/${hostPrebuiltTag}")
 	ctx.Strict("ANDROID_JAVA_TOOLCHAIN", "${JavaToolchain}")
 	ctx.Strict("JAVA", "${JavaCmd} ${JavaVmFlags}")
 	ctx.Strict("JAVAC", "${JavacCmd} ${JavacVmFlags}")

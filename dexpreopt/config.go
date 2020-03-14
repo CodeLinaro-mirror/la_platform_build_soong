@@ -24,8 +24,6 @@ import (
 
 // GlobalConfig stores the configuration for dex preopting set by the product
 type GlobalConfig struct {
-	DefaultNoStripping bool // don't strip dex files by default
-
 	DisablePreopt        bool     // disable preopt for all modules
 	DisablePreoptModules []string // modules with preopt disabled by product-specific config
 
@@ -40,23 +38,22 @@ type GlobalConfig struct {
 	DisableGenerateProfile bool   // don't generate profiles
 	ProfileDir             string // directory to find profiles in
 
-	BootJars []string // modules for jars that form the boot class path
+	BootJars          []string // modules for jars that form the boot class path
+	UpdatableBootJars []string // jars within apex that form the boot class path
 
-	ArtApexJars                   []string // modules for jars that are in the ART APEX
-	ProductUpdatableBootModules   []string
-	ProductUpdatableBootLocations []string
+	ArtApexJars []string // modules for jars that are in the ART APEX
 
-	SystemServerJars []string // jars that form the system server
-	SystemServerApps []string // apps that are loaded into system server
-	SpeedApps        []string // apps that should be speed optimized
+	SystemServerJars          []string // jars that form the system server
+	SystemServerApps          []string // apps that are loaded into system server
+	UpdatableSystemServerJars []string // jars within apex that are loaded into system server
+	SpeedApps                 []string // apps that should be speed optimized
 
 	PreoptFlags []string // global dex2oat flags that should be used if no module-specific dex2oat flags are specified
 
 	DefaultCompilerFilter      string // default compiler filter to pass to dex2oat, overridden by --compiler-filter= in module-specific dex2oat flags
 	SystemServerCompilerFilter string // default compiler filter to pass to dex2oat for system server jars
 
-	GenerateDMFiles     bool // generate Dex Metadata files
-	NeverAllowStripping bool // whether stripping should not be done - used as build time check to make sure dex files are always available
+	GenerateDMFiles bool // generate Dex Metadata files
 
 	NoDebugInfo                 bool // don't generate debug info by default
 	DontResolveStartupStrings   bool // don't resolve string literals loaded during application startup.
@@ -120,9 +117,10 @@ type ModuleConfig struct {
 	UsesLibraries                []string
 	LibraryPaths                 map[string]android.Path
 
-	Archs               []android.ArchType
-	DexPreoptImages     []android.Path
-	DexPreoptImagesDeps []android.Paths
+	Archs                   []android.ArchType
+	DexPreoptImages         []android.Path
+	DexPreoptImagesDeps     []android.OutputPaths
+	DexPreoptImageLocations []string
 
 	PreoptBootClassPathDexFiles     android.Paths // file paths of boot class path files
 	PreoptBootClassPathDexLocations []string      // virtual locations of boot class path files
@@ -133,10 +131,6 @@ type ModuleConfig struct {
 	ForceCreateAppImage bool
 
 	PresignedPrebuilt bool
-
-	NoStripping     bool
-	StripInputPath  android.Path
-	StripOutputPath android.WritablePath
 }
 
 func constructPath(ctx android.PathContext, path string) android.Path {
@@ -232,9 +226,8 @@ func LoadModuleConfig(ctx android.PathContext, path string) (ModuleConfig, error
 		ProfileClassListing         string
 		LibraryPaths                map[string]string
 		DexPreoptImages             []string
+		DexPreoptImageLocations     []string
 		PreoptBootClassPathDexFiles []string
-		StripInputPath              string
-		StripOutputPath             string
 	}
 
 	config := ModuleJSONConfig{}
@@ -251,12 +244,11 @@ func LoadModuleConfig(ctx android.PathContext, path string) (ModuleConfig, error
 	config.ModuleConfig.ProfileClassListing = android.OptionalPathForPath(constructPath(ctx, config.ProfileClassListing))
 	config.ModuleConfig.LibraryPaths = constructPathMap(ctx, config.LibraryPaths)
 	config.ModuleConfig.DexPreoptImages = constructPaths(ctx, config.DexPreoptImages)
+	config.ModuleConfig.DexPreoptImageLocations = config.DexPreoptImageLocations
 	config.ModuleConfig.PreoptBootClassPathDexFiles = constructPaths(ctx, config.PreoptBootClassPathDexFiles)
-	config.ModuleConfig.StripInputPath = constructPath(ctx, config.StripInputPath)
-	config.ModuleConfig.StripOutputPath = constructWritablePath(ctx, config.StripOutputPath)
 
 	// This needs to exist, but dependencies are already handled in Make, so we don't need to pass them through JSON.
-	config.ModuleConfig.DexPreoptImagesDeps = make([]android.Paths, len(config.ModuleConfig.DexPreoptImages))
+	config.ModuleConfig.DexPreoptImagesDeps = make([]android.OutputPaths, len(config.ModuleConfig.DexPreoptImages))
 
 	return config.ModuleConfig, nil
 }
@@ -283,7 +275,6 @@ func loadConfig(ctx android.PathContext, path string, config interface{}) ([]byt
 
 func GlobalConfigForTests(ctx android.PathContext) GlobalConfig {
 	return GlobalConfig{
-		DefaultNoStripping:                 false,
 		DisablePreopt:                      false,
 		DisablePreoptModules:               nil,
 		OnlyPreoptBootImageAndSystemServer: false,
@@ -292,17 +283,16 @@ func GlobalConfigForTests(ctx android.PathContext) GlobalConfig {
 		DisableGenerateProfile:             false,
 		ProfileDir:                         "",
 		BootJars:                           nil,
+		UpdatableBootJars:                  nil,
 		ArtApexJars:                        nil,
-		ProductUpdatableBootModules:        nil,
-		ProductUpdatableBootLocations:      nil,
 		SystemServerJars:                   nil,
 		SystemServerApps:                   nil,
+		UpdatableSystemServerJars:          nil,
 		SpeedApps:                          nil,
 		PreoptFlags:                        nil,
 		DefaultCompilerFilter:              "",
 		SystemServerCompilerFilter:         "",
 		GenerateDMFiles:                    false,
-		NeverAllowStripping:                false,
 		NoDebugInfo:                        false,
 		DontResolveStartupStrings:          false,
 		AlwaysSystemServerDebugInfo:        false,

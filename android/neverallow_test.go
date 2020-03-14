@@ -61,20 +61,20 @@ var neverallowTests = []struct {
 
 	// Test android specific rules
 
-	// include_dir rule tests
-	{
-		name: "include_dir not allowed to reference art",
-		fs: map[string][]byte{
-			"other/Blueprints": []byte(`
-				cc_library {
-					name: "libother",
-					include_dirs: ["art/libdexfile/include"],
-				}`),
-		},
-		expectedErrors: []string{
-			"all usages of 'art' have been migrated",
-		},
-	},
+//	// include_dir rule tests
+//	{
+//		name: "include_dir not allowed to reference art",
+//		fs: map[string][]byte{
+//			"other/Blueprints": []byte(`
+//				cc_library {
+//					name: "libother",
+//					include_dirs: ["art/libdexfile/include"],
+//				}`),
+//		},
+//		expectedErrors: []string{
+//			"all usages of 'art' have been migrated",
+//		},
+//	},
 	{
 		name: "include_dir can reference another location",
 		fs: map[string][]byte{
@@ -269,10 +269,10 @@ func TestNeverallow(t *testing.T) {
 
 func testNeverallow(config Config, fs map[string][]byte) (*TestContext, []error) {
 	ctx := NewTestContext()
-	ctx.RegisterModuleType("cc_library", ModuleFactoryAdaptor(newMockCcLibraryModule))
-	ctx.RegisterModuleType("java_library", ModuleFactoryAdaptor(newMockJavaLibraryModule))
-	ctx.RegisterModuleType("java_library_host", ModuleFactoryAdaptor(newMockJavaLibraryModule))
-	ctx.RegisterModuleType("java_device_for_host", ModuleFactoryAdaptor(newMockJavaLibraryModule))
+	ctx.RegisterModuleType("cc_library", newMockCcLibraryModule)
+	ctx.RegisterModuleType("java_library", newMockJavaLibraryModule)
+	ctx.RegisterModuleType("java_library_host", newMockJavaLibraryModule)
+	ctx.RegisterModuleType("java_device_for_host", newMockJavaLibraryModule)
 	ctx.PostDepsMutators(registerNeverallowMutator)
 	ctx.Register()
 

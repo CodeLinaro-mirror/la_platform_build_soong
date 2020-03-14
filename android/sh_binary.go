@@ -48,6 +48,9 @@ type shBinaryProperties struct {
 
 	// Whether this module is directly installable to one of the partitions. Default: true.
 	Installable *bool
+
+	// install symlinks to the binary
+	Symlinks []string `android:"arch_variant"`
 }
 
 type TestProperties struct {
@@ -103,6 +106,10 @@ func (s *ShBinary) Installable() bool {
 	return s.properties.Installable == nil || Bool(s.properties.Installable)
 }
 
+func (s *ShBinary) Symlinks() []string {
+	return s.properties.Symlinks
+}
+
 func (s *ShBinary) GenerateAndroidBuildActions(ctx ModuleContext) {
 	s.sourceFilePath = PathForModuleSrc(ctx, String(s.properties.Src))
 	filename := String(s.properties.Filename)
@@ -128,8 +135,8 @@ func (s *ShBinary) GenerateAndroidBuildActions(ctx ModuleContext) {
 	})
 }
 
-func (s *ShBinary) AndroidMkEntries() AndroidMkEntries {
-	return AndroidMkEntries{
+func (s *ShBinary) AndroidMkEntries() []AndroidMkEntries {
+	return []AndroidMkEntries{AndroidMkEntries{
 		Class:      "EXECUTABLES",
 		OutputFile: OptionalPathForPath(s.outputFilePath),
 		Include:    "$(BUILD_SYSTEM)/soong_cc_prebuilt.mk",
@@ -138,13 +145,16 @@ func (s *ShBinary) AndroidMkEntries() AndroidMkEntries {
 				s.customAndroidMkEntries(entries)
 			},
 		},
-	}
+	}}
 }
 
 func (s *ShBinary) customAndroidMkEntries(entries *AndroidMkEntries) {
 	entries.SetString("LOCAL_MODULE_RELATIVE_PATH", String(s.properties.Sub_dir))
 	entries.SetString("LOCAL_MODULE_SUFFIX", "")
 	entries.SetString("LOCAL_MODULE_STEM", s.outputFilePath.Rel())
+	if len(s.properties.Symlinks) > 0 {
+		entries.SetString("LOCAL_MODULE_SYMLINKS", strings.Join(s.properties.Symlinks, " "))
+	}
 }
 
 func (s *ShTest) GenerateAndroidBuildActions(ctx ModuleContext) {
@@ -153,8 +163,8 @@ func (s *ShTest) GenerateAndroidBuildActions(ctx ModuleContext) {
 	s.data = PathsForModuleSrc(ctx, s.testProperties.Data)
 }
 
-func (s *ShTest) AndroidMkEntries() AndroidMkEntries {
-	return AndroidMkEntries{
+func (s *ShTest) AndroidMkEntries() []AndroidMkEntries {
+	return []AndroidMkEntries{AndroidMkEntries{
 		Class:      "NATIVE_TESTS",
 		OutputFile: OptionalPathForPath(s.outputFilePath),
 		Include:    "$(BUILD_SYSTEM)/soong_cc_prebuilt.mk",
@@ -175,7 +185,7 @@ func (s *ShTest) AndroidMkEntries() AndroidMkEntries {
 				}
 			},
 		},
-	}
+	}}
 }
 
 func InitShBinaryModule(s *ShBinary) {
@@ -186,6 +196,9 @@ func InitShBinaryModule(s *ShBinary) {
 // executable binary to <partition>/bin.
 func ShBinaryFactory() Module {
 	module := &ShBinary{}
+	module.Prefer32(func(ctx BaseModuleContext, base *ModuleBase, class OsClass) bool {
+		return class == Device && ctx.Config().DevicePrefer32BitExecutables()
+	})
 	InitShBinaryModule(module)
 	InitAndroidArchModule(module, HostAndDeviceSupported, MultilibFirst)
 	return module
