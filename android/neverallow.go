@@ -48,7 +48,7 @@ func registerNeverallowMutator(ctx RegisterMutatorsContext) {
 var neverallows = []Rule{}
 
 func init() {
-//	AddNeverAllowRules(createIncludeDirsRules()...)
+	AddNeverAllowRules(createIncludeDirsRules()...)
 	AddNeverAllowRules(createTrebleRules()...)
 	AddNeverAllowRules(createLibcoreRules()...)
 	AddNeverAllowRules(createMediaRules()...)

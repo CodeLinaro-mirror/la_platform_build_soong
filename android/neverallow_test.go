@@ -61,20 +61,20 @@ var neverallowTests = []struct {
 
 	// Test android specific rules
 
-//	// include_dir rule tests
-//	{
-//		name: "include_dir not allowed to reference art",
-//		fs: map[string][]byte{
-//			"other/Blueprints": []byte(`
-//				cc_library {
-//					name: "libother",
-//					include_dirs: ["art/libdexfile/include"],
-//				}`),
-//		},
-//		expectedErrors: []string{
-//			"all usages of 'art' have been migrated",
-//		},
-//	},
+	// include_dir rule tests
+	{
+		name: "include_dir not allowed to reference art",
+		fs: map[string][]byte{
+			"other/Blueprints": []byte(`
+				cc_library {
+					name: "libother",
+					include_dirs: ["art/libdexfile/include"],
+				}`),
+		},
+		expectedErrors: []string{
+			"all usages of 'art' have been migrated",
+		},
+	},
 	{
 		name: "include_dir can reference another location",
 		fs: map[string][]byte{
