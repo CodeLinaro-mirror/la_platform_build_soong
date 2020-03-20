@@ -33,16 +33,21 @@ import (
 var supportedDpis = []string{"ldpi", "mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"}
 
 func init() {
-	android.RegisterModuleType("android_app", AndroidAppFactory)
-	android.RegisterModuleType("android_test", AndroidTestFactory)
-	android.RegisterModuleType("android_test_helper_app", AndroidTestHelperAppFactory)
-	android.RegisterModuleType("android_app_certificate", AndroidAppCertificateFactory)
-	android.RegisterModuleType("override_android_app", OverrideAndroidAppModuleFactory)
-	android.RegisterModuleType("override_android_test", OverrideAndroidTestModuleFactory)
-	android.RegisterModuleType("android_app_import", AndroidAppImportFactory)
-	android.RegisterModuleType("android_test_import", AndroidTestImportFactory)
+	RegisterAppBuildComponents(android.InitRegistrationContext)
 
 	initAndroidAppImportVariantGroupTypes()
+}
+
+func RegisterAppBuildComponents(ctx android.RegistrationContext) {
+	ctx.RegisterModuleType("android_app", AndroidAppFactory)
+	ctx.RegisterModuleType("android_test", AndroidTestFactory)
+	ctx.RegisterModuleType("android_test_helper_app", AndroidTestHelperAppFactory)
+	ctx.RegisterModuleType("android_app_certificate", AndroidAppCertificateFactory)
+	ctx.RegisterModuleType("override_android_app", OverrideAndroidAppModuleFactory)
+	ctx.RegisterModuleType("override_android_test", OverrideAndroidTestModuleFactory)
+	ctx.RegisterModuleType("android_app_import", AndroidAppImportFactory)
+	ctx.RegisterModuleType("android_test_import", AndroidTestImportFactory)
+	ctx.RegisterModuleType("runtime_resource_overlay", RuntimeResourceOverlayFactory)
 }
 
 // AndroidManifest.xml merging
@@ -73,6 +78,10 @@ type appProperties struct {
 
 	// list of native libraries that will be provided in or alongside the resulting jar
 	Jni_libs []string `android:"arch_variant"`
+
+	// if true, allow JNI libraries that link against platform APIs even if this module sets
+	// sdk_version.
+	Jni_uses_platform_apis *bool
 
 	// STL library to use for JNI libraries.
 	Stl *string `android:"arch_variant"`
@@ -106,6 +115,9 @@ type overridableAppProperties struct {
 
 	// the package name of this app. The package name in the manifest file is used if one was not given.
 	Package_name *string
+
+	// the logging parent of this app.
+	Logging_parent *string
 }
 
 type AndroidApp struct {
@@ -135,6 +147,12 @@ type AndroidApp struct {
 	additionalAaptFlags []string
 
 	noticeOutputs android.NoticeOutputs
+
+	overriddenManifestPackageName string
+}
+
+func (a *AndroidApp) IsInstallable() bool {
+	return Bool(a.properties.Installable)
 }
 
 func (a *AndroidApp) ExportedProguardFlagFiles() android.Paths {
@@ -149,16 +167,31 @@ func (a *AndroidApp) OutputFile() android.Path {
 	return a.outputFile
 }
 
+func (a *AndroidApp) Certificate() Certificate {
+	return a.certificate
+}
+
 var _ AndroidLibraryDependency = (*AndroidApp)(nil)
 
 type Certificate struct {
-	Pem, Key android.Path
+	Pem, Key  android.Path
+	presigned bool
+}
+
+var presignedCertificate = Certificate{presigned: true}
+
+func (c Certificate) AndroidMkString() string {
+	if c.presigned {
+		return "PRESIGNED"
+	} else {
+		return c.Pem.String()
+	}
 }
 
 func (a *AndroidApp) DepsMutator(ctx android.BottomUpMutatorContext) {
 	a.Module.deps(ctx)
 
-	if String(a.appProperties.Stl) == "c++_shared" && a.sdkVersion() == "" {
+	if String(a.appProperties.Stl) == "c++_shared" && !a.sdkVersion().specified() {
 		ctx.PropertyErrorf("stl", "sdk_version must be set in order to use c++_shared")
 	}
 
@@ -167,18 +200,11 @@ func (a *AndroidApp) DepsMutator(ctx android.BottomUpMutatorContext) {
 		a.aapt.deps(ctx, sdkDep)
 	}
 
+	tag := &jniDependencyTag{}
 	for _, jniTarget := range ctx.MultiTargets() {
 		variation := append(jniTarget.Variations(),
 			blueprint.Variation{Mutator: "link", Variation: "shared"})
-		tag := &jniDependencyTag{
-			target: jniTarget,
-		}
 		ctx.AddFarVariationDependencies(variation, tag, a.appProperties.Jni_libs...)
-		if String(a.appProperties.Stl) == "c++_shared" {
-			if a.shouldEmbedJnis(ctx) {
-				ctx.AddFarVariationDependencies(variation, tag, "ndk_libc++_shared")
-			}
-		}
 	}
 
 	a.usesLibrary.deps(ctx, sdkDep.hasFrameworkLibs())
@@ -214,7 +240,7 @@ func (a *AndroidApp) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 // Returns true if the native libraries should be stored in the APK uncompressed and the
 // extractNativeLibs application flag should be set to false in the manifest.
 func (a *AndroidApp) useEmbeddedNativeLibs(ctx android.ModuleContext) bool {
-	minSdkVersion, err := sdkVersionToNumber(ctx, a.minSdkVersion())
+	minSdkVersion, err := a.minSdkVersion().effectiveVersion(ctx)
 	if err != nil {
 		ctx.PropertyErrorf("min_sdk_version", "invalid value %q: %s", a.minSdkVersion(), err)
 	}
@@ -247,6 +273,10 @@ func (a *AndroidApp) shouldEmbedJnis(ctx android.BaseModuleContext) bool {
 		!a.IsForPlatform() || a.appProperties.AlwaysPackageNativeLibs
 }
 
+func (a *AndroidApp) OverriddenManifestPackageName() string {
+	return a.overriddenManifestPackageName
+}
+
 func (a *AndroidApp) aaptBuildActions(ctx android.ModuleContext) {
 	a.aapt.usesNonSdkApis = Bool(a.Module.deviceProperties.Platform_apis)
 
@@ -256,13 +286,7 @@ func (a *AndroidApp) aaptBuildActions(ctx android.ModuleContext) {
 	aaptLinkFlags := []string{}
 
 	// Add TARGET_AAPT_CHARACTERISTICS values to AAPT link flags if they exist and --product flags were not provided.
-	hasProduct := false
-	for _, f := range a.aaptProperties.Aaptflags {
-		if strings.HasPrefix(f, "--product") {
-			hasProduct = true
-			break
-		}
-	}
+	hasProduct := android.PrefixInList(a.aaptProperties.Aaptflags, "--product")
 	if !hasProduct && len(ctx.Config().ProductAAPTCharacteristics()) > 0 {
 		aaptLinkFlags = append(aaptLinkFlags, "--product", ctx.Config().ProductAAPTCharacteristics())
 	}
@@ -286,13 +310,14 @@ func (a *AndroidApp) aaptBuildActions(ctx android.ModuleContext) {
 			manifestPackageName = *a.overridableAppProperties.Package_name
 		}
 		aaptLinkFlags = append(aaptLinkFlags, "--rename-manifest-package "+manifestPackageName)
+		a.overriddenManifestPackageName = manifestPackageName
 	}
 
 	aaptLinkFlags = append(aaptLinkFlags, a.additionalAaptFlags...)
 
 	a.aapt.splitNames = a.appProperties.Package_splits
 	a.aapt.sdkLibraries = a.exportedSdkLibs
-
+	a.aapt.LoggingParent = String(a.overridableAppProperties.Logging_parent)
 	a.aapt.buildActions(ctx, sdkContext(a), aaptLinkFlags...)
 
 	// apps manifests are handled by aapt, don't let Module see them
@@ -325,7 +350,6 @@ func (a *AndroidApp) dexBuildActions(ctx android.ModuleContext) android.Path {
 		installDir = filepath.Join("app", a.installApkName)
 	}
 	a.dexpreopter.installPath = android.PathForModuleInstall(ctx, installDir, a.installApkName+".apk")
-	a.dexpreopter.isInstallable = Bool(a.properties.Installable)
 	a.dexpreopter.uncompressedDex = a.shouldUncompressDex(ctx)
 
 	a.dexpreopter.enforceUsesLibs = a.usesLibrary.enforceUsesLibraries()
@@ -407,12 +431,15 @@ func processMainCert(m android.ModuleBase, certPropValue string, certificates []
 		if certPropValue != "" {
 			defaultDir := ctx.Config().DefaultAppCertificateDir(ctx)
 			mainCert = Certificate{
-				defaultDir.Join(ctx, certPropValue+".x509.pem"),
-				defaultDir.Join(ctx, certPropValue+".pk8"),
+				Pem: defaultDir.Join(ctx, certPropValue+".x509.pem"),
+				Key: defaultDir.Join(ctx, certPropValue+".pk8"),
 			}
 		} else {
 			pem, key := ctx.Config().DefaultAppCertificate(ctx)
-			mainCert = Certificate{pem, key}
+			mainCert = Certificate{
+				Pem: pem,
+				Key: key,
+			}
 		}
 		certificates = append([]Certificate{mainCert}, certificates...)
 	}
@@ -471,7 +498,7 @@ func (a *AndroidApp) generateAndroidBuildActions(ctx android.ModuleContext) {
 
 	dexJarFile := a.dexBuildActions(ctx)
 
-	jniLibs, certificateDeps := collectAppDeps(ctx)
+	jniLibs, certificateDeps := collectAppDeps(ctx, a.shouldEmbedJnis(ctx))
 	jniJarFile := a.jniBuildActions(jniLibs, ctx)
 
 	if ctx.Failed() {
@@ -507,22 +534,33 @@ func (a *AndroidApp) generateAndroidBuildActions(ctx android.ModuleContext) {
 	}
 }
 
-func collectAppDeps(ctx android.ModuleContext) ([]jniLib, []Certificate) {
+func collectAppDeps(ctx android.ModuleContext, shouldCollectRecursiveNativeDeps bool) ([]jniLib, []Certificate) {
 	var jniLibs []jniLib
 	var certificates []Certificate
+	seenModulePaths := make(map[string]bool)
 
-	ctx.VisitDirectDeps(func(module android.Module) {
+	ctx.WalkDeps(func(module android.Module, parent android.Module) bool {
 		otherName := ctx.OtherModuleName(module)
 		tag := ctx.OtherModuleDependencyTag(module)
 
-		if jniTag, ok := tag.(*jniDependencyTag); ok {
+		if IsJniDepTag(tag) || tag == cc.SharedDepTag {
 			if dep, ok := module.(*cc.Module); ok {
+				if dep.IsNdk() || dep.IsStubs() {
+					return false
+				}
+
 				lib := dep.OutputFile()
+				path := lib.Path()
+				if seenModulePaths[path.String()] {
+					return false
+				}
+				seenModulePaths[path.String()] = true
+
 				if lib.Valid() {
 					jniLibs = append(jniLibs, jniLib{
 						name:   ctx.OtherModuleName(module),
-						path:   lib.Path(),
-						target: jniTag.target,
+						path:   path,
+						target: module.Target(),
 					})
 				} else {
 					ctx.ModuleErrorf("dependency %q missing output file", otherName)
@@ -530,13 +568,19 @@ func collectAppDeps(ctx android.ModuleContext) ([]jniLib, []Certificate) {
 			} else {
 				ctx.ModuleErrorf("jni_libs dependency %q must be a cc library", otherName)
 			}
-		} else if tag == certificateTag {
+
+			return shouldCollectRecursiveNativeDeps
+		}
+
+		if tag == certificateTag {
 			if dep, ok := module.(*AndroidAppCertificate); ok {
 				certificates = append(certificates, dep.Certificate)
 			} else {
 				ctx.ModuleErrorf("certificate dependency %q must be an android_app_certificate module", otherName)
 			}
 		}
+
+		return false
 	})
 
 	return jniLibs, certificates
@@ -548,6 +592,13 @@ func (a *AndroidApp) getCertString(ctx android.BaseModuleContext) string {
 		return ":" + certificate
 	}
 	return String(a.overridableAppProperties.Certificate)
+}
+
+func (a *AndroidApp) DepIsInSameApex(ctx android.BaseModuleContext, dep android.Module) bool {
+	if IsJniDepTag(ctx.OtherModuleDependencyTag(dep)) {
+		return true
+	}
+	return a.Library.DepIsInSameApex(ctx, dep)
 }
 
 // For OutputFileProducer interface
@@ -630,20 +681,38 @@ func (a *AndroidTest) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	}
 	a.generateAndroidBuildActions(ctx)
 
-	a.testConfig = tradefed.AutoGenInstrumentationTestConfig(ctx, a.testProperties.Test_config,
+	testConfig := tradefed.AutoGenInstrumentationTestConfig(ctx, a.testProperties.Test_config,
 		a.testProperties.Test_config_template, a.manifestPath, a.testProperties.Test_suites, a.testProperties.Auto_gen_config)
-	if a.overridableAppProperties.Package_name != nil {
-		fixedConfig := android.PathForModuleOut(ctx, "test_config_fixer", "AndroidTest.xml")
-		rule := android.NewRuleBuilder()
-		rule.Command().BuiltTool(ctx, "test_config_fixer").
-			FlagWithArg("--manifest ", a.manifestPath.String()).
-			FlagWithArg("--package-name ", *a.overridableAppProperties.Package_name).
-			Input(a.testConfig).
-			Output(fixedConfig)
-		rule.Build(pctx, ctx, "fix_test_config", "fix test config")
-		a.testConfig = fixedConfig
-	}
+	a.testConfig = a.FixTestConfig(ctx, testConfig)
 	a.data = android.PathsForModuleSrc(ctx, a.testProperties.Data)
+}
+
+func (a *AndroidTest) FixTestConfig(ctx android.ModuleContext, testConfig android.Path) android.Path {
+	if testConfig == nil {
+		return nil
+	}
+
+	fixedConfig := android.PathForModuleOut(ctx, "test_config_fixer", "AndroidTest.xml")
+	rule := android.NewRuleBuilder()
+	command := rule.Command().BuiltTool(ctx, "test_config_fixer").Input(testConfig).Output(fixedConfig)
+	fixNeeded := false
+
+	if ctx.ModuleName() != a.installApkName {
+		fixNeeded = true
+		command.FlagWithArg("--test-file-name ", a.installApkName+".apk")
+	}
+
+	if a.overridableAppProperties.Package_name != nil {
+		fixNeeded = true
+		command.FlagWithInput("--manifest ", a.manifestPath).
+			FlagWithArg("--package-name ", *a.overridableAppProperties.Package_name)
+	}
+
+	if fixNeeded {
+		rule.Build(pctx, ctx, "fix_test_config", "fix test config")
+		return fixedConfig
+	}
+	return testConfig
 }
 
 func (a *AndroidTest) DepsMutator(ctx android.BottomUpMutatorContext) {
@@ -738,6 +807,7 @@ func AndroidTestHelperAppFactory() android.Module {
 
 	android.InitAndroidMultiTargetsArchModule(module, android.DeviceSupported, android.MultilibCommon)
 	android.InitDefaultableModule(module)
+	android.InitApexModule(module)
 	return module
 }
 
@@ -764,8 +834,8 @@ func AndroidAppCertificateFactory() android.Module {
 func (c *AndroidAppCertificate) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	cert := String(c.properties.Certificate)
 	c.Certificate = Certificate{
-		android.PathForModuleSrc(ctx, cert+".x509.pem"),
-		android.PathForModuleSrc(ctx, cert+".pk8"),
+		Pem: android.PathForModuleSrc(ctx, cert+".x509.pem"),
+		Key: android.PathForModuleSrc(ctx, cert+".pk8"),
 	}
 }
 
@@ -822,7 +892,7 @@ type AndroidAppImport struct {
 	archVariants interface{}
 
 	outputFile  android.Path
-	certificate *Certificate
+	certificate Certificate
 
 	dexpreopter
 
@@ -863,6 +933,10 @@ type AndroidAppImportProperties struct {
 	Filename *string
 }
 
+func (a *AndroidAppImport) IsInstallable() bool {
+	return true
+}
+
 // Updates properties with variant-specific values.
 func (a *AndroidAppImport) processVariants(ctx android.LoadHookContext) {
 	config := ctx.Config()
@@ -883,7 +957,7 @@ func (a *AndroidAppImport) processVariants(ctx android.LoadHookContext) {
 	MergePropertiesFromVariant(ctx, &a.properties, archProps, archType.Name)
 }
 
-func MergePropertiesFromVariant(ctx android.BaseModuleContext,
+func MergePropertiesFromVariant(ctx android.EarlyModuleContext,
 	dst interface{}, variantGroup reflect.Value, variant string) {
 	src := variantGroup.FieldByName(proptools.FieldNameForProperty(variant))
 	if !src.IsValid() {
@@ -911,6 +985,16 @@ func (a *AndroidAppImport) DepsMutator(ctx android.BottomUpMutatorContext) {
 
 func (a *AndroidAppImport) uncompressEmbeddedJniLibs(
 	ctx android.ModuleContext, inputPath android.Path, outputPath android.OutputPath) {
+	// Test apps don't need their JNI libraries stored uncompressed. As a matter of fact, messing
+	// with them may invalidate pre-existing signature data.
+	if ctx.InstallInTestcases() && Bool(a.properties.Presigned) {
+		ctx.Build(pctx, android.BuildParams{
+			Rule:   android.Cp,
+			Output: outputPath,
+			Input:  inputPath,
+		})
+		return
+	}
 	rule := android.NewRuleBuilder()
 	rule.Command().
 		Textf(`if (zipinfo %s 'lib/*.so' 2>/dev/null | grep -v ' stor ' >/dev/null) ; then`, inputPath).
@@ -968,7 +1052,7 @@ func (a *AndroidAppImport) generateAndroidBuildActions(ctx android.ModuleContext
 		ctx.ModuleErrorf("One and only one of certficate, presigned, and default_dev_cert properties must be set")
 	}
 
-	_, certificates := collectAppDeps(ctx)
+	_, certificates := collectAppDeps(ctx, false)
 
 	// TODO: LOCAL_EXTRACT_APK/LOCAL_EXTRACT_DPI_APK
 	// TODO: LOCAL_PACKAGE_SPLITS
@@ -988,12 +1072,13 @@ func (a *AndroidAppImport) generateAndroidBuildActions(ctx android.ModuleContext
 	var installDir android.InstallPath
 	if Bool(a.properties.Privileged) {
 		installDir = android.PathForModuleInstall(ctx, "priv-app", a.BaseModuleName())
+	} else if ctx.InstallInTestcases() {
+		installDir = android.PathForModuleInstall(ctx, a.BaseModuleName(), ctx.DeviceConfig().DeviceArch())
 	} else {
 		installDir = android.PathForModuleInstall(ctx, "app", a.BaseModuleName())
 	}
 
 	a.dexpreopter.installPath = installDir.Join(ctx, a.BaseModuleName()+".apk")
-	a.dexpreopter.isInstallable = true
 	a.dexpreopter.isPresignedPrebuilt = Bool(a.properties.Presigned)
 	a.dexpreopter.uncompressedDex = a.shouldUncompressDex(ctx)
 
@@ -1018,7 +1103,7 @@ func (a *AndroidAppImport) generateAndroidBuildActions(ctx android.ModuleContext
 		if len(certificates) != 1 {
 			ctx.ModuleErrorf("Unexpected number of certificates were extracted: %q", certificates)
 		}
-		a.certificate = &certificates[0]
+		a.certificate = certificates[0]
 		signed := android.PathForModuleOut(ctx, "signed", ctx.ModuleName()+".apk")
 		SignAppPackage(ctx, signed, dexOutput, certificates)
 		a.outputFile = signed
@@ -1026,6 +1111,7 @@ func (a *AndroidAppImport) generateAndroidBuildActions(ctx android.ModuleContext
 		alignedApk := android.PathForModuleOut(ctx, "zip-aligned", ctx.ModuleName()+".apk")
 		TransformZipAlign(ctx, alignedApk, dexOutput)
 		a.outputFile = alignedApk
+		a.certificate = presignedCertificate
 	}
 
 	// TODO: Optionally compress the output apk.
@@ -1046,6 +1132,14 @@ func (a *AndroidAppImport) Name() string {
 
 func (a *AndroidAppImport) OutputFile() android.Path {
 	return a.outputFile
+}
+
+func (a *AndroidAppImport) JacocoReportClassesFile() android.Path {
+	return nil
+}
+
+func (a *AndroidAppImport) Certificate() Certificate {
+	return a.certificate
 }
 
 var dpiVariantGroupType reflect.Type
@@ -1140,6 +1234,10 @@ func (a *AndroidTestImport) GenerateAndroidBuildActions(ctx android.ModuleContex
 	a.data = android.PathsForModuleSrc(ctx, a.testProperties.Data)
 }
 
+func (a *AndroidTestImport) InstallInTestcases() bool {
+	return true
+}
+
 // android_test_import imports a prebuilt test apk with additional processing specified in the
 // module. DPI or arch variant configurations can be made as with android_app_import.
 func AndroidTestImportFactory() android.Module {
@@ -1155,6 +1253,99 @@ func AndroidTestImportFactory() android.Module {
 
 	InitJavaModule(module, android.DeviceSupported)
 	android.InitSingleSourcePrebuiltModule(module, &module.properties, "Apk")
+
+	return module
+}
+
+type RuntimeResourceOverlay struct {
+	android.ModuleBase
+	android.DefaultableModuleBase
+	aapt
+
+	properties RuntimeResourceOverlayProperties
+
+	certificate Certificate
+
+	outputFile android.Path
+	installDir android.InstallPath
+}
+
+type RuntimeResourceOverlayProperties struct {
+	// the name of a certificate in the default certificate directory or an android_app_certificate
+	// module name in the form ":module".
+	Certificate *string
+
+	// optional theme name. If specified, the overlay package will be applied
+	// only when the ro.boot.vendor.overlay.theme system property is set to the same value.
+	Theme *string
+
+	// if not blank, set to the version of the sdk to compile against.
+	// Defaults to compiling against the current platform.
+	Sdk_version *string
+
+	// if not blank, set the minimum version of the sdk that the compiled artifacts will run against.
+	// Defaults to sdk_version if not set.
+	Min_sdk_version *string
+}
+
+func (r *RuntimeResourceOverlay) DepsMutator(ctx android.BottomUpMutatorContext) {
+	sdkDep := decodeSdkDep(ctx, sdkContext(r))
+	if sdkDep.hasFrameworkLibs() {
+		r.aapt.deps(ctx, sdkDep)
+	}
+
+	cert := android.SrcIsModule(String(r.properties.Certificate))
+	if cert != "" {
+		ctx.AddDependency(ctx.Module(), certificateTag, cert)
+	}
+}
+
+func (r *RuntimeResourceOverlay) GenerateAndroidBuildActions(ctx android.ModuleContext) {
+	// Compile and link resources
+	r.aapt.hasNoCode = true
+	// Do not remove resources without default values nor dedupe resource configurations with the same value
+	r.aapt.buildActions(ctx, r, "--no-resource-deduping", "--no-resource-removal")
+
+	// Sign the built package
+	_, certificates := collectAppDeps(ctx, false)
+	certificates = processMainCert(r.ModuleBase, String(r.properties.Certificate), certificates, ctx)
+	signed := android.PathForModuleOut(ctx, "signed", r.Name()+".apk")
+	SignAppPackage(ctx, signed, r.aapt.exportPackage, certificates)
+	r.certificate = certificates[0]
+
+	r.outputFile = signed
+	r.installDir = android.PathForModuleInstall(ctx, "overlay", String(r.properties.Theme))
+	ctx.InstallFile(r.installDir, r.outputFile.Base(), r.outputFile)
+}
+
+func (r *RuntimeResourceOverlay) sdkVersion() sdkSpec {
+	return sdkSpecFrom(String(r.properties.Sdk_version))
+}
+
+func (r *RuntimeResourceOverlay) systemModules() string {
+	return ""
+}
+
+func (r *RuntimeResourceOverlay) minSdkVersion() sdkSpec {
+	if r.properties.Min_sdk_version != nil {
+		return sdkSpecFrom(*r.properties.Min_sdk_version)
+	}
+	return r.sdkVersion()
+}
+
+func (r *RuntimeResourceOverlay) targetSdkVersion() sdkSpec {
+	return r.sdkVersion()
+}
+
+// runtime_resource_overlay generates a resource-only apk file that can overlay application and
+// system resources at run time.
+func RuntimeResourceOverlayFactory() android.Module {
+	module := &RuntimeResourceOverlay{}
+	module.AddProperties(
+		&module.properties,
+		&module.aaptProperties)
+
+	InitJavaModule(module, android.DeviceSupported)
 
 	return module
 }

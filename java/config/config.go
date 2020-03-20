@@ -29,7 +29,7 @@ var (
 
 	DefaultBootclasspathLibraries = []string{"core.platform.api.stubs", "core-lambda-stubs"}
 	DefaultSystemModules          = "core-platform-api-stubs-system-modules"
-	DefaultLibraries              = []string{"ext", "framework", "updatable_media_stubs"}
+	DefaultLibraries              = []string{"ext", "framework"}
 	DefaultLambdaStubsLibrary     = "core-lambda-stubs"
 	SdkLambdaStubsPath            = "prebuilts/sdk/tools/core-lambda-stubs.jar"
 
@@ -46,7 +46,11 @@ var (
 		"core-icu4j",
 		"core-oj",
 		"core-libart",
+		// TODO: Could this be all updatable bootclasspath jars?
 		"updatable-media",
+		"framework-mediaprovider",
+		"framework-sdkextensions",
+		"android.net.ipsec.ike",
 	}
 )
 
@@ -141,6 +145,20 @@ func init() {
 
 	pctx.VariableFunc("JavacWrapper", func(ctx android.PackageVarContext) string {
 		if override := ctx.Config().Getenv("JAVAC_WRAPPER"); override != "" {
+			return override + " "
+		}
+		return ""
+	})
+
+	pctx.VariableFunc("R8Wrapper", func(ctx android.PackageVarContext) string {
+		if override := ctx.Config().Getenv("R8_WRAPPER"); override != "" {
+			return override + " "
+		}
+		return ""
+	})
+
+	pctx.VariableFunc("D8Wrapper", func(ctx android.PackageVarContext) string {
+		if override := ctx.Config().Getenv("D8_WRAPPER"); override != "" {
 			return override + " "
 		}
 		return ""

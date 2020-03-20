@@ -180,7 +180,18 @@ type SnapshotBuilder interface {
 	// will only be used if the equivalently named non-prebuilt module is not
 	// present.
 	AddPrebuiltModule(member SdkMember, moduleType string) BpModule
+
+	// The property tag to use when adding a property to a BpModule that contains
+	// references to other sdk members. Using this will ensure that the reference
+	// is correctly output for both versioned and unversioned prebuilts in the
+	// snapshot.
+	//
+	// e.g.
+	// bpPropertySet.AddPropertyWithTag("libs", []string{"member1", "member2"}, builder.SdkMemberReferencePropertyTag())
+	SdkMemberReferencePropertyTag() BpPropertyTag
 }
+
+type BpPropertyTag interface{}
 
 // A set of properties for use in a .bp file.
 type BpPropertySet interface {
@@ -190,8 +201,11 @@ type BpPropertySet interface {
 	// * bool
 	// * BpPropertySet
 	//
-	// It is an error is multiples properties with the same name are added.
+	// It is an error if multiple properties with the same name are added.
 	AddProperty(name string, value interface{})
+
+	// Add a property with an associated tag
+	AddPropertyWithTag(name string, value interface{}, tag BpPropertyTag)
 
 	// Add a property set with the specified name and return so that additional
 	// properties can be added.
@@ -211,6 +225,25 @@ type SdkMember interface {
 
 	// All the variants required by the SDK.
 	Variants() []SdkAware
+}
+
+type SdkMemberTypeDependencyTag interface {
+	blueprint.DependencyTag
+
+	SdkMemberType() SdkMemberType
+}
+
+type sdkMemberDependencyTag struct {
+	blueprint.BaseDependencyTag
+	memberType SdkMemberType
+}
+
+func (t *sdkMemberDependencyTag) SdkMemberType() SdkMemberType {
+	return t.memberType
+}
+
+func DependencyTagForSdkMemberType(memberType SdkMemberType) SdkMemberTypeDependencyTag {
+	return &sdkMemberDependencyTag{memberType: memberType}
 }
 
 // Interface that must be implemented for every type that can be a member of an
@@ -237,6 +270,16 @@ type SdkMemberType interface {
 	// The name of the member type property on an sdk module.
 	SdkPropertyName() string
 
+	// True if the member type supports the sdk/sdk_snapshot, false otherwise.
+	UsableWithSdkAndSdkSnapshot() bool
+
+	// Return true if modules of this type can have dependencies which should be
+	// treated as if they are sdk members.
+	//
+	// Any dependency that is to be treated as a member of the sdk needs to implement
+	// SdkAware and be added with an SdkMemberTypeDependencyTag tag.
+	HasTransitiveSdkMembers() bool
+
 	// Add dependencies from the SDK module to all the variants the member
 	// contributes to the SDK. The exact set of variants required is determined
 	// by the SDK and its properties. The dependencies must be added with the
@@ -262,12 +305,23 @@ type SdkMemberType interface {
 	BuildSnapshot(sdkModuleContext ModuleContext, builder SnapshotBuilder, member SdkMember)
 }
 
+// Base type for SdkMemberType implementations.
 type SdkMemberTypeBase struct {
-	PropertyName string
+	PropertyName         string
+	SupportsSdk          bool
+	TransitiveSdkMembers bool
 }
 
 func (b *SdkMemberTypeBase) SdkPropertyName() string {
 	return b.PropertyName
+}
+
+func (b *SdkMemberTypeBase) UsableWithSdkAndSdkSnapshot() bool {
+	return b.SupportsSdk
+}
+
+func (b *SdkMemberTypeBase) HasTransitiveSdkMembers() bool {
+	return b.TransitiveSdkMembers
 }
 
 // Encapsulates the information about registered SdkMemberTypes.
@@ -279,22 +333,8 @@ type SdkMemberTypesRegistry struct {
 	key OnceKey
 }
 
-func (r *SdkMemberTypesRegistry) RegisteredTypes() []SdkMemberType {
-	return r.list
-}
-
-func (r *SdkMemberTypesRegistry) UniqueOnceKey() OnceKey {
-	// Use the pointer to the registry as the unique key.
-	return NewCustomOnceKey(r)
-}
-
-// The set of registered SdkMemberTypes.
-var SdkMemberTypes = &SdkMemberTypesRegistry{}
-
-// Register an SdkMemberType object to allow them to be used in the sdk and sdk_snapshot module
-// types.
-func RegisterSdkMemberType(memberType SdkMemberType) {
-	oldList := SdkMemberTypes.list
+func (r *SdkMemberTypesRegistry) copyAndAppend(memberType SdkMemberType) *SdkMemberTypesRegistry {
+	oldList := r.list
 
 	// Copy the slice just in case this is being read while being modified, e.g. when testing.
 	list := make([]SdkMemberType, 0, len(oldList)+1)
@@ -319,8 +359,33 @@ func RegisterSdkMemberType(memberType SdkMemberType) {
 	key := NewOnceKey(strings.Join(properties, "|"))
 
 	// Create a new registry so the pointer uniquely identifies the set of registered types.
-	SdkMemberTypes = &SdkMemberTypesRegistry{
+	return &SdkMemberTypesRegistry{
 		list: list,
 		key:  key,
+	}
+}
+
+func (r *SdkMemberTypesRegistry) RegisteredTypes() []SdkMemberType {
+	return r.list
+}
+
+func (r *SdkMemberTypesRegistry) UniqueOnceKey() OnceKey {
+	// Use the pointer to the registry as the unique key.
+	return NewCustomOnceKey(r)
+}
+
+// The set of registered SdkMemberTypes, one for sdk module and one for module_exports.
+var ModuleExportsMemberTypes = &SdkMemberTypesRegistry{}
+var SdkMemberTypes = &SdkMemberTypesRegistry{}
+
+// Register an SdkMemberType object to allow them to be used in the sdk and sdk_snapshot module
+// types.
+func RegisterSdkMemberType(memberType SdkMemberType) {
+	// All member types are usable with module_exports.
+	ModuleExportsMemberTypes = ModuleExportsMemberTypes.copyAndAppend(memberType)
+
+	// Only those that explicitly indicate it are usable with sdk.
+	if memberType.UsableWithSdkAndSdkSnapshot() {
+		SdkMemberTypes = SdkMemberTypes.copyAndAppend(memberType)
 	}
 }

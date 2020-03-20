@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"android/soong/android"
+	"android/soong/cc"
 )
 
 var (
@@ -51,6 +52,21 @@ func TestMain(m *testing.M) {
 	os.Exit(run())
 }
 
+func testConfig(bp string) android.Config {
+	bp = bp + GatherRequiredDepsForTest()
+
+	fs := map[string][]byte{
+		"foo.rs":     nil,
+		"src/bar.rs": nil,
+		"liby.so":    nil,
+		"libz.so":    nil,
+	}
+
+	cc.GatherRequiredFilesForTest(fs)
+
+	return android.TestArchConfig(buildDir, nil, bp, fs)
+}
+
 func testRust(t *testing.T, bp string) *android.TestContext {
 	// TODO (b/140435149)
 	if runtime.GOOS != "linux" {
@@ -58,11 +74,11 @@ func testRust(t *testing.T, bp string) *android.TestContext {
 	}
 
 	t.Helper()
-	config := android.TestArchConfig(buildDir, nil)
+	config := testConfig(bp)
 
 	t.Helper()
-	ctx := CreateTestContext(bp)
-	ctx.Register()
+	ctx := CreateTestContext()
+	ctx.Register(config)
 
 	_, errs := ctx.ParseFileList(".", []string{"Android.bp"})
 	android.FailIfErrored(t, errs)
@@ -79,10 +95,10 @@ func testRustError(t *testing.T, pattern string, bp string) {
 	}
 
 	t.Helper()
-	config := android.TestArchConfig(buildDir, nil)
+	config := testConfig(bp)
 
-	ctx := CreateTestContext(bp)
-	ctx.Register()
+	ctx := CreateTestContext()
+	ctx.Register(config)
 
 	_, errs := ctx.ParseFileList(".", []string{"Android.bp"})
 	if len(errs) > 0 {
@@ -101,13 +117,13 @@ func testRustError(t *testing.T, pattern string, bp string) {
 
 // Test that we can extract the lib name from a lib path.
 func TestLibNameFromFilePath(t *testing.T) {
-	libBarPath := android.PathForTesting("out/soong/.intermediates/external/libbar/libbar/linux_glibc_x86_64_shared/libbar.so")
+	libBarPath := android.PathForTesting("out/soong/.intermediates/external/libbar/libbar/linux_glibc_x86_64_shared/libbar.so.so")
 	libLibPath := android.PathForTesting("out/soong/.intermediates/external/libbar/libbar/linux_glibc_x86_64_shared/liblib.dylib.so")
 
 	libBarName := libNameFromFilePath(libBarPath)
 	libLibName := libNameFromFilePath(libLibPath)
 
-	expectedResult := "bar"
+	expectedResult := "bar.so"
 	if libBarName != expectedResult {
 		t.Errorf("libNameFromFilePath returned the wrong name; expected '%#v', got '%#v'", expectedResult, libBarName)
 	}

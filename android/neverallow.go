@@ -52,6 +52,7 @@ func init() {
 	AddNeverAllowRules(createTrebleRules()...)
 	AddNeverAllowRules(createLibcoreRules()...)
 	AddNeverAllowRules(createMediaRules()...)
+	AddNeverAllowRules(createMediaProviderRules()...)
 	AddNeverAllowRules(createJavaDeviceForHostRules()...)
 }
 
@@ -102,6 +103,7 @@ func createTrebleRules() []Rule {
 			In("vendor", "device").
 			With("vndk.enabled", "true").
 			Without("vendor", "true").
+			Without("product_specific", "true").
 			Because("the VNDK can never contain a library that is device dependent."),
 		NeverAllow().
 			With("vndk.enabled", "true").
@@ -111,7 +113,9 @@ func createTrebleRules() []Rule {
 
 		// TODO(b/67974785): always enforce the manifest
 		NeverAllow().
-			Without("name", "libhidltransport-impl-internal").
+			Without("name", "libhidlbase-combined-impl").
+			Without("name", "libhidlbase").
+			Without("name", "libhidlbase_pgo").
 			With("product_variables.enforce_vintf_manifest.cflags", "*").
 			Because("manifest enforcement should be independent of ."),
 
@@ -136,9 +140,6 @@ func createLibcoreRules() []Rule {
 		"external/icu",
 		"external/okhttp",
 		"external/wycheproof",
-
-		// Not really a core library but still needs access to same capabilities.
-		"development",
 	}
 
 	// Core library constraints. The sdk_version: "none" can only be used in core library projects.
@@ -157,6 +158,14 @@ func createMediaRules() []Rule {
 		NeverAllow().
 			With("libs", "updatable-media").
 			Because("updatable-media includes private APIs. Use updatable_media_stubs instead."),
+	}
+}
+
+func createMediaProviderRules() []Rule {
+	return []Rule{
+		NeverAllow().
+			With("libs", "framework-mediaprovider").
+			Because("framework-mediaprovider includes private APIs. Use framework_mediaprovider_stubs instead."),
 	}
 }
 
@@ -408,8 +417,8 @@ func (r *rule) String() string {
 }
 
 func (r *rule) appliesToPath(dir string) bool {
-	includePath := len(r.paths) == 0 || hasAnyPrefix(dir, r.paths)
-	excludePath := hasAnyPrefix(dir, r.unlessPaths)
+	includePath := len(r.paths) == 0 || HasAnyPrefix(dir, r.paths)
+	excludePath := HasAnyPrefix(dir, r.unlessPaths)
 	return includePath && !excludePath
 }
 
@@ -473,15 +482,6 @@ func fieldNamesForProperties(propertyNames string) []string {
 		names[i] = proptools.FieldNameForProperty(v)
 	}
 	return names
-}
-
-func hasAnyPrefix(s string, prefixes []string) bool {
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(s, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 func hasAnyProperty(properties []interface{}, props []ruleProperty) bool {
