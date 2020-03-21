@@ -182,11 +182,12 @@ type Flags struct {
 	// These must be after any module include flags, which will be in CommonFlags.
 	SystemIncludeFlags []string
 
-	Toolchain    config.Toolchain
-	Tidy         bool
+	Toolchain config.Toolchain
+	Sdclang   bool
+	Tidy      bool
 	GcovCoverage bool
-	SAbiDump     bool
-	EmitXrefs    bool // If true, generate Ninja rules to generate emitXrefs input files for Kythe
+	SAbiDump  bool
+	EmitXrefs bool // If true, generate Ninja rules to generate emitXrefs input files for Kythe
 
 	RequiredInstructionSet string
 	DynamicLinker          string
@@ -208,6 +209,9 @@ type Flags struct {
 type BaseProperties struct {
 	// Deprecated. true is the default, false is invalid.
 	Clang *bool `android:"arch_variant"`
+
+	// compile module with SDLLVM instead of AOSP LLVM
+	Sdclang *bool `android:"arch_variant"`
 
 	// Minimum sdk version supported when compiling against the ndk. Setting this property causes
 	// two variants to be built, one for the platform and one for apps.
@@ -1466,6 +1470,7 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 	flags := Flags{
 		Toolchain: c.toolchain(ctx),
 		EmitXrefs: ctx.Config().EmitXrefRules(),
+		Sdclang:   c.sdclang(ctx),
 	}
 	if c.compiler != nil {
 		flags = c.compiler.compilerFlags(ctx, flags, deps)
@@ -2173,6 +2178,21 @@ func checkDoubleLoadableLibraries(ctx android.TopDownMutatorContext) {
 			}
 		}
 	}
+}
+
+func (c *Module) sdclang(ctx BaseModuleContext) bool {
+	sdclang := Bool(c.Properties.Sdclang)
+
+	// SDLLVM is not for host build
+	if ctx.Host() || config.ForceSDClangOff {
+		return false
+	}
+
+	if c.Properties.Sdclang == nil && config.SDClang {
+		return true
+	}
+
+	return sdclang
 }
 
 // Convert dependencies to paths.  Returns a PathDeps containing paths

@@ -83,6 +83,7 @@ func flagsToBuilderFlags(in Flags) builderFlags {
 		sAbiFlags:     strings.Join(in.SAbiFlags, " "),
 		toolchain:     in.Toolchain,
 		gcovCoverage:  in.GcovCoverage,
+		sdclang:       in.Sdclang,
 		tidy:          in.Tidy,
 		sAbiDump:      in.SAbiDump,
 		emitXrefs:     in.EmitXrefs,

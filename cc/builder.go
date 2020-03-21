@@ -322,6 +322,7 @@ type builderFlags struct {
 	aidlFlags     string
 	rsFlags       string
 	toolchain     config.Toolchain
+	sdclang       bool
 	tidy          bool
 	gcovCoverage  bool
 	sAbiDump      bool
@@ -519,7 +520,13 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 
 		ccDesc := ccCmd
 
-		ccCmd = "${config.ClangBin}/" + ccCmd
+		var extraFlags string
+		if flags.sdclang {
+			ccCmd = "${config.SDClangBin}/" + ccCmd
+			extraFlags = " ${config.SDClangFlags}"
+		} else {
+			ccCmd = "${config.ClangBin}/" + ccCmd
+		}
 
 		var implicitOutputs android.WritablePaths
 		if coverage {
@@ -537,7 +544,7 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 			Implicits:       cFlagsDeps,
 			OrderOnly:       pathDeps,
 			Args: map[string]string{
-				"cFlags": moduleFlags,
+				"cFlags": moduleFlags + extraFlags,
 				"ccCmd":  ccCmd,
 			},
 		})
@@ -618,6 +625,9 @@ func TransformObjToStaticLib(ctx android.ModuleContext, objFiles android.Paths,
 	flags builderFlags, outputFile android.ModuleOutPath, deps android.Paths) {
 
 	arCmd := "${config.ClangBin}/llvm-ar"
+	if flags.sdclang {
+                arCmd = "${config.ClangBin}/llvm-ar"
+        }
 	arFlags := "crsPD"
 	if !ctx.Darwin() {
 		arFlags += " -format=gnu"
@@ -642,7 +652,14 @@ func TransformObjToDynamicBinary(ctx android.ModuleContext,
 	objFiles, sharedLibs, staticLibs, lateStaticLibs, wholeStaticLibs, deps android.Paths,
 	crtBegin, crtEnd android.OptionalPath, groupLate bool, flags builderFlags, outputFile android.WritablePath, implicitOutputs android.WritablePaths) {
 
-	ldCmd := "${config.ClangBin}/clang++"
+	var ldCmd string
+	var extraFlags string
+	if flags.sdclang {
+		ldCmd = "${config.SDClangBin}/clang++"
+		extraFlags = " ${config.SDClangFlags}"
+	} else {
+		ldCmd = "${config.ClangBin}/clang++"
+	}
 
 	var libFlagsList []string
 
@@ -697,7 +714,7 @@ func TransformObjToDynamicBinary(ctx android.ModuleContext,
 		"crtBegin":      crtBegin.String(),
 		"libFlags":      strings.Join(libFlagsList, " "),
 		"extraLibFlags": flags.extraLibFlags,
-		"ldFlags":       flags.globalLdFlags + " " + flags.localLdFlags,
+		"ldFlags":       flags.globalLdFlags + " " + flags.localLdFlags + " " + extraFlags,
 		"crtEnd":        crtEnd.String(),
 	}
 	if ctx.Config().IsEnvTrue("RBE_CXX_LINKS") {
