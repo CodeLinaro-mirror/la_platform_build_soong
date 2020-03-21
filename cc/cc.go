@@ -182,6 +182,7 @@ type Flags struct {
 	SystemIncludeFlags []string
 
 	Toolchain config.Toolchain
+	Sdclang   bool
 	Tidy      bool
 	Coverage  bool
 	SAbiDump  bool
@@ -207,6 +208,9 @@ type Flags struct {
 type BaseProperties struct {
 	// Deprecated. true is the default, false is invalid.
 	Clang *bool `android:"arch_variant"`
+
+	// compile module with SDLLVM instead of AOSP LLVM
+	Sdclang *bool `android:"arch_variant"`
 
 	// Minimum sdk version supported when compiling against the ndk
 	Sdk_version *string
@@ -1377,6 +1381,7 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 	flags := Flags{
 		Toolchain: c.toolchain(ctx),
 		EmitXrefs: ctx.Config().EmitXrefRules(),
+		Sdclang:   c.sdclang(ctx),
 	}
 	if c.compiler != nil {
 		flags = c.compiler.compilerFlags(ctx, flags, deps)
@@ -2072,6 +2077,21 @@ func checkDoubleLoadableLibraries(ctx android.TopDownMutatorContext) {
 			}
 		}
 	}
+}
+
+func (c *Module) sdclang(ctx BaseModuleContext) bool {
+	sdclang := Bool(c.Properties.Sdclang)
+
+	// SDLLVM is not for host build
+	if ctx.Host() || config.ForceSDClangOff {
+		return false
+	}
+
+	if c.Properties.Sdclang == nil && config.SDClang {
+		return true
+	}
+
+	return sdclang
 }
 
 // Convert dependencies to paths.  Returns a PathDeps containing paths

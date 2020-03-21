@@ -17,6 +17,7 @@ package cc
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -71,6 +72,7 @@ func (c *notOnHostContext) Host() bool {
 }
 
 func makeVarsProvider(ctx android.MakeVarsContext) {
+	sdclangMakeVars(ctx)
 	vendorPublicLibraries := vendorPublicLibraries(ctx.Config())
 
 	ctx.Strict("LLVM_RELEASE_VERSION", "${config.ClangShortVersion}")
@@ -188,6 +190,17 @@ func makeVarsProvider(ctx android.MakeVarsContext) {
 	if len(deviceTargets) > 1 {
 		makeVarsToolchain(ctx, "2ND_", deviceTargets[1])
 	}
+}
+
+func sdclangMakeVars(ctx android.MakeVarsContext) {
+	if config.ForceSDClangOff {
+		ctx.Strict("FORCE_SDCLANG_OFF", strconv.FormatBool(config.ForceSDClangOff))
+	}
+	if config.SDClang {
+		ctx.Strict("SDCLANG", strconv.FormatBool(config.SDClang))
+	}
+	ctx.Strict("SDCLANG_PATH", "${config.SDClangBin}")
+	ctx.Strict("SDCLANG_COMMON_FLAGS", "${config.SDClangFlags}")
 }
 
 func makeVarsToolchain(ctx android.MakeVarsContext, secondPrefix string,
