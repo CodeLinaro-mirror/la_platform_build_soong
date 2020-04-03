@@ -16,6 +16,8 @@ package android
 
 import (
 	"fmt"
+	"io/ioutil"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -25,10 +27,11 @@ import (
 	"github.com/google/blueprint/pathtools"
 )
 
+var absSrcDir string
+
 // PathContext is the subset of a (Module|Singleton)Context required by the
 // Path methods.
 type PathContext interface {
-	Fs() pathtools.FileSystem
 	Config() Config
 	AddNinjaFileDeps(deps ...string)
 }
@@ -46,6 +49,7 @@ type ModuleInstallPathContext interface {
 	InstallInData() bool
 	InstallInTestcases() bool
 	InstallInSanitizerDir() bool
+	InstallInRamdisk() bool
 	InstallInRecovery() bool
 	InstallInRoot() bool
 	InstallBypassMake() bool
@@ -89,6 +93,15 @@ func reportPathErrorf(ctx PathContext, format string, args ...interface{}) {
 	}
 }
 
+func pathContextName(ctx PathContext, module blueprint.Module) string {
+	if x, ok := ctx.(interface{ ModuleName(blueprint.Module) string }); ok {
+		return x.ModuleName(module)
+	} else if x, ok := ctx.(interface{ OtherModuleName(blueprint.Module) string }); ok {
+		return x.OtherModuleName(module)
+	}
+	return "unknown"
+}
+
 type Path interface {
 	// Returns the path in string form
 	String() string
@@ -108,6 +121,9 @@ type Path interface {
 // WritablePath is a type of path that can be used as an output for build rules.
 type WritablePath interface {
 	Path
+
+	// return the path to the build directory.
+	buildDir() string
 
 	// the writablePath method doesn't directly do anything,
 	// but it allows a struct to distinguish between whether or not it implements the WritablePath interface
@@ -378,7 +394,7 @@ func expandOneSrcPath(ctx ModuleContext, s string, expandedExcludes []string) (P
 		return PathsWithModuleSrcSubDir(ctx, paths, ""), nil
 	} else {
 		p := pathForModuleSrc(ctx, s)
-		if exists, _, err := ctx.Fs().Exists(p.String()); err != nil {
+		if exists, _, err := ctx.Config().fs.Exists(p.String()); err != nil {
 			reportPathErrorf(ctx, "%s: %s", p, err.Error())
 		} else if !exists {
 			reportPathErrorf(ctx, "module source path %q does not exist", p)
@@ -397,7 +413,7 @@ func expandOneSrcPath(ctx ModuleContext, s string, expandedExcludes []string) (P
 // each string. If incDirs is false, strip paths with a trailing '/' from the list.
 // It intended for use in globs that only list files that exist, so it allows '$' in
 // filenames.
-func pathsForModuleSrcFromFullPath(ctx BaseModuleContext, paths []string, incDirs bool) Paths {
+func pathsForModuleSrcFromFullPath(ctx EarlyModuleContext, paths []string, incDirs bool) Paths {
 	prefix := filepath.Join(ctx.Config().srcDir, ctx.ModuleDir()) + "/"
 	if prefix == "./" {
 		prefix = ""
@@ -708,7 +724,7 @@ func existsWithDependencies(ctx PathContext, path SourcePath) (exists bool, err 
 		var deps []string
 		// We cannot add build statements in this context, so we fall back to
 		// AddNinjaFileDeps
-		files, deps, err = pathtools.Glob(path.String(), nil, pathtools.FollowSymlinks)
+		files, deps, err = ctx.Config().fs.Glob(path.String(), nil, pathtools.FollowSymlinks)
 		ctx.AddNinjaFileDeps(deps...)
 	}
 
@@ -740,7 +756,7 @@ func PathForSource(ctx PathContext, pathComponents ...string) SourcePath {
 		if !exists {
 			modCtx.AddMissingDependencies([]string{path.String()})
 		}
-	} else if exists, _, err := ctx.Fs().Exists(path.String()); err != nil {
+	} else if exists, _, err := ctx.Config().fs.Exists(path.String()); err != nil {
 		reportPathErrorf(ctx, "%s: %s", path, err.Error())
 	} else if !exists {
 		reportPathErrorf(ctx, "source path %q does not exist", path)
@@ -827,10 +843,12 @@ func (p SourcePath) OverlayPath(ctx ModuleContext, path Path) OptionalPath {
 // OutputPath is a Path representing an intermediates file path rooted from the build directory
 type OutputPath struct {
 	basePath
+	fullPath string
 }
 
 func (p OutputPath) withRel(rel string) OutputPath {
 	p.basePath = p.basePath.withRel(rel)
+	p.fullPath = filepath.Join(p.fullPath, rel)
 	return p
 }
 
@@ -839,7 +857,12 @@ func (p OutputPath) WithoutRel() OutputPath {
 	return p
 }
 
+func (p OutputPath) buildDir() string {
+	return p.config.buildDir
+}
+
 var _ Path = OutputPath{}
+var _ WritablePath = OutputPath{}
 
 // PathForOutput joins the provided paths and returns an OutputPath that is
 // validated to not escape the build dir.
@@ -849,7 +872,9 @@ func PathForOutput(ctx PathContext, pathComponents ...string) OutputPath {
 	if err != nil {
 		reportPathError(ctx, err)
 	}
-	return OutputPath{basePath{path, ctx.Config(), ""}}
+	fullPath := filepath.Join(ctx.Config().buildDir, path)
+	path = fullPath[len(fullPath)-len(path):]
+	return OutputPath{basePath{path, ctx.Config(), ""}, fullPath}
 }
 
 // PathsForOutput returns Paths rooted from buildDir
@@ -864,7 +889,7 @@ func PathsForOutput(ctx PathContext, paths []string) WritablePaths {
 func (p OutputPath) writablePath() {}
 
 func (p OutputPath) String() string {
-	return filepath.Join(p.config.buildDir, p.path)
+	return p.fullPath
 }
 
 // Join creates a new OutputPath with paths... joined with the current path. The
@@ -1142,6 +1167,13 @@ type InstallPath struct {
 	baseDir string // "../" for Make paths to convert "out/soong" to "out", "" for Soong paths
 }
 
+func (p InstallPath) buildDir() string {
+	return p.config.buildDir
+}
+
+var _ Path = InstallPath{}
+var _ WritablePath = InstallPath{}
+
 func (p InstallPath) writablePath() {}
 
 func (p InstallPath) String() string {
@@ -1227,6 +1259,15 @@ func modulePartition(ctx ModuleInstallPathContext) string {
 		partition = "data"
 	} else if ctx.InstallInTestcases() {
 		partition = "testcases"
+	} else if ctx.InstallInRamdisk() {
+		if ctx.DeviceConfig().BoardUsesRecoveryAsBoot() {
+			partition = "recovery/root/first_stage_ramdisk"
+		} else {
+			partition = "ramdisk"
+		}
+		if !ctx.InstallInRoot() {
+			partition += "/system"
+		}
 	} else if ctx.InstallInRecovery() {
 		if ctx.InstallInRoot() {
 			partition = "recovery/root"
@@ -1293,6 +1334,10 @@ type PhonyPath struct {
 
 func (p PhonyPath) writablePath() {}
 
+func (p PhonyPath) buildDir() string {
+	return p.config.buildDir
+}
+
 var _ Path = PhonyPath{}
 var _ WritablePath = PhonyPath{}
 
@@ -1303,12 +1348,6 @@ type testPath struct {
 func (p testPath) String() string {
 	return p.path
 }
-
-type testWritablePath struct {
-	testPath
-}
-
-func (p testPath) writablePath() {}
 
 // PathForTesting returns a Path constructed from joining the elements of paths with '/'.  It should only be used from
 // within tests.
@@ -1330,42 +1369,18 @@ func PathsForTesting(strs ...string) Paths {
 	return p
 }
 
-// WritablePathForTesting returns a Path constructed from joining the elements of paths with '/'.  It should only be
-// used from within tests.
-func WritablePathForTesting(paths ...string) WritablePath {
-	p, err := validateSafePath(paths...)
-	if err != nil {
-		panic(err)
-	}
-	return testWritablePath{testPath{basePath{path: p, rel: p}}}
-}
-
-// WritablePathsForTesting returns a Path constructed from each element in strs. It should only be used from within
-// tests.
-func WritablePathsForTesting(strs ...string) WritablePaths {
-	p := make(WritablePaths, len(strs))
-	for i, s := range strs {
-		p[i] = WritablePathForTesting(s)
-	}
-
-	return p
-}
-
 type testPathContext struct {
 	config Config
-	fs     pathtools.FileSystem
 }
 
-func (x *testPathContext) Fs() pathtools.FileSystem   { return x.fs }
 func (x *testPathContext) Config() Config             { return x.config }
 func (x *testPathContext) AddNinjaFileDeps(...string) {}
 
 // PathContextForTesting returns a PathContext that can be used in tests, for example to create an OutputPath with
 // PathForOutput.
-func PathContextForTesting(config Config, fs map[string][]byte) PathContext {
+func PathContextForTesting(config Config) PathContext {
 	return &testPathContext{
 		config: config,
-		fs:     pathtools.MockFs(fs),
 	}
 }
 
@@ -1402,4 +1417,17 @@ func maybeRelErr(basePath string, targetPath string) (string, bool, error) {
 		return "", false, nil
 	}
 	return rel, true, nil
+}
+
+// Writes a file to the output directory.  Attempting to write directly to the output directory
+// will fail due to the sandbox of the soong_build process.
+func WriteFileToOutputDir(path WritablePath, data []byte, perm os.FileMode) error {
+	return ioutil.WriteFile(absolutePath(path.String()), data, perm)
+}
+
+func absolutePath(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(absSrcDir, path)
 }

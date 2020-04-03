@@ -73,6 +73,11 @@ func TestBasicSdkWithCc(t *testing.T) {
 			native_shared_libs: ["sdkmember"],
 		}
 
+		cc_library_shared {
+			name: "sdkmember",
+			system_shared_libs: [],
+		}
+
 		sdk_snapshot {
 			name: "mysdk@1",
 			native_shared_libs: ["sdkmember_mysdk_1"],
@@ -97,6 +102,11 @@ func TestBasicSdkWithCc(t *testing.T) {
 			srcs: ["libfoo.so"],
 			system_shared_libs: [],
 			stl: "none",
+			// TODO: remove //apex_available:platform
+			apex_available: [
+				"//apex_available:platform",
+				"myapex",
+			],
 		}
 
 		cc_prebuilt_library_shared {
@@ -105,6 +115,11 @@ func TestBasicSdkWithCc(t *testing.T) {
 			srcs: ["libfoo.so"],
 			system_shared_libs: [],
 			stl: "none",
+			// TODO: remove //apex_available:platform
+			apex_available: [
+				"//apex_available:platform",
+				"myapex2",
+			],
 		}
 
 		cc_library_shared {
@@ -113,6 +128,10 @@ func TestBasicSdkWithCc(t *testing.T) {
 			shared_libs: ["sdkmember"],
 			system_shared_libs: [],
 			stl: "none",
+			apex_available: [
+				"myapex",
+				"myapex2",
+			],
 		}
 
 		apex {
@@ -141,6 +160,66 @@ func TestBasicSdkWithCc(t *testing.T) {
 	// Depending on the uses_sdks value, different libs are linked
 	ensureListContains(t, pathsToStrings(cpplibForMyApex.Rule("ld").Implicits), sdkMemberV1.String())
 	ensureListContains(t, pathsToStrings(cpplibForMyApex2.Rule("ld").Implicits), sdkMemberV2.String())
+}
+
+// Make sure the sdk can use host specific cc libraries static/shared and both.
+func TestHostSdkWithCc(t *testing.T) {
+	testSdkWithCc(t, `
+		sdk {
+			name: "mysdk",
+			device_supported: false,
+			host_supported: true,
+			native_shared_libs: ["sdkshared"],
+			native_static_libs: ["sdkstatic"],
+		}
+
+		cc_library_host_shared {
+			name: "sdkshared",
+			system_shared_libs: [],
+			stl: "none",
+		}
+
+		cc_library_host_static {
+			name: "sdkstatic",
+			system_shared_libs: [],
+			stl: "none",
+		}
+	`)
+}
+
+// Make sure the sdk can use cc libraries static/shared and both.
+func TestSdkWithCc(t *testing.T) {
+	testSdkWithCc(t, `
+		sdk {
+			name: "mysdk",
+			native_shared_libs: ["sdkshared", "sdkboth1"],
+			native_static_libs: ["sdkstatic", "sdkboth2"],
+		}
+
+		cc_library_shared {
+			name: "sdkshared",
+			system_shared_libs: [],
+			stl: "none",
+		}
+
+		cc_library_static {
+			name: "sdkstatic",
+			system_shared_libs: [],
+			stl: "none",
+		}
+
+		cc_library {
+			name: "sdkboth1",
+			system_shared_libs: [],
+			stl: "none",
+		}
+
+		cc_library {
+			name: "sdkboth2",
+			system_shared_libs: [],
+			stl: "none",
+		}
+	`)
 }
 
 func TestSnapshotWithCcDuplicateHeaders(t *testing.T) {
@@ -256,6 +335,68 @@ include/Test.h -> include/include/Test.h
 .intermediates/mynativelib/android_arm64_armv8-a_shared/mynativelib.so -> arm64/lib/mynativelib.so
 arm64/include/Arm64Test.h -> arm64/include/arm64/include/Arm64Test.h
 .intermediates/mynativelib/android_arm_armv7-a-neon_shared/mynativelib.so -> arm/lib/mynativelib.so`),
+	)
+}
+
+func TestSnapshotWithCcBinary(t *testing.T) {
+	result := testSdkWithCc(t, `
+		module_exports {
+			name: "mymodule_exports",
+			native_binaries: ["mynativebinary"],
+		}
+
+		cc_binary {
+			name: "mynativebinary",
+			srcs: [
+				"Test.cpp",
+			],
+			compile_multilib: "both",
+			system_shared_libs: [],
+			stl: "none",
+		}
+	`)
+
+	result.CheckSnapshot("mymodule_exports", "android_common", "",
+		checkAndroidBpContents(`
+// This is auto-generated. DO NOT EDIT.
+
+cc_prebuilt_binary {
+    name: "mymodule_exports_mynativebinary@current",
+    sdk_member_name: "mynativebinary",
+    compile_multilib: "both",
+    arch: {
+        arm64: {
+            srcs: ["arm64/bin/mynativebinary"],
+        },
+        arm: {
+            srcs: ["arm/bin/mynativebinary"],
+        },
+    },
+}
+
+cc_prebuilt_binary {
+    name: "mynativebinary",
+    prefer: false,
+    compile_multilib: "both",
+    arch: {
+        arm64: {
+            srcs: ["arm64/bin/mynativebinary"],
+        },
+        arm: {
+            srcs: ["arm/bin/mynativebinary"],
+        },
+    },
+}
+
+module_exports_snapshot {
+    name: "mymodule_exports@current",
+    native_binaries: ["mymodule_exports_mynativebinary@current"],
+}
+`),
+		checkAllCopyRules(`
+.intermediates/mynativebinary/android_arm64_armv8-a/mynativebinary -> arm64/bin/mynativebinary
+.intermediates/mynativebinary/android_arm_armv7-a-neon/mynativebinary -> arm/bin/mynativebinary
+`),
 	)
 }
 
@@ -436,8 +577,8 @@ include/Test.h -> include/include/Test.h
 
 func TestSnapshotWithCcStaticLibrary(t *testing.T) {
 	result := testSdkWithCc(t, `
-		sdk {
-			name: "mysdk",
+		module_exports {
+			name: "myexports",
 			native_static_libs: ["mynativelib"],
 		}
 
@@ -456,12 +597,12 @@ func TestSnapshotWithCcStaticLibrary(t *testing.T) {
 		}
 	`)
 
-	result.CheckSnapshot("mysdk", "android_common", "",
+	result.CheckSnapshot("myexports", "android_common", "",
 		checkAndroidBpContents(`
 // This is auto-generated. DO NOT EDIT.
 
 cc_prebuilt_library_static {
-    name: "mysdk_mynativelib@current",
+    name: "myexports_mynativelib@current",
     sdk_member_name: "mynativelib",
     export_include_dirs: ["include/include"],
     arch: {
@@ -496,9 +637,9 @@ cc_prebuilt_library_static {
     system_shared_libs: [],
 }
 
-sdk_snapshot {
-    name: "mysdk@current",
-    native_static_libs: ["mysdk_mynativelib@current"],
+module_exports_snapshot {
+    name: "myexports@current",
+    native_static_libs: ["myexports_mynativelib@current"],
 }
 `),
 		checkAllCopyRules(`
@@ -520,8 +661,8 @@ func TestHostSnapshotWithCcStaticLibrary(t *testing.T) {
 	SkipIfNotLinux(t)
 
 	result := testSdkWithCc(t, `
-		sdk {
-			name: "mysdk",
+		module_exports {
+			name: "myexports",
 			device_supported: false,
 			host_supported: true,
 			native_static_libs: ["mynativelib"],
@@ -544,12 +685,12 @@ func TestHostSnapshotWithCcStaticLibrary(t *testing.T) {
 		}
 	`)
 
-	result.CheckSnapshot("mysdk", "linux_glibc_common", "",
+	result.CheckSnapshot("myexports", "linux_glibc_common", "",
 		checkAndroidBpContents(`
 // This is auto-generated. DO NOT EDIT.
 
 cc_prebuilt_library_static {
-    name: "mysdk_mynativelib@current",
+    name: "myexports_mynativelib@current",
     sdk_member_name: "mynativelib",
     device_supported: false,
     host_supported: true,
@@ -588,11 +729,11 @@ cc_prebuilt_library_static {
     system_shared_libs: [],
 }
 
-sdk_snapshot {
-    name: "mysdk@current",
+module_exports_snapshot {
+    name: "myexports@current",
     device_supported: false,
     host_supported: true,
-    native_static_libs: ["mysdk_mynativelib@current"],
+    native_static_libs: ["myexports_mynativelib@current"],
 }
 `),
 		checkAllCopyRules(`

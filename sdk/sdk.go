@@ -33,7 +33,7 @@ func init() {
 	pctx.Import("android/soong/android")
 	pctx.Import("android/soong/java/config")
 
-	android.RegisterModuleType("sdk", ModuleFactory)
+	android.RegisterModuleType("sdk", SdkModuleFactory)
 	android.RegisterModuleType("sdk_snapshot", SnapshotModuleFactory)
 	android.PreDepsMutators(RegisterPreDepsMutators)
 	android.PostDepsMutators(RegisterPostDepsMutators)
@@ -50,6 +50,9 @@ type sdk struct {
 	// list properties, e.g. java_libs.
 	dynamicMemberTypeListProperties interface{}
 
+	// The set of exported members.
+	exportedMembers map[string]struct{}
+
 	properties sdkProperties
 
 	snapshotFile android.OptionalPath
@@ -60,11 +63,9 @@ type sdk struct {
 
 type sdkProperties struct {
 	Snapshot bool `blueprint:"mutated"`
-}
 
-type sdkMemberDependencyTag struct {
-	blueprint.BaseDependencyTag
-	memberType android.SdkMemberType
+	// True if this is a module_exports (or module_exports_snapshot) module type.
+	Module_exports bool `blueprint:"mutated"`
 }
 
 // Contains information about the sdk properties that list sdk members, e.g.
@@ -78,7 +79,7 @@ type sdkMemberListProperty struct {
 
 	// the dependency tag used for items in this list that can be used to determine the memberType
 	// for a resolved dependency.
-	dependencyTag *sdkMemberDependencyTag
+	dependencyTag android.SdkMemberTypeDependencyTag
 }
 
 func (p *sdkMemberListProperty) propertyName() string {
@@ -130,6 +131,7 @@ func getDynamicSdkMemberTypes(registry *android.SdkMemberTypesRegistry) *dynamic
 // * a dependency tag that identifies the member type of a resolved dependency.
 //
 func createDynamicSdkMemberTypes(sdkMemberTypes []android.SdkMemberType) *dynamicSdkMemberTypes {
+
 	var listProperties []*sdkMemberListProperty
 	var fields []reflect.StructField
 
@@ -163,9 +165,7 @@ func createDynamicSdkMemberTypes(sdkMemberTypes []android.SdkMemberType) *dynami
 
 			memberType: memberType,
 
-			dependencyTag: &sdkMemberDependencyTag{
-				memberType: memberType,
-			},
+			dependencyTag: android.DependencyTagForSdkMemberType(memberType),
 		}
 
 		listProperties = append(listProperties, memberListProperty)
@@ -182,18 +182,25 @@ func createDynamicSdkMemberTypes(sdkMemberTypes []android.SdkMemberType) *dynami
 
 // sdk defines an SDK which is a logical group of modules (e.g. native libs, headers, java libs, etc.)
 // which Mainline modules like APEX can choose to build with.
-func ModuleFactory() android.Module {
+func SdkModuleFactory() android.Module {
+	return newSdkModule(false)
+}
+
+func newSdkModule(moduleExports bool) *sdk {
 	s := &sdk{}
-
+	s.properties.Module_exports = moduleExports
 	// Get the dynamic sdk member type data for the currently registered sdk member types.
-	s.dynamicSdkMemberTypes = getDynamicSdkMemberTypes(android.SdkMemberTypes)
-
+	var registry *android.SdkMemberTypesRegistry
+	if moduleExports {
+		registry = android.ModuleExportsMemberTypes
+	} else {
+		registry = android.SdkMemberTypes
+	}
+	s.dynamicSdkMemberTypes = getDynamicSdkMemberTypes(registry)
 	// Create an instance of the dynamically created struct that contains all the
 	// properties for the member type specific list properties.
 	s.dynamicMemberTypeListProperties = s.dynamicSdkMemberTypes.createMemberListProperties()
-
 	s.AddProperties(&s.properties, s.dynamicMemberTypeListProperties)
-
 	android.InitAndroidMultiTargetsArchModule(s, android.HostAndDeviceSupported, android.MultilibCommon)
 	android.InitDefaultableModule(s)
 	android.AddLoadHook(s, func(ctx android.LoadHookContext) {
@@ -208,9 +215,36 @@ func ModuleFactory() android.Module {
 
 // sdk_snapshot is a versioned snapshot of an SDK. This is an auto-generated module.
 func SnapshotModuleFactory() android.Module {
-	s := ModuleFactory()
-	s.(*sdk).properties.Snapshot = true
+	s := newSdkModule(false)
+	s.properties.Snapshot = true
 	return s
+}
+
+func (s *sdk) memberListProperties() []*sdkMemberListProperty {
+	return s.dynamicSdkMemberTypes.memberListProperties
+}
+
+func (s *sdk) getExportedMembers() map[string]struct{} {
+	if s.exportedMembers == nil {
+		// Collect all the exported members.
+		s.exportedMembers = make(map[string]struct{})
+
+		for _, memberListProperty := range s.memberListProperties() {
+			names := memberListProperty.getter(s.dynamicMemberTypeListProperties)
+
+			// Every member specified explicitly in the properties is exported by the sdk.
+			for _, name := range names {
+				s.exportedMembers[name] = struct{}{}
+			}
+		}
+	}
+
+	return s.exportedMembers
+}
+
+func (s *sdk) isInternalMember(memberName string) bool {
+	_, ok := s.getExportedMembers()[memberName]
+	return !ok
 }
 
 func (s *sdk) snapshot() bool {
@@ -274,19 +308,24 @@ type dependencyTag struct {
 
 // For dependencies from an in-development version of an SDK member to frozen versions of the same member
 // e.g. libfoo -> libfoo.mysdk.11 and libfoo.mysdk.12
-type sdkMemberVesionedDepTag struct {
+type sdkMemberVersionedDepTag struct {
 	dependencyTag
 	member  string
 	version string
 }
 
+// Mark this tag so dependencies that use it are excluded from visibility enforcement.
+func (t sdkMemberVersionedDepTag) ExcludeFromVisibilityEnforcement() {}
+
 // Step 1: create dependencies from an SDK module to its members.
 func memberMutator(mctx android.BottomUpMutatorContext) {
 	if s, ok := mctx.Module().(*sdk); ok {
-		for _, memberListProperty := range s.dynamicSdkMemberTypes.memberListProperties {
-			names := memberListProperty.getter(s.dynamicMemberTypeListProperties)
-			tag := memberListProperty.dependencyTag
-			memberListProperty.memberType.AddDependencies(mctx, tag, names)
+		if s.Enabled() {
+			for _, memberListProperty := range s.memberListProperties() {
+				names := memberListProperty.getter(s.dynamicMemberTypeListProperties)
+				tag := memberListProperty.dependencyTag
+				memberListProperty.memberType.AddDependencies(mctx, tag, names)
+			}
 		}
 	}
 }
@@ -326,7 +365,7 @@ func memberInterVersionMutator(mctx android.BottomUpMutatorContext) {
 	if m, ok := mctx.Module().(android.SdkAware); ok && m.IsInAnySdk() {
 		if !m.ContainingSdk().Unversioned() {
 			memberName := m.MemberName()
-			tag := sdkMemberVesionedDepTag{member: memberName, version: m.ContainingSdk().Version}
+			tag := sdkMemberVersionedDepTag{member: memberName, version: m.ContainingSdk().Version}
 			mctx.AddReverseDependency(mctx.Module(), tag, memberName)
 		}
 	}

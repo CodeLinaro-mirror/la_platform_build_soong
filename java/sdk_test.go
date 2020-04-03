@@ -211,6 +211,22 @@ func TestClasspath(t *testing.T) {
 			java8classpath: []string{"prebuilts/sdk/29/public/android.jar", "prebuilts/sdk/tools/core-lambda-stubs.jar"},
 			aidl:           "-pprebuilts/sdk/29/public/framework.aidl",
 		},
+		{
+			name:           "module_current",
+			properties:     `sdk_version: "module_current",`,
+			bootclasspath:  []string{"android_module_lib_stubs_current", "core-lambda-stubs"},
+			system:         "core-current-stubs-system-modules",
+			java9classpath: []string{"android_module_lib_stubs_current"},
+			aidl:           "-p" + buildDir + "/framework.aidl",
+		},
+		{
+			name:           "system_server_current",
+			properties:     `sdk_version: "system_server_current",`,
+			bootclasspath:  []string{"android_module_lib_stubs_current", "services-stubs", "core-lambda-stubs"},
+			system:         "core-current-stubs-system-modules",
+			java9classpath: []string{"android_module_lib_stubs_current", "services-stubs"},
+			aidl:           "-p" + buildDir + "/framework.aidl",
+		},
 	}
 
 	for _, testcase := range classpathTestcases {
@@ -327,14 +343,14 @@ func TestClasspath(t *testing.T) {
 
 			// Test with legacy javac -source 1.8 -target 1.8
 			t.Run("Java language level 8", func(t *testing.T) {
-				config := testConfig(nil)
+				config := testConfig(nil, bpJava8, nil)
 				if testcase.unbundled {
 					config.TestProductVariables.Unbundled_build = proptools.BoolPtr(true)
 				}
 				if testcase.pdk {
 					config.TestProductVariables.Pdk = proptools.BoolPtr(true)
 				}
-				ctx := testContext(bpJava8, nil)
+				ctx := testContext()
 				run(t, ctx, config)
 
 				checkClasspath(t, ctx, true /* isJava8 */)
@@ -350,14 +366,14 @@ func TestClasspath(t *testing.T) {
 
 			// Test with default javac -source 9 -target 9
 			t.Run("Java language level 9", func(t *testing.T) {
-				config := testConfig(nil)
+				config := testConfig(nil, bp, nil)
 				if testcase.unbundled {
 					config.TestProductVariables.Unbundled_build = proptools.BoolPtr(true)
 				}
 				if testcase.pdk {
 					config.TestProductVariables.Pdk = proptools.BoolPtr(true)
 				}
-				ctx := testContext(bp, nil)
+				ctx := testContext()
 				run(t, ctx, config)
 
 				checkClasspath(t, ctx, false /* isJava8 */)
@@ -373,7 +389,7 @@ func TestClasspath(t *testing.T) {
 
 			// Test again with PLATFORM_VERSION_CODENAME=REL, javac -source 8 -target 8
 			t.Run("REL + Java language level 8", func(t *testing.T) {
-				config := testConfig(nil)
+				config := testConfig(nil, bpJava8, nil)
 				config.TestProductVariables.Platform_sdk_codename = proptools.StringPtr("REL")
 				config.TestProductVariables.Platform_sdk_final = proptools.BoolPtr(true)
 
@@ -383,7 +399,7 @@ func TestClasspath(t *testing.T) {
 				if testcase.pdk {
 					config.TestProductVariables.Pdk = proptools.BoolPtr(true)
 				}
-				ctx := testContext(bpJava8, nil)
+				ctx := testContext()
 				run(t, ctx, config)
 
 				checkClasspath(t, ctx, true /* isJava8 */)
@@ -391,7 +407,7 @@ func TestClasspath(t *testing.T) {
 
 			// Test again with PLATFORM_VERSION_CODENAME=REL, javac -source 9 -target 9
 			t.Run("REL + Java language level 9", func(t *testing.T) {
-				config := testConfig(nil)
+				config := testConfig(nil, bp, nil)
 				config.TestProductVariables.Platform_sdk_codename = proptools.StringPtr("REL")
 				config.TestProductVariables.Platform_sdk_final = proptools.BoolPtr(true)
 
@@ -401,7 +417,7 @@ func TestClasspath(t *testing.T) {
 				if testcase.pdk {
 					config.TestProductVariables.Pdk = proptools.BoolPtr(true)
 				}
-				ctx := testContext(bp, nil)
+				ctx := testContext()
 				run(t, ctx, config)
 
 				checkClasspath(t, ctx, false /* isJava8 */)

@@ -46,7 +46,7 @@ var (
 var (
 	pctx = android.NewPackageContext("android/soong/cc")
 
-	cc = pctx.AndroidRemoteStaticRule("cc", android.SUPPORTS_BOTH,
+	cc = pctx.AndroidRemoteStaticRule("cc", android.RemoteRuleSupports{Goma: true, RBE: true},
 		blueprint.RuleParams{
 			Depfile:     "${out}.d",
 			Deps:        blueprint.DepsGCC,
@@ -55,9 +55,9 @@ var (
 		},
 		"ccCmd", "cFlags")
 
-	ccNoDeps = pctx.AndroidRemoteStaticRule("ccNoDeps", android.SUPPORTS_GOMA,
+	ccNoDeps = pctx.AndroidStaticRule("ccNoDeps",
 		blueprint.RuleParams{
-			Command:     "$relPwd ${config.CcWrapper}$ccCmd -c $cFlags -o $out $in",
+			Command:     "$relPwd $ccCmd -c $cFlags -o $out $in",
 			CommandDeps: []string{"$ccCmd"},
 		},
 		"ccCmd", "cFlags")
@@ -178,7 +178,7 @@ var (
 
 	windres = pctx.AndroidStaticRule("windres",
 		blueprint.RuleParams{
-			Command:     "$windresCmd $flags -I$$(dirname $in) -i $in -o $out",
+			Command:     "$windresCmd $flags -I$$(dirname $in) -i $in -o $out --preprocessor \"${config.ClangBin}/clang -E -xc-header -DRC_INVOKED\"",
 			CommandDeps: []string{"$windresCmd"},
 		},
 		"windresCmd", "flags")
@@ -238,9 +238,13 @@ var (
 	_ = pctx.SourcePathVariable("kytheVnames", "build/soong/vnames.json")
 	_ = pctx.VariableFunc("kytheCorpus",
 		func(ctx android.PackageVarContext) string { return ctx.Config().XrefCorpusName() })
+	_ = pctx.VariableFunc("kytheCuEncoding",
+		func(ctx android.PackageVarContext) string { return ctx.Config().XrefCuEncoding() })
 	kytheExtract = pctx.StaticRule("kythe",
 		blueprint.RuleParams{
-			Command:     "rm -f $out && KYTHE_CORPUS=${kytheCorpus} KYTHE_OUTPUT_FILE=$out KYTHE_VNAMES=$kytheVnames $cxxExtractor $cFlags $in ",
+			Command: `rm -f $out && ` +
+				`KYTHE_CORPUS=${kytheCorpus} KYTHE_OUTPUT_FILE=$out KYTHE_VNAMES=$kytheVnames KYTHE_KZIP_ENCODING=${kytheCuEncoding} ` +
+				`$cxxExtractor $cFlags $in `,
 			CommandDeps: []string{"$cxxExtractor", "$kytheVnames"},
 		},
 		"cFlags")
@@ -288,6 +292,7 @@ type builderFlags struct {
 	aidlFlags     string
 	rsFlags       string
 	toolchain     config.Toolchain
+	sdclang       bool
 	tidy          bool
 	coverage      bool
 	sAbiDump      bool
@@ -485,7 +490,13 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 
 		ccDesc := ccCmd
 
-		ccCmd = "${config.ClangBin}/" + ccCmd
+		var extraFlags string
+		if flags.sdclang {
+			ccCmd = "${config.SDClangBin}/" + ccCmd
+			extraFlags = " ${config.SDClangFlags}"
+		} else {
+			ccCmd = "${config.ClangBin}/" + ccCmd
+		}
 
 		var implicitOutputs android.WritablePaths
 		if coverage {
@@ -503,7 +514,7 @@ func TransformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
 			Implicits:       cFlagsDeps,
 			OrderOnly:       pathDeps,
 			Args: map[string]string{
-				"cFlags": moduleFlags,
+				"cFlags": moduleFlags + extraFlags,
 				"ccCmd":  ccCmd,
 			},
 		})
@@ -580,6 +591,9 @@ func TransformObjToStaticLib(ctx android.ModuleContext, objFiles android.Paths,
 	flags builderFlags, outputFile android.ModuleOutPath, deps android.Paths) {
 
 	arCmd := "${config.ClangBin}/llvm-ar"
+	if flags.sdclang {
+                arCmd = "${config.ClangBin}/llvm-ar"
+        }
 	arFlags := "crsPD"
 	if !ctx.Darwin() {
 		arFlags += " -format=gnu"
@@ -604,7 +618,14 @@ func TransformObjToDynamicBinary(ctx android.ModuleContext,
 	objFiles, sharedLibs, staticLibs, lateStaticLibs, wholeStaticLibs, deps android.Paths,
 	crtBegin, crtEnd android.OptionalPath, groupLate bool, flags builderFlags, outputFile android.WritablePath, implicitOutputs android.WritablePaths) {
 
-	ldCmd := "${config.ClangBin}/clang++"
+	var ldCmd string
+	var extraFlags string
+	if flags.sdclang {
+		ldCmd = "${config.SDClangBin}/clang++"
+		extraFlags = " ${config.SDClangFlags}"
+	} else {
+		ldCmd = "${config.ClangBin}/clang++"
+	}
 
 	var libFlagsList []string
 
@@ -665,7 +686,7 @@ func TransformObjToDynamicBinary(ctx android.ModuleContext,
 			"crtBegin":      crtBegin.String(),
 			"libFlags":      strings.Join(libFlagsList, " "),
 			"extraLibFlags": flags.extraLibFlags,
-			"ldFlags":       flags.globalLdFlags + " " + flags.localLdFlags,
+			"ldFlags":       flags.globalLdFlags + " " + flags.localLdFlags + " " + extraFlags,
 			"crtEnd":        crtEnd.String(),
 		},
 	})

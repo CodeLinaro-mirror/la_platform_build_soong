@@ -68,18 +68,11 @@ func TestPrebuilt(t *testing.T) {
 		"libe.a":  nil,
 	}
 
-	config := android.TestArchConfig(buildDir, nil)
+	config := TestConfig(buildDir, android.Android, nil, bp, fs)
 
-	ctx := CreateTestContext(bp, fs, android.Android)
+	ctx := CreateTestContext()
 
-	ctx.RegisterModuleType("cc_prebuilt_library_shared", PrebuiltSharedLibraryFactory)
-	ctx.RegisterModuleType("cc_prebuilt_library_static", PrebuiltStaticLibraryFactory)
-	ctx.RegisterModuleType("cc_prebuilt_binary", prebuiltBinaryFactory)
-
-	ctx.PreArchMutators(android.RegisterPrebuiltsPreArchMutators)
-	ctx.PostDepsMutators(android.RegisterPrebuiltsPostDepsMutators)
-
-	ctx.Register()
+	ctx.Register(config)
 
 	_, errs := ctx.ParseFileList(".", []string{"Android.bp"})
 	android.FailIfErrored(t, errs)

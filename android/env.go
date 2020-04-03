@@ -32,6 +32,7 @@ import (
 var originalEnv map[string]string
 var SoongDelveListen string
 var SoongDelvePath string
+var SdclangEnv map[string]string
 
 func init() {
 	// Delve support needs to read this environment variable very early, before NewConfig has created a way to
@@ -41,15 +42,28 @@ func init() {
 	SoongDelvePath, _ = exec.LookPath("dlv")
 
 	originalEnv = make(map[string]string)
+	SdclangEnv = make(map[string]string)
 	for _, env := range os.Environ() {
 		idx := strings.IndexRune(env, '=')
 		if idx != -1 {
 			originalEnv[env[:idx]] = env[idx+1:]
+			SdclangEnv[env[:idx]] = env[idx+1:]
 		}
 	}
 	// Clear the environment to prevent use of os.Getenv(), which would not provide dependencies on environment
 	// variable values.  The environment is available through ctx.Config().Getenv, ctx.Config().IsEnvTrue, etc.
 	os.Clearenv()
+}
+
+// getenv checks either os.Getenv or originalEnv so that it works before or after the init()
+// function above.  It doesn't add any dependencies on the environment variable, so it should
+// only be used for values that won't change.  For values that might change use ctx.Config().Getenv.
+func getenv(key string) string {
+	if originalEnv == nil {
+		return os.Getenv(key)
+	} else {
+		return originalEnv[key]
+	}
 }
 
 func EnvSingleton() Singleton {
@@ -66,7 +80,12 @@ func (c *envSingleton) GenerateBuildActions(ctx SingletonContext) {
 		return
 	}
 
-	err := env.WriteEnvFile(envFile.String(), envDeps)
+	data, err := env.EnvFileContents(envDeps)
+	if err != nil {
+		ctx.Errorf(err.Error())
+	}
+
+	err = WriteFileToOutputDir(envFile, data, 0666)
 	if err != nil {
 		ctx.Errorf(err.Error())
 	}

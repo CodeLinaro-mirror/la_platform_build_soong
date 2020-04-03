@@ -25,11 +25,19 @@ import (
 // This file implements common functionality for handling modules that may exist as prebuilts,
 // source, or both.
 
+func RegisterPrebuiltMutators(ctx RegistrationContext) {
+	ctx.PreArchMutators(RegisterPrebuiltsPreArchMutators)
+	ctx.PostDepsMutators(RegisterPrebuiltsPostDepsMutators)
+}
+
 type prebuiltDependencyTag struct {
 	blueprint.BaseDependencyTag
 }
 
 var PrebuiltDepTag prebuiltDependencyTag
+
+// Mark this tag so dependencies that use it are excluded from visibility enforcement.
+func (t prebuiltDependencyTag) ExcludeFromVisibilityEnforcement() {}
 
 type PrebuiltProperties struct {
 	// When prefer is set to true the prebuilt will be used instead of any source module with
@@ -52,6 +60,10 @@ type Prebuilt struct {
 
 func (p *Prebuilt) Name(name string) string {
 	return "prebuilt_" + name
+}
+
+func (p *Prebuilt) ForcePrefer() {
+	p.properties.Prefer = proptools.BoolPtr(true)
 }
 
 // The below source-related functions and the srcs, src fields are based on an assumption that
