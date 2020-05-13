@@ -490,6 +490,12 @@ func (linker *baseLinker) link(ctx ModuleContext,
 	panic(fmt.Errorf("baseLinker doesn't know how to link"))
 }
 
+func (linker *baseLinker) linkerSpecifiedDeps(specifiedDeps specifiedDeps) specifiedDeps {
+	specifiedDeps.sharedLibs = append(specifiedDeps.sharedLibs, linker.Properties.Shared_libs...)
+	specifiedDeps.systemSharedLibs = append(specifiedDeps.systemSharedLibs, linker.Properties.System_shared_libs...)
+	return specifiedDeps
+}
+
 // Injecting version symbols
 // Some host modules want a version number, but we don't want to rebuild it every time.  Optionally add a step
 // after linking that injects a constant placeholder with the current version number.
@@ -501,19 +507,21 @@ func init() {
 var injectVersionSymbol = pctx.AndroidStaticRule("injectVersionSymbol",
 	blueprint.RuleParams{
 		Command: "$symbolInjectCmd -i $in -o $out -s soong_build_number " +
-			"-from 'SOONG BUILD NUMBER PLACEHOLDER' -v $buildNumberFromFile",
+			"-from 'SOONG BUILD NUMBER PLACEHOLDER' -v $$(cat $buildNumberFile)",
 		CommandDeps: []string{"$symbolInjectCmd"},
 	},
-	"buildNumberFromFile")
+	"buildNumberFile")
 
 func (linker *baseLinker) injectVersionSymbol(ctx ModuleContext, in android.Path, out android.WritablePath) {
+	buildNumberFile := ctx.Config().BuildNumberFile(ctx)
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        injectVersionSymbol,
 		Description: "inject version symbol",
 		Input:       in,
 		Output:      out,
+		OrderOnly:   android.Paths{buildNumberFile},
 		Args: map[string]string{
-			"buildNumberFromFile": proptools.NinjaEscape(ctx.Config().BuildNumberFromFile()),
+			"buildNumberFile": buildNumberFile.String(),
 		},
 	})
 }
