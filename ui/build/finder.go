@@ -56,7 +56,7 @@ func NewSourceFinder(ctx Context, config Config) (f *finder.Finder) {
 	cacheParams := finder.CacheParams{
 		WorkingDirectory: dir,
 		RootDirs:         []string{"."},
-		ExcludeDirs:      []string{".git", ".repo"},
+		ExcludeDirs:      []string{"gecko", "vts", ".git", ".repo"},
 		PruneFiles:       pruneFiles,
 		IncludeFiles: []string{
 			"Android.mk",

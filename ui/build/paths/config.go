@@ -56,7 +56,7 @@ var Log = PathConfig{
 var Missing = PathConfig{
 	Symlink: true,
 	Log:     true,
-	Error:   true,
+	Error:   false,
 }
 
 var LinuxOnlyPrebuilt = PathConfig{
