@@ -55,6 +55,7 @@ func init() {
 	AddNeverAllowRules(createMediaRules()...)
 	AddNeverAllowRules(createJavaDeviceForHostRules()...)
 	AddNeverAllowRules(createCcSdkVariantRules()...)
+	AddNeverAllowRules(createUncompressDexRules()...)
 }
 
 // Add a NeverAllow rule to the set of rules to apply.
@@ -141,6 +142,7 @@ func createLibcoreRules() []Rule {
 		"external/icu",
 		"external/okhttp",
 		"external/wycheproof",
+		"prebuilts",
 	}
 
 	// Core library constraints. The sdk_version: "none" can only be used in core library projects.
@@ -164,7 +166,7 @@ func createMediaRules() []Rule {
 }
 
 func createJavaDeviceForHostRules() []Rule {
-	javaDeviceForHostProjectsWhitelist := []string{
+	javaDeviceForHostProjectsAllowedList := []string{
 		"external/guava",
 		"external/robolectric-shadows",
 		"framework/layoutlib",
@@ -172,14 +174,14 @@ func createJavaDeviceForHostRules() []Rule {
 
 	return []Rule{
 		NeverAllow().
-			NotIn(javaDeviceForHostProjectsWhitelist...).
+			NotIn(javaDeviceForHostProjectsAllowedList...).
 			ModuleType("java_device_for_host", "java_host_for_device").
-			Because("java_device_for_host can only be used in whitelisted projects"),
+			Because("java_device_for_host can only be used in allowed projects"),
 	}
 }
 
 func createCcSdkVariantRules() []Rule {
-	sdkVersionOnlyWhitelist := []string{
+	sdkVersionOnlyAllowedList := []string{
 		// derive_sdk_prefer32 has stem: "derive_sdk" which conflicts with the derive_sdk.
 		// This sometimes works because the APEX modules that contain derive_sdk and
 		// derive_sdk_prefer32 suppress the platform installation rules, but fails when
@@ -187,7 +189,7 @@ func createCcSdkVariantRules() []Rule {
 		"frameworks/base/apex/sdkextensions/derive_sdk",
 	}
 
-	platformVariantPropertiesWhitelist := []string{
+	platformVariantPropertiesAllowedList := []string{
 		// android_native_app_glue and libRSSupport use native_window.h but target old
 		// sdk versions (minimum and 9 respectively) where libnativewindow didn't exist,
 		// so they can't add libnativewindow to shared_libs to get the header directory
@@ -199,13 +201,22 @@ func createCcSdkVariantRules() []Rule {
 
 	return []Rule{
 		NeverAllow().
-			NotIn(sdkVersionOnlyWhitelist...).
+			NotIn(sdkVersionOnlyAllowedList...).
 			WithMatcher("sdk_variant_only", isSetMatcherInstance).
-			Because("sdk_variant_only can only be used in whitelisted projects"),
+			Because("sdk_variant_only can only be used in allowed projects"),
 		NeverAllow().
-			NotIn(platformVariantPropertiesWhitelist...).
+			NotIn(platformVariantPropertiesAllowedList...).
 			WithMatcher("platform.shared_libs", isSetMatcherInstance).
-			Because("platform variant properties can only be used in whitelisted projects"),
+			Because("platform variant properties can only be used in allowed projects"),
+	}
+}
+
+func createUncompressDexRules() []Rule {
+	return []Rule{
+		NeverAllow().
+			NotIn("art").
+			WithMatcher("uncompress_dex", isSetMatcherInstance).
+			Because("uncompress_dex is only allowed for certain jars for test in art."),
 	}
 }
 
@@ -239,6 +250,10 @@ func neverallowMutator(ctx BottomUpMutatorContext) {
 		}
 
 		if !n.appliesToDirectDeps(ctx) {
+			continue
+		}
+
+		if !n.appliesToBootclasspathJar(ctx) {
 			continue
 		}
 
@@ -300,6 +315,18 @@ func (m *regexMatcher) String() string {
 	return ".regexp(" + m.re.String() + ")"
 }
 
+type notInListMatcher struct {
+	allowed []string
+}
+
+func (m *notInListMatcher) Test(value string) bool {
+	return !InList(value, m.allowed)
+}
+
+func (m *notInListMatcher) String() string {
+	return ".not-in-list(" + strings.Join(m.allowed, ",") + ")"
+}
+
 type isSetMatcher struct{}
 
 func (m *isSetMatcher) Test(value string) bool {
@@ -331,6 +358,8 @@ type Rule interface {
 
 	NotModuleType(types ...string) Rule
 
+	BootclasspathJar() Rule
+
 	With(properties, value string) Rule
 
 	WithMatcher(properties string, matcher ValueMatcher) Rule
@@ -358,6 +387,8 @@ type rule struct {
 
 	props       []ruleProperty
 	unlessProps []ruleProperty
+
+	onlyBootclasspathJar bool
 }
 
 // Create a new NeverAllow rule.
@@ -433,6 +464,11 @@ func (r *rule) Because(reason string) Rule {
 	return r
 }
 
+func (r *rule) BootclasspathJar() Rule {
+	r.onlyBootclasspathJar = true
+	return r
+}
+
 func (r *rule) String() string {
 	s := "neverallow"
 	for _, v := range r.paths {
@@ -458,6 +494,9 @@ func (r *rule) String() string {
 	}
 	for _, v := range r.osClasses {
 		s += " os:" + v.String()
+	}
+	if r.onlyBootclasspathJar {
+		s += " inBcp"
 	}
 	if len(r.reason) != 0 {
 		s += " which is restricted because " + r.reason
@@ -485,6 +524,14 @@ func (r *rule) appliesToDirectDeps(ctx BottomUpMutatorContext) bool {
 	})
 
 	return matches
+}
+
+func (r *rule) appliesToBootclasspathJar(ctx BottomUpMutatorContext) bool {
+	if !r.onlyBootclasspathJar {
+		return true
+	}
+
+	return InList(ctx.ModuleName(), ctx.Config().BootJars())
 }
 
 func (r *rule) appliesToOsClass(osClass OsClass) bool {
@@ -521,6 +568,10 @@ func Regexp(re string) ValueMatcher {
 		panic(err)
 	}
 	return &regexMatcher{r}
+}
+
+func NotInList(allowed []string) ValueMatcher {
+	return &notInListMatcher{allowed}
 }
 
 // assorted utils

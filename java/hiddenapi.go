@@ -59,10 +59,9 @@ type hiddenAPIIntf interface {
 
 var _ hiddenAPIIntf = (*hiddenAPI)(nil)
 
-func (h *hiddenAPI) hiddenAPI(ctx android.ModuleContext, dexJar android.ModuleOutPath,
+func (h *hiddenAPI) hiddenAPI(ctx android.ModuleContext, name string, primary bool, dexJar android.ModuleOutPath,
 	implementationJar android.Path, uncompressDex bool) android.ModuleOutPath {
 	if !ctx.Config().IsEnvTrue("UNSAFE_DISABLE_HIDDENAPI_FLAGS") {
-		name := ctx.ModuleName()
 
 		// Modules whose names are of the format <x>-hiddenapi provide hiddenapi information
 		// for the boot jar module <x>. Otherwise, the module provides information for itself.
@@ -90,7 +89,14 @@ func (h *hiddenAPI) hiddenAPI(ctx android.ModuleContext, dexJar android.ModuleOu
 			// the gathered information in the generated dex file.
 			if name == bootJarName {
 				hiddenAPIJar := android.PathForModuleOut(ctx, "hiddenapi", name+".jar")
-				h.bootDexJarPath = dexJar
+
+				// More than one library with the same classes can be encoded but only one can
+				// be added to the global set of flags, otherwise it will result in duplicate
+				// classes which is an error. Therefore, only add the dex jar of one of them
+				// to the global set of flags.
+				if primary {
+					h.bootDexJarPath = dexJar
+				}
 				hiddenAPIEncodeDex(ctx, hiddenAPIJar, dexJar, uncompressDex)
 				dexJar = hiddenAPIJar
 			}
@@ -180,7 +186,9 @@ func hiddenAPIEncodeDex(ctx android.ModuleContext, output android.WritablePath, 
 	// b/149353192: when a module is instrumented, jacoco adds synthetic members
 	// $jacocoData and $jacocoInit. Since they don't exist when building the hidden API flags,
 	// don't complain when we don't find hidden API flags for the synthetic members.
-	if j, ok := ctx.Module().(*Library); ok && j.shouldInstrument(ctx) {
+	if j, ok := ctx.Module().(interface {
+		shouldInstrument(android.BaseModuleContext) bool
+	}); ok && j.shouldInstrument(ctx) {
 		enforceHiddenApiFlagsToAllMembers = false
 	}
 

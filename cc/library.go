@@ -376,7 +376,7 @@ type libraryDecorator struct {
 	useCoreVariant       bool
 	checkSameCoreVariant bool
 
-	// Decorated interafaces
+	// Decorated interfaces
 	*baseCompiler
 	*baseLinker
 	*baseInstaller
@@ -401,6 +401,31 @@ func (l *libraryDecorator) collectHeadersForSnapshot(ctx android.ModuleContext) 
 		dir := path.String()
 		// Skip if dir is for generated headers
 		if strings.HasPrefix(dir, android.PathForOutput(ctx).String()) {
+			continue
+		}
+		// libeigen wrongly exports the root directory "external/eigen". But only two
+		// subdirectories "Eigen" and "unsupported" contain exported header files. Even worse
+		// some of them have no extension. So we need special treatment for libeigen in order
+		// to glob correctly.
+		if dir == "external/eigen" {
+			// Only these two directories contains exported headers.
+			for _, subdir := range []string{"Eigen", "unsupported/Eigen"} {
+				glob, err := ctx.GlobWithDeps("external/eigen/"+subdir+"/**/*", nil)
+				if err != nil {
+					ctx.ModuleErrorf("glob failed: %#v", err)
+					return
+				}
+				for _, header := range glob {
+					if strings.HasSuffix(header, "/") {
+						continue
+					}
+					ext := filepath.Ext(header)
+					if ext != "" && ext != ".h" {
+						continue
+					}
+					ret = append(ret, android.PathForSource(ctx, header))
+				}
+			}
 			continue
 		}
 		exts := headerExts
@@ -749,10 +774,12 @@ func (library *libraryDecorator) compilerDeps(ctx DepsContext, deps Deps) Deps {
 
 func (library *libraryDecorator) linkerDeps(ctx DepsContext, deps Deps) Deps {
 	if library.static() {
+		// Compare with nil because an empty list needs to be propagated.
 		if library.StaticProperties.Static.System_shared_libs != nil {
 			library.baseLinker.Properties.System_shared_libs = library.StaticProperties.Static.System_shared_libs
 		}
 	} else if library.shared() {
+		// Compare with nil because an empty list needs to be propagated.
 		if library.SharedProperties.Shared.System_shared_libs != nil {
 			library.baseLinker.Properties.System_shared_libs = library.SharedProperties.Shared.System_shared_libs
 		}
@@ -828,10 +855,21 @@ func (library *libraryDecorator) linkerSpecifiedDeps(specifiedDeps specifiedDeps
 	}
 
 	specifiedDeps.sharedLibs = append(specifiedDeps.sharedLibs, properties.Shared_libs...)
-	specifiedDeps.systemSharedLibs = append(specifiedDeps.systemSharedLibs, properties.System_shared_libs...)
+
+	// Must distinguish nil and [] in system_shared_libs - ensure that [] in
+	// either input list doesn't come out as nil.
+	if specifiedDeps.systemSharedLibs == nil {
+		specifiedDeps.systemSharedLibs = properties.System_shared_libs
+	} else {
+		specifiedDeps.systemSharedLibs = append(specifiedDeps.systemSharedLibs, properties.System_shared_libs...)
+	}
 
 	specifiedDeps.sharedLibs = android.FirstUniqueStrings(specifiedDeps.sharedLibs)
-	specifiedDeps.systemSharedLibs = android.FirstUniqueStrings(specifiedDeps.systemSharedLibs)
+	if len(specifiedDeps.systemSharedLibs) > 0 {
+		// Skip this if systemSharedLibs is either nil or [], to ensure they are
+		// retained.
+		specifiedDeps.systemSharedLibs = android.FirstUniqueStrings(specifiedDeps.systemSharedLibs)
+	}
 	return specifiedDeps
 }
 
@@ -1384,6 +1422,8 @@ func reuseStaticLibrary(mctx android.BottomUpMutatorContext, static, shared *Mod
 			len(sharedCompiler.SharedProperties.Shared.Static_libs) == 0 &&
 			len(staticCompiler.StaticProperties.Static.Shared_libs) == 0 &&
 			len(sharedCompiler.SharedProperties.Shared.Shared_libs) == 0 &&
+			// Compare System_shared_libs properties with nil because empty lists are
+			// semantically significant for them.
 			staticCompiler.StaticProperties.Static.System_shared_libs == nil &&
 			sharedCompiler.SharedProperties.Shared.System_shared_libs == nil {
 

@@ -26,6 +26,7 @@ func RegisterPrebuiltBuildComponents(ctx android.RegistrationContext) {
 	ctx.RegisterModuleType("cc_prebuilt_library", PrebuiltLibraryFactory)
 	ctx.RegisterModuleType("cc_prebuilt_library_shared", PrebuiltSharedLibraryFactory)
 	ctx.RegisterModuleType("cc_prebuilt_library_static", PrebuiltStaticLibraryFactory)
+	ctx.RegisterModuleType("cc_prebuilt_object", prebuiltObjectFactory)
 	ctx.RegisterModuleType("cc_prebuilt_binary", prebuiltBinaryFactory)
 }
 
@@ -222,6 +223,54 @@ func NewPrebuiltStaticLibrary(hod android.HostOrDeviceSupported) (*Module, *libr
 	return module, library
 }
 
+type prebuiltObjectProperties struct {
+	Srcs []string `android:"path,arch_variant"`
+}
+
+type prebuiltObjectLinker struct {
+	android.Prebuilt
+	objectLinker
+
+	properties prebuiltObjectProperties
+}
+
+func (p *prebuiltObjectLinker) prebuilt() *android.Prebuilt {
+	return &p.Prebuilt
+}
+
+var _ prebuiltLinkerInterface = (*prebuiltObjectLinker)(nil)
+
+func (p *prebuiltObjectLinker) link(ctx ModuleContext,
+	flags Flags, deps PathDeps, objs Objects) android.Path {
+	if len(p.properties.Srcs) > 0 {
+		return p.Prebuilt.SingleSourcePath(ctx)
+	}
+	return nil
+}
+
+func (p *prebuiltObjectLinker) object() bool {
+	return true
+}
+
+func newPrebuiltObject() *Module {
+	module := newObject()
+	prebuilt := &prebuiltObjectLinker{
+		objectLinker: objectLinker{
+			baseLinker: NewBaseLinker(nil),
+		},
+	}
+	module.linker = prebuilt
+	module.AddProperties(&prebuilt.properties)
+	android.InitPrebuiltModule(module, &prebuilt.properties.Srcs)
+	android.InitSdkAwareModule(module)
+	return module
+}
+
+func prebuiltObjectFactory() android.Module {
+	module := newPrebuiltObject()
+	return module.Init()
+}
+
 type prebuiltBinaryLinker struct {
 	*binaryDecorator
 	prebuiltLinker
@@ -259,6 +308,10 @@ func (p *prebuiltBinaryLinker) link(ctx ModuleContext,
 	}
 
 	return nil
+}
+
+func (p *prebuiltBinaryLinker) binary() bool {
+	return true
 }
 
 // cc_prebuilt_binary installs a precompiled executable in srcs property in the
