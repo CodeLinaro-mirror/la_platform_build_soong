@@ -706,7 +706,7 @@ func TransformObjToDynamicBinary(ctx android.ModuleContext,
 		"crtBegin":      crtBegin.String(),
 		"libFlags":      strings.Join(libFlagsList, " "),
 		"extraLibFlags": flags.extraLibFlags,
-		"ldFlags":       flags.globalLdFlags + " " + flags.localLdFlags,
+		"ldFlags":       flags.globalLdFlags + " " + flags.localLdFlags + " " + extraFlags,
 		"crtEnd":        crtEnd.String(),
 	}
 	if ctx.Config().IsEnvTrue("RBE_CXX_LINKS") {
@@ -721,14 +721,7 @@ func TransformObjToDynamicBinary(ctx android.ModuleContext,
 		ImplicitOutputs: implicitOutputs,
 		Inputs:          objFiles,
 		Implicits:       deps,
-		Args: map[string]string{
-			"ldCmd":         ldCmd,
-			"crtBegin":      crtBegin.String(),
-			"libFlags":      strings.Join(libFlagsList, " "),
-			"extraLibFlags": flags.extraLibFlags,
-			"ldFlags":       flags.globalLdFlags + " " + flags.localLdFlags + " " + extraFlags,
-			"crtEnd":        crtEnd.String(),
-		},
+		Args:            args,
 	})
 }
 
