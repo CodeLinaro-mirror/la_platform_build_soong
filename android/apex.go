@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/google/blueprint"
@@ -32,6 +33,7 @@ type ApexInfo struct {
 	ApexName string
 
 	MinSdkVersion int
+	Updatable     bool
 }
 
 // Extracted from ApexModule to make it easier to define custom subsets of the
@@ -114,6 +116,9 @@ type ApexModule interface {
 	// For example, with maxSdkVersion is 10 and versionList is [9,11]
 	// it returns 9 as string
 	ChooseSdkVersion(versionList []string, maxSdkVersion int) (string, error)
+
+	// Tests if the module comes from an updatable APEX.
+	Updatable() bool
 
 	// List of APEXes that this module tests. The module has access to
 	// the private part of the listed APEXes even when it is not included in the
@@ -259,6 +264,10 @@ func (m *ApexModuleBase) checkApexAvailableProperty(mctx BaseModuleContext) {
 	}
 }
 
+func (m *ApexModuleBase) Updatable() bool {
+	return m.ApexProperties.Info.Updatable
+}
+
 type byApexName []ApexInfo
 
 func (a byApexName) Len() int           { return len(a) }
@@ -394,4 +403,77 @@ func InitApexModule(m ApexModule) {
 	base.canHaveApexVariants = true
 
 	m.AddProperties(&base.ApexProperties)
+}
+
+// A dependency info for a single ApexModule, either direct or transitive.
+type ApexModuleDepInfo struct {
+	// Name of the dependency
+	To string
+	// List of dependencies To belongs to. Includes APEX itself, if a direct dependency.
+	From []string
+	// Whether the dependency belongs to the final compiled APEX.
+	IsExternal bool
+	// min_sdk_version of the ApexModule
+	MinSdkVersion string
+}
+
+// A map of a dependency name to its ApexModuleDepInfo
+type DepNameToDepInfoMap map[string]ApexModuleDepInfo
+
+type ApexBundleDepsInfo struct {
+	flatListPath OutputPath
+	fullListPath OutputPath
+}
+
+type ApexBundleDepsInfoIntf interface {
+	Updatable() bool
+	FlatListPath() Path
+	FullListPath() Path
+}
+
+func (d *ApexBundleDepsInfo) FlatListPath() Path {
+	return d.flatListPath
+}
+
+func (d *ApexBundleDepsInfo) FullListPath() Path {
+	return d.fullListPath
+}
+
+// Generate two module out files:
+// 1. FullList with transitive deps and their parents in the dep graph
+// 2. FlatList with a flat list of transitive deps
+func (d *ApexBundleDepsInfo) BuildDepsInfoLists(ctx ModuleContext, minSdkVersion string, depInfos DepNameToDepInfoMap) {
+	var fullContent strings.Builder
+	var flatContent strings.Builder
+
+	fmt.Fprintf(&flatContent, "%s(minSdkVersion:%s):\\n", ctx.ModuleName(), minSdkVersion)
+	for _, key := range FirstUniqueStrings(SortedStringKeys(depInfos)) {
+		info := depInfos[key]
+		toName := fmt.Sprintf("%s(minSdkVersion:%s)", info.To, info.MinSdkVersion)
+		if info.IsExternal {
+			toName = toName + " (external)"
+		}
+		fmt.Fprintf(&fullContent, "%s <- %s\\n", toName, strings.Join(SortedUniqueStrings(info.From), ", "))
+		fmt.Fprintf(&flatContent, "  %s\\n", toName)
+	}
+
+	d.fullListPath = PathForModuleOut(ctx, "depsinfo", "fulllist.txt").OutputPath
+	ctx.Build(pctx, BuildParams{
+		Rule:        WriteFile,
+		Description: "Full Dependency Info",
+		Output:      d.fullListPath,
+		Args: map[string]string{
+			"content": fullContent.String(),
+		},
+	})
+
+	d.flatListPath = PathForModuleOut(ctx, "depsinfo", "flatlist.txt").OutputPath
+	ctx.Build(pctx, BuildParams{
+		Rule:        WriteFile,
+		Description: "Flat Dependency Info",
+		Output:      d.flatListPath,
+		Args: map[string]string{
+			"content": flatContent.String(),
+		},
+	})
 }

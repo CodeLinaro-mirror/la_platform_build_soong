@@ -177,7 +177,10 @@ type BaseLinkerProperties struct {
 	Version_script *string `android:"path,arch_variant"`
 
 	// list of static libs that should not be used to build this module
-	Exclude_static_libs []string
+	Exclude_static_libs []string `android:"arch_variant"`
+
+	// list of shared libs that should not be used to build this module
+	Exclude_shared_libs []string `android:"arch_variant"`
 }
 
 func NewBaseLinker(sanitize *sanitize) *baseLinker {
@@ -223,6 +226,8 @@ func (linker *baseLinker) linkerDeps(ctx DepsContext, deps Deps) Deps {
 	deps.ReexportSharedLibHeaders = append(deps.ReexportSharedLibHeaders, linker.Properties.Export_shared_lib_headers...)
 	deps.ReexportGeneratedHeaders = append(deps.ReexportGeneratedHeaders, linker.Properties.Export_generated_headers...)
 
+	deps.SharedLibs = removeListFromList(deps.SharedLibs, linker.Properties.Exclude_shared_libs)
+	deps.StaticLibs = removeListFromList(deps.StaticLibs, linker.Properties.Exclude_static_libs)
 	deps.WholeStaticLibs = removeListFromList(deps.WholeStaticLibs, linker.Properties.Exclude_static_libs)
 
 	if Bool(linker.Properties.Use_version_lib) {
@@ -503,7 +508,15 @@ func (linker *baseLinker) link(ctx ModuleContext,
 
 func (linker *baseLinker) linkerSpecifiedDeps(specifiedDeps specifiedDeps) specifiedDeps {
 	specifiedDeps.sharedLibs = append(specifiedDeps.sharedLibs, linker.Properties.Shared_libs...)
-	specifiedDeps.systemSharedLibs = append(specifiedDeps.systemSharedLibs, linker.Properties.System_shared_libs...)
+
+	// Must distinguish nil and [] in system_shared_libs - ensure that [] in
+	// either input list doesn't come out as nil.
+	if specifiedDeps.systemSharedLibs == nil {
+		specifiedDeps.systemSharedLibs = linker.Properties.System_shared_libs
+	} else {
+		specifiedDeps.systemSharedLibs = append(specifiedDeps.systemSharedLibs, linker.Properties.System_shared_libs...)
+	}
+
 	return specifiedDeps
 }
 

@@ -313,10 +313,11 @@ type SdkMemberType interface {
 	// SdkAware and be added with an SdkMemberTypeDependencyTag tag.
 	HasTransitiveSdkMembers() bool
 
-	// Add dependencies from the SDK module to all the variants the member
-	// contributes to the SDK. The exact set of variants required is determined
-	// by the SDK and its properties. The dependencies must be added with the
-	// supplied tag.
+	// Add dependencies from the SDK module to all the module variants the member
+	// type contributes to the SDK. `names` is the list of module names given in
+	// the member type property (as returned by SdkPropertyName()) in the SDK
+	// module. The exact set of variants required is determined by the SDK and its
+	// properties. The dependencies must be added with the supplied tag.
 	//
 	// The BottomUpMutatorContext provided is for the SDK module.
 	AddDependencies(mctx BottomUpMutatorContext, dependencyTag blueprint.DependencyTag, names []string)
@@ -330,13 +331,7 @@ type SdkMemberType interface {
 
 	// Add a prebuilt module that the sdk will populate.
 	//
-	// Returning nil from this will cause the sdk module type to use the deprecated BuildSnapshot
-	// method to build the snapshot. That method is deprecated because it requires the SdkMemberType
-	// implementation to do all the word.
-	//
-	// Otherwise, returning a non-nil value from this will cause the sdk module type to do the
-	// majority of the work to generate the snapshot. The sdk module code generates the snapshot
-	// as follows:
+	// The sdk module code generates the snapshot as follows:
 	//
 	// * A properties struct of type SdkMemberProperties is created for each variant and
 	//   populated with information from the variant by calling PopulateFromVariant(SdkAware)
@@ -347,8 +342,23 @@ type SdkMemberType interface {
 	//
 	// * The variant property structs are analysed to find exported (capitalized) fields which
 	//   have common values. Those fields are cleared and the common value added to the common
-	//   properties. A field annotated with a tag of `sdk:"keep"` will be treated as if it
+	//   properties.
+	//
+	//   A field annotated with a tag of `sdk:"keep"` will be treated as if it
 	//   was not capitalized, i.e. not optimized for common values.
+	//
+	//   A field annotated with a tag of `android:"arch_variant"` will be allowed to have
+	//   values that differ by arch, fields not tagged as such must have common values across
+	//   all variants.
+	//
+	// * Additional field tags can be specified on a field that will ignore certain values
+	//   for the purpose of common value optimization. A value that is ignored must have the
+	//   default value for the property type. This is to ensure that significant value are not
+	//   ignored by accident. The purpose of this is to allow the snapshot generation to reflect
+	//   the behavior of the runtime. e.g. if a property is ignored on the host then a property
+	//   that is common for android can be treated as if it was common for android and host as
+	//   the setting for host is ignored anyway.
+	//   * `sdk:"ignored-on-host" - this indicates the property is ignored on the host variant.
 	//
 	// * The sdk module type populates the BpModule structure, creating the arch specific
 	//   structure and calls AddToPropertySet(...) on the properties struct to add the member
