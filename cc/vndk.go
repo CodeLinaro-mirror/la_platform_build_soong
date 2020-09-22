@@ -233,8 +233,10 @@ func VndkMutator(mctx android.BottomUpMutatorContext) {
 					}
 					if m.vndkdep.isVndkSp() {
 						if !inList(name, vndkSpLibraries) {
-							vndkSpLibraries = append(vndkSpLibraries, name)
-							sort.Strings(vndkSpLibraries)
+							if !inList(name, config.VndkRemovedByKaiOS) {
+								vndkSpLibraries = append(vndkSpLibraries, name)
+								sort.Strings(vndkSpLibraries)
+							}
 						}
 					} else {
 						if !inList(name, vndkCoreLibraries) {
