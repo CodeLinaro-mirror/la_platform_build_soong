@@ -35,6 +35,7 @@ var originalEnv map[string]string
 var soongDelveListen string
 var soongDelvePath string
 var soongDelveEnv []string
+var SdclangEnv map[string]string
 
 func init() {
 	// Delve support needs to read this environment variable very early, before NewConfig has created a way to
@@ -45,6 +46,7 @@ func init() {
 
 	originalEnv = make(map[string]string)
 	soongDelveEnv = []string{}
+	SdclangEnv = make(map[string]string)
 	for _, env := range os.Environ() {
 		idx := strings.IndexRune(env, '=')
 		if idx != -1 {
@@ -52,6 +54,7 @@ func init() {
 			if env[:idx] != "SOONG_DELVE" {
 				soongDelveEnv = append(soongDelveEnv, env)
 			}
+			SdclangEnv[env[:idx]] = env[idx+1:]
 		}
 	}
 
