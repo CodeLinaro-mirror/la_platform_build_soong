@@ -97,6 +97,7 @@ var Configuration = map[string]PathConfig{
 	"tr":      Allowed,
 	"unzip":   Allowed,
 	"zip":     Allowed,
+        "m4":      Allowed,
         "flex":    Allowed,
         "bison":   Allowed,
         "make":    Allowed,
