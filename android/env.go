@@ -32,6 +32,7 @@ import (
 var originalEnv map[string]string
 var SoongDelveListen string
 var SoongDelvePath string
+var SdclangEnv map[string]string
 
 func init() {
 	// Delve support needs to read this environment variable very early, before NewConfig has created a way to
@@ -41,10 +42,12 @@ func init() {
 	SoongDelvePath, _ = exec.LookPath("dlv")
 
 	originalEnv = make(map[string]string)
+	SdclangEnv = make(map[string]string)
 	for _, env := range os.Environ() {
 		idx := strings.IndexRune(env, '=')
 		if idx != -1 {
 			originalEnv[env[:idx]] = env[idx+1:]
+			SdclangEnv[env[:idx]] = env[idx+1:]
 		}
 	}
 	// Clear the environment to prevent use of os.Getenv(), which would not provide dependencies on environment
