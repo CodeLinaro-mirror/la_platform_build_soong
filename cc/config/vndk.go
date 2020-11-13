@@ -155,9 +155,3 @@ var VndkMustUseVendorVariantList = []string{
 	"libxml2",
 	"libziparchive",
 }
-
-// List of VNDK libraries that removed by KaiOS for downsize.
-// TODO: Will append more items while applying Bug-105510
-var VndkRemovedByKaiOS = []string{
-	"android.hardware.renderscript@1.0",
-}
