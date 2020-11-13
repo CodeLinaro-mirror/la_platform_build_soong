@@ -338,8 +338,56 @@ It is likely that the boot classpath is inconsistent.
 Rebuild with ART_BOOT_IMAGE_EXTRA_ARGS="--runtime-arg -verbose:verifier" to see verification errors.`
 
 func bootImageProfileRule(ctx android.SingletonContext, image *bootImage, missingDeps []string) android.WritablePath {
-	// This is a little hack to cut the dependency when removing all of android sdk libraries in KaiOS platform. Return nil directly to prevent building bootjars.
-	return nil
+	global := dexpreoptGlobalConfig(ctx)
+
+	if !global.UseProfileForBootImage || ctx.Config().IsPdkBuild() || ctx.Config().UnbundledBuild() {
+		return nil
+	}
+	return ctx.Config().Once(bootImageProfileRuleKey, func() interface{} {
+		tools := global.Tools
+
+		rule := android.NewRuleBuilder()
+		rule.MissingDeps(missingDeps)
+
+		var bootImageProfile android.Path
+		if len(global.BootImageProfiles) > 1 {
+			combinedBootImageProfile := image.dir.Join(ctx, "boot-image-profile.txt")
+			rule.Command().Text("cat").Inputs(global.BootImageProfiles).Text(">").Output(combinedBootImageProfile)
+			bootImageProfile = combinedBootImageProfile
+		} else if len(global.BootImageProfiles) == 1 {
+			bootImageProfile = global.BootImageProfiles[0]
+		} else {
+			// If not set, use the default.  Some branches like master-art-host don't have frameworks/base, so manually
+			// handle the case that the default is missing.  Those branches won't attempt to build the profile rule,
+			// and if they do they'll get a missing deps error.
+			defaultProfile := "frameworks/base/config/boot-image-profile.txt"
+			path := android.ExistentPathForSource(ctx, defaultProfile)
+			if path.Valid() {
+				bootImageProfile = path.Path()
+			} else {
+				missingDeps = append(missingDeps, defaultProfile)
+				bootImageProfile = android.PathForOutput(ctx, "missing")
+			}
+		}
+
+		profile := image.dir.Join(ctx, "boot.prof")
+
+		rule.Command().
+			Text(`ANDROID_LOG_TAGS="*:e"`).
+			Tool(tools.Profman).
+			FlagWithInput("--create-profile-from=", bootImageProfile).
+			FlagForEachInput("--apk=", image.dexPaths.Paths()).
+			FlagForEachArg("--dex-location=", image.dexLocations).
+			FlagWithOutput("--reference-profile-file=", profile)
+
+		rule.Install(profile, "/system/etc/boot-image.prof")
+
+		rule.Build(pctx, ctx, "bootJarsProfile", "profile boot jars")
+
+		image.profileInstalls = rule.Installs()
+
+		return profile
+	}).(android.WritablePath)
 }
 
 var bootImageProfileRuleKey = android.NewOnceKey("bootImageProfileRule")

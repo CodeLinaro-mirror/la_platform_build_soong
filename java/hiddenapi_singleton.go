@@ -53,15 +53,34 @@ type hiddenAPISingleton struct {
 
 // hiddenAPI singleton rules
 func (h *hiddenAPISingleton) GenerateBuildActions(ctx android.SingletonContext) {
-	// This is a little hack to cut the dependency when removing all of android sdk libraries in KaiOS platform. Return directly to prevent running hidden api rules.
-	return
+	// Don't run any hiddenapi rules if UNSAFE_DISABLE_HIDDENAPI_FLAGS=true
+	if ctx.Config().IsEnvTrue("UNSAFE_DISABLE_HIDDENAPI_FLAGS") {
+		return
+	}
+
+	stubFlagsRule(ctx)
+
+	// These rules depend on files located in frameworks/base, skip them if running in a tree that doesn't have them.
+	if ctx.Config().FrameworksBaseDirExists(ctx) {
+		h.flags = flagsRule(ctx)
+		h.metadata = metadataRule(ctx)
+	} else {
+		h.flags = emptyFlagsRule(ctx)
+	}
 }
 
 // Export paths to Make.  INTERNAL_PLATFORM_HIDDENAPI_FLAGS is used by Make rules in art/ and cts/.
 // Both paths are used to call dist-for-goals.
 func (h *hiddenAPISingleton) MakeVars(ctx android.MakeVarsContext) {
-	// This is a little hack to cut the dependency when removing all of android sdk libraries in KaiOS platform. Return directly to prevent running hidden api rules.
-	return
+	if ctx.Config().IsEnvTrue("UNSAFE_DISABLE_HIDDENAPI_FLAGS") {
+		return
+	}
+
+	ctx.Strict("INTERNAL_PLATFORM_HIDDENAPI_FLAGS", h.flags.String())
+
+	if h.metadata != nil {
+		ctx.Strict("INTERNAL_PLATFORM_HIDDENAPI_GREYLIST_METADATA", h.metadata.String())
+	}
 }
 
 // stubFlagsRule creates the rule to build hiddenapi-stub-flags.txt out of dex jars from stub modules and boot image

@@ -430,7 +430,14 @@ func InitDroiddocModule(module android.DefaultableModule, hod android.HostOrDevi
 }
 
 func apiCheckEnabled(apiToCheck ApiToCheck, apiVersionTag string) bool {
-	// This is a little hack to cut the dependency when removing all of android sdk libraries in KaiOS platform. Return false directly to prevent checking android SDK API.
+	if String(apiToCheck.Api_file) != "" && String(apiToCheck.Removed_api_file) != "" {
+		return true
+	} else if String(apiToCheck.Api_file) != "" {
+		panic("for " + apiVersionTag + " removed_api_file has to be non-empty!")
+	} else if String(apiToCheck.Removed_api_file) != "" {
+		panic("for " + apiVersionTag + " api_file has to be non-empty!")
+	}
+
 	return false
 }
 
