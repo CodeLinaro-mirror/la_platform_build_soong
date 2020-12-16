@@ -59,7 +59,18 @@ type prebuiltEtcProperties struct {
 	Filename_from_src *bool `android:"arch_variant"`
 
 	// Make this module available when building for ramdisk.
+	// On device without a dedicated recovery partition, the module is only
+	// available after switching root into
+	// /first_stage_ramdisk. To expose the module before switching root, install
+	// the recovery variant instead.
 	Ramdisk_available *bool
+
+	// Make this module available when building for vendor ramdisk.
+	// On device without a dedicated recovery partition, the module is only
+	// available after switching root into
+	// /first_stage_ramdisk. To expose the module before switching root, install
+	// the recovery variant instead.
+	Vendor_ramdisk_available *bool
 
 	// Make this module available when building for recovery.
 	Recovery_available *bool
@@ -105,6 +116,18 @@ func (p *PrebuiltEtc) InstallInRamdisk() bool {
 	return p.inRamdisk()
 }
 
+func (p *PrebuiltEtc) inVendorRamdisk() bool {
+	return p.ModuleBase.InVendorRamdisk() || p.ModuleBase.InstallInVendorRamdisk()
+}
+
+func (p *PrebuiltEtc) onlyInVendorRamdisk() bool {
+	return p.ModuleBase.InstallInVendorRamdisk()
+}
+
+func (p *PrebuiltEtc) InstallInVendorRamdisk() bool {
+	return p.inVendorRamdisk()
+}
+
 func (p *PrebuiltEtc) inRecovery() bool {
 	return p.ModuleBase.InRecovery() || p.ModuleBase.InstallInRecovery()
 }
@@ -122,11 +145,16 @@ var _ android.ImageInterface = (*PrebuiltEtc)(nil)
 func (p *PrebuiltEtc) ImageMutatorBegin(ctx android.BaseModuleContext) {}
 
 func (p *PrebuiltEtc) CoreVariantNeeded(ctx android.BaseModuleContext) bool {
-	return !p.ModuleBase.InstallInRecovery() && !p.ModuleBase.InstallInRamdisk()
+	return !p.ModuleBase.InstallInRecovery() && !p.ModuleBase.InstallInRamdisk() &&
+		!p.ModuleBase.InstallInVendorRamdisk()
 }
 
 func (p *PrebuiltEtc) RamdiskVariantNeeded(ctx android.BaseModuleContext) bool {
 	return proptools.Bool(p.properties.Ramdisk_available) || p.ModuleBase.InstallInRamdisk()
+}
+
+func (p *PrebuiltEtc) VendorRamdiskVariantNeeded(ctx android.BaseModuleContext) bool {
+	return proptools.Bool(p.properties.Vendor_ramdisk_available) || p.ModuleBase.InstallInVendorRamdisk()
 }
 
 func (p *PrebuiltEtc) RecoveryVariantNeeded(ctx android.BaseModuleContext) bool {
@@ -172,13 +200,7 @@ func (p *PrebuiltEtc) SubDir() string {
 }
 
 func (p *PrebuiltEtc) BaseDir() string {
-	// If soc install dir was specified and SOC specific is set, set the installDirPath to the specified
-	// socInstallDirBase.
-	installBaseDir := p.installDirBase
-	if p.SocSpecific() && p.socInstallDirBase != "" {
-		installBaseDir = p.socInstallDirBase
-	}
-	return installBaseDir
+	return p.installDirBase
 }
 
 func (p *PrebuiltEtc) Installable() bool {
@@ -205,7 +227,13 @@ func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		ctx.PropertyErrorf("sub_dir", "relative_install_path is set. Cannot set sub_dir")
 	}
 
-	p.installDirPath = android.PathForModuleInstall(ctx, p.BaseDir(), p.SubDir())
+	// If soc install dir was specified and SOC specific is set, set the installDirPath to the specified
+	// socInstallDirBase.
+	installBaseDir := p.installDirBase
+	if p.SocSpecific() && p.socInstallDirBase != "" {
+		installBaseDir = p.socInstallDirBase
+	}
+	p.installDirPath = android.PathForModuleInstall(ctx, installBaseDir, p.SubDir())
 
 	// This ensures that outputFilePath has the correct name for others to
 	// use, as the source file may have a different name.
@@ -214,12 +242,22 @@ func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		Output: p.outputFilePath,
 		Input:  p.sourceFilePath,
 	})
+
+	if p.Installable() {
+		installPath := ctx.InstallFile(p.installDirPath, p.outputFilePath.Base(), p.outputFilePath)
+		for _, sl := range p.properties.Symlinks {
+			ctx.InstallSymlink(p.installDirPath, sl, installPath)
+		}
+	}
 }
 
 func (p *PrebuiltEtc) AndroidMkEntries() []android.AndroidMkEntries {
 	nameSuffix := ""
 	if p.inRamdisk() && !p.onlyInRamdisk() {
 		nameSuffix = ".ramdisk"
+	}
+	if p.inVendorRamdisk() && !p.onlyInVendorRamdisk() {
+		nameSuffix = ".vendor_ramdisk"
 	}
 	if p.inRecovery() && !p.onlyInRecovery() {
 		nameSuffix = ".recovery"

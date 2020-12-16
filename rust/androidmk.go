@@ -156,7 +156,7 @@ func (procMacro *procMacroDecorator) AndroidMk(ctx AndroidMkContext, ret *androi
 }
 
 func (sourceProvider *BaseSourceProvider) AndroidMk(ctx AndroidMkContext, ret *android.AndroidMkData) {
-	outFile := sourceProvider.OutputFile
+	outFile := sourceProvider.OutputFiles[0]
 	ret.Class = "ETC"
 	ret.OutputFile = android.OptionalPathForPath(outFile)
 	ret.SubName += sourceProvider.subName
@@ -178,6 +178,10 @@ func (proto *protobufDecorator) AndroidMk(ctx AndroidMkContext, ret *android.And
 }
 
 func (compiler *baseCompiler) AndroidMk(ctx AndroidMkContext, ret *android.AndroidMkData) {
+	if compiler.path == (android.InstallPath{}) {
+		return
+	}
+
 	var unstrippedOutputFile android.OptionalPath
 	// Soong installation is only supported for host modules. Have Make
 	// installation trigger Soong installation.

@@ -43,6 +43,8 @@ type BuildParams struct {
 	Description     string
 	Output          WritablePath
 	Outputs         WritablePaths
+	SymlinkOutput   WritablePath
+	SymlinkOutputs  WritablePaths
 	ImplicitOutput  WritablePath
 	ImplicitOutputs WritablePaths
 	Input           Path
@@ -176,6 +178,31 @@ type BaseModuleContext interface {
 	// It is intended for use inside the visit functions of Visit* and WalkDeps.
 	OtherModuleType(m blueprint.Module) string
 
+	// OtherModuleProvider returns the value for a provider for the given module.  If the value is
+	// not set it returns the zero value of the type of the provider, so the return value can always
+	// be type asserted to the type of the provider.  The value returned may be a deep copy of the
+	// value originally passed to SetProvider.
+	OtherModuleProvider(m blueprint.Module, provider blueprint.ProviderKey) interface{}
+
+	// OtherModuleHasProvider returns true if the provider for the given module has been set.
+	OtherModuleHasProvider(m blueprint.Module, provider blueprint.ProviderKey) bool
+
+	// Provider returns the value for a provider for the current module.  If the value is
+	// not set it returns the zero value of the type of the provider, so the return value can always
+	// be type asserted to the type of the provider.  It panics if called before the appropriate
+	// mutator or GenerateBuildActions pass for the provider.  The value returned may be a deep
+	// copy of the value originally passed to SetProvider.
+	Provider(provider blueprint.ProviderKey) interface{}
+
+	// HasProvider returns true if the provider for the current module has been set.
+	HasProvider(provider blueprint.ProviderKey) bool
+
+	// SetProvider sets the value for a provider for the current module.  It panics if not called
+	// during the appropriate mutator or GenerateBuildActions pass for the provider, if the value
+	// is not of the appropriate type, or if the value has already been set.  The value should not
+	// be modified after being passed to SetProvider.
+	SetProvider(provider blueprint.ProviderKey, value interface{})
+
 	GetDirectDepsWithTag(tag blueprint.DependencyTag) []Module
 
 	// GetDirectDepWithTag returns the Module the direct dependency with the specified name, or nil if
@@ -245,6 +272,24 @@ type BaseModuleContext interface {
 	// and returns a top-down dependency path from a start module to current child module.
 	GetWalkPath() []Module
 
+	// PrimaryModule returns the first variant of the current module.  Variants of a module are always visited in
+	// order by mutators and GenerateBuildActions, so the data created by the current mutator can be read from the
+	// Module returned by PrimaryModule without data races.  This can be used to perform singleton actions that are
+	// only done once for all variants of a module.
+	PrimaryModule() Module
+
+	// FinalModule returns the last variant of the current module.  Variants of a module are always visited in
+	// order by mutators and GenerateBuildActions, so the data created by the current mutator can be read from all
+	// variants using VisitAllModuleVariants if the current module == FinalModule().  This can be used to perform
+	// singleton actions that are only done once for all variants of a module.
+	FinalModule() Module
+
+	// VisitAllModuleVariants calls visit for each variant of the current module.  Variants of a module are always
+	// visited in order by mutators and GenerateBuildActions, so the data created by the current mutator can be read
+	// from all variants if the current module == FinalModule().  Otherwise, care must be taken to not access any
+	// data modified by the current mutator.
+	VisitAllModuleVariants(visit func(Module))
+
 	// GetTagPath is supposed to be called in visit function passed in WalkDeps()
 	// and returns a top-down dependency tags path from a start module to current child module.
 	// It has one less entry than GetWalkPath() as it contains the dependency tags that
@@ -303,6 +348,7 @@ type ModuleContext interface {
 	InstallInTestcases() bool
 	InstallInSanitizerDir() bool
 	InstallInRamdisk() bool
+	InstallInVendorRamdisk() bool
 	InstallInRecovery() bool
 	InstallInRoot() bool
 	InstallBypassMake() bool
@@ -323,24 +369,6 @@ type ModuleContext interface {
 	// phony rules or real files.  Phony can be called on the same name multiple times to add
 	// additional dependencies.
 	Phony(phony string, deps ...Path)
-
-	// PrimaryModule returns the first variant of the current module.  Variants of a module are always visited in
-	// order by mutators and GenerateBuildActions, so the data created by the current mutator can be read from the
-	// Module returned by PrimaryModule without data races.  This can be used to perform singleton actions that are
-	// only done once for all variants of a module.
-	PrimaryModule() Module
-
-	// FinalModule returns the last variant of the current module.  Variants of a module are always visited in
-	// order by mutators and GenerateBuildActions, so the data created by the current mutator can be read from all
-	// variants using VisitAllModuleVariants if the current module == FinalModule().  This can be used to perform
-	// singleton actions that are only done once for all variants of a module.
-	FinalModule() Module
-
-	// VisitAllModuleVariants calls visit for each variant of the current module.  Variants of a module are always
-	// visited in order by mutators and GenerateBuildActions, so the data created by the current mutator can be read
-	// from all variants if the current module == FinalModule().  Otherwise, care must be taken to not access any
-	// data modified by the current mutator.
-	VisitAllModuleVariants(visit func(Module))
 
 	// GetMissingDependencies returns the list of dependencies that were passed to AddDependencies or related methods,
 	// but do not exist.
@@ -376,6 +404,7 @@ type Module interface {
 	InstallInTestcases() bool
 	InstallInSanitizerDir() bool
 	InstallInRamdisk() bool
+	InstallInVendorRamdisk() bool
 	InstallInRecovery() bool
 	InstallInRoot() bool
 	InstallBypassMake() bool
@@ -410,7 +439,7 @@ type Module interface {
 	HostRequiredModuleNames() []string
 	TargetRequiredModuleNames() []string
 
-	filesToInstall() InstallPaths
+	FilesToInstall() InstallPaths
 }
 
 // Qualified id for a module
@@ -541,7 +570,7 @@ type commonProperties struct {
 	// control whether this module compiles for 32-bit, 64-bit, or both.  Possible values
 	// are "32" (compile for 32-bit only), "64" (compile for 64-bit only), "both" (compile for both
 	// architectures), or "first" (compile for 64-bit on a 64-bit platform, and 32-bit on a 32-bit
-	// platform
+	// platform).
 	Compile_multilib *string `android:"arch_variant"`
 
 	Target struct {
@@ -596,11 +625,14 @@ type commonProperties struct {
 	// Whether this module is installed to ramdisk
 	Ramdisk *bool
 
+	// Whether this module is installed to vendor ramdisk
+	Vendor_ramdisk *bool
+
 	// Whether this module is built for non-native architecures (also known as native bridge binary)
 	Native_bridge_supported *bool `android:"arch_variant"`
 
 	// init.rc files to be installed if this module is installed
-	Init_rc []string `android:"path"`
+	Init_rc []string `android:"arch_variant,path"`
 
 	// VINTF manifest fragments to be installed if this module is installed
 	Vintf_fragments []string `android:"path"`
@@ -923,7 +955,7 @@ type ModuleBase struct {
 	initRcPaths         Paths
 	vintfFragmentsPaths Paths
 
-	prefer32 func(ctx BaseModuleContext, base *ModuleBase, class OsClass) bool
+	prefer32 func(ctx BaseModuleContext, base *ModuleBase, os OsType) bool
 }
 
 func (m *ModuleBase) ComponentDepsMutator(BottomUpMutatorContext) {}
@@ -950,7 +982,7 @@ func (m *ModuleBase) VariablesForTests() map[string]string {
 	return m.variables
 }
 
-func (m *ModuleBase) Prefer32(prefer32 func(ctx BaseModuleContext, base *ModuleBase, class OsClass) bool) {
+func (m *ModuleBase) Prefer32(prefer32 func(ctx BaseModuleContext, base *ModuleBase, os OsType) bool) {
 	m.prefer32 = prefer32
 }
 
@@ -1046,7 +1078,7 @@ func (m *ModuleBase) Os() OsType {
 }
 
 func (m *ModuleBase) Host() bool {
-	return m.Os().Class == Host || m.Os().Class == HostCross
+	return m.Os().Class == Host
 }
 
 func (m *ModuleBase) Device() bool {
@@ -1066,28 +1098,28 @@ func (m *ModuleBase) IsCommonOSVariant() bool {
 	return m.commonProperties.CommonOSVariant
 }
 
-func (m *ModuleBase) OsClassSupported() []OsClass {
+func (m *ModuleBase) supportsTarget(target Target, config Config) bool {
 	switch m.commonProperties.HostOrDeviceSupported {
 	case HostSupported:
-		return []OsClass{Host, HostCross}
+		return target.Os.Class == Host
 	case HostSupportedNoCross:
-		return []OsClass{Host}
+		return target.Os.Class == Host && !target.HostCross
 	case DeviceSupported:
-		return []OsClass{Device}
+		return target.Os.Class == Device
 	case HostAndDeviceSupported, HostAndDeviceDefault:
-		var supported []OsClass
+		supported := false
 		if Bool(m.hostAndDeviceProperties.Host_supported) ||
 			(m.commonProperties.HostOrDeviceSupported == HostAndDeviceDefault &&
 				m.hostAndDeviceProperties.Host_supported == nil) {
-			supported = append(supported, Host, HostCross)
+			supported = supported || target.Os.Class == Host
 		}
 		if m.hostAndDeviceProperties.Device_supported == nil ||
 			*m.hostAndDeviceProperties.Device_supported {
-			supported = append(supported, Device)
+			supported = supported || target.Os.Class == Device
 		}
 		return supported
 	default:
-		return nil
+		return false
 	}
 }
 
@@ -1216,14 +1248,14 @@ func (m *ModuleBase) computeInstallDeps(ctx blueprint.ModuleContext) InstallPath
 	// TODO(ccross): we need to use WalkDeps and have some way to know which dependencies require installation
 	ctx.VisitDepsDepthFirst(func(m blueprint.Module) {
 		if a, ok := m.(Module); ok {
-			result = append(result, a.filesToInstall()...)
+			result = append(result, a.FilesToInstall()...)
 		}
 	})
 
 	return result
 }
 
-func (m *ModuleBase) filesToInstall() InstallPaths {
+func (m *ModuleBase) FilesToInstall() InstallPaths {
 	return m.installFiles
 }
 
@@ -1245,6 +1277,10 @@ func (m *ModuleBase) InstallInSanitizerDir() bool {
 
 func (m *ModuleBase) InstallInRamdisk() bool {
 	return Bool(m.commonProperties.Ramdisk)
+}
+
+func (m *ModuleBase) InstallInVendorRamdisk() bool {
+	return Bool(m.commonProperties.Vendor_ramdisk)
 }
 
 func (m *ModuleBase) InstallInRecovery() bool {
@@ -1294,6 +1330,10 @@ func (m *ModuleBase) getVariationByMutatorName(mutator string) string {
 
 func (m *ModuleBase) InRamdisk() bool {
 	return m.base().commonProperties.ImageVariation == RamdiskVariation
+}
+
+func (m *ModuleBase) InVendorRamdisk() bool {
+	return m.base().commonProperties.ImageVariation == VendorRamdiskVariation
 }
 
 func (m *ModuleBase) InRecovery() bool {
@@ -1474,8 +1514,8 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 	if !ctx.PrimaryArch() {
 		suffix = append(suffix, ctx.Arch().ArchType.String())
 	}
-	if apex, ok := m.module.(ApexModule); ok && !apex.IsForPlatform() {
-		suffix = append(suffix, apex.ApexVariationName())
+	if apexInfo := ctx.Provider(ApexInfoProvider).(ApexInfo); !apexInfo.IsForPlatform() {
+		suffix = append(suffix, apexInfo.ApexVariationName)
 	}
 
 	ctx.Variable(pctx, "moduleDesc", desc)
@@ -1681,6 +1721,21 @@ func (b *baseModuleContext) OtherModuleReverseDependencyVariantExists(name strin
 func (b *baseModuleContext) OtherModuleType(m blueprint.Module) string {
 	return b.bp.OtherModuleType(m)
 }
+func (b *baseModuleContext) OtherModuleProvider(m blueprint.Module, provider blueprint.ProviderKey) interface{} {
+	return b.bp.OtherModuleProvider(m, provider)
+}
+func (b *baseModuleContext) OtherModuleHasProvider(m blueprint.Module, provider blueprint.ProviderKey) bool {
+	return b.bp.OtherModuleHasProvider(m, provider)
+}
+func (b *baseModuleContext) Provider(provider blueprint.ProviderKey) interface{} {
+	return b.bp.Provider(provider)
+}
+func (b *baseModuleContext) HasProvider(provider blueprint.ProviderKey) bool {
+	return b.bp.HasProvider(provider)
+}
+func (b *baseModuleContext) SetProvider(provider blueprint.ProviderKey, value interface{}) {
+	b.bp.SetProvider(provider, value)
+}
 
 func (b *baseModuleContext) GetDirectDepWithTag(name string, tag blueprint.DependencyTag) blueprint.Module {
 	return b.bp.GetDirectDepWithTag(name, tag)
@@ -1723,6 +1778,27 @@ func (m *moduleContext) ModuleBuild(pctx PackageContext, params ModuleBuildParam
 	m.Build(pctx, BuildParams(params))
 }
 
+func validateBuildParams(params blueprint.BuildParams) error {
+	// Validate that the symlink outputs are declared outputs or implicit outputs
+	allOutputs := map[string]bool{}
+	for _, output := range params.Outputs {
+		allOutputs[output] = true
+	}
+	for _, output := range params.ImplicitOutputs {
+		allOutputs[output] = true
+	}
+	for _, symlinkOutput := range params.SymlinkOutputs {
+		if !allOutputs[symlinkOutput] {
+			return fmt.Errorf(
+				"Symlink output %s is not a declared output or implicit output",
+				symlinkOutput)
+		}
+	}
+	return nil
+}
+
+// Convert build parameters from their concrete Android types into their string representations,
+// and combine the singular and plural fields of the same type (e.g. Output and Outputs).
 func convertBuildParams(params BuildParams) blueprint.BuildParams {
 	bparams := blueprint.BuildParams{
 		Rule:            params.Rule,
@@ -1730,6 +1806,7 @@ func convertBuildParams(params BuildParams) blueprint.BuildParams {
 		Deps:            params.Deps,
 		Outputs:         params.Outputs.Strings(),
 		ImplicitOutputs: params.ImplicitOutputs.Strings(),
+		SymlinkOutputs:  params.SymlinkOutputs.Strings(),
 		Inputs:          params.Inputs.Strings(),
 		Implicits:       params.Implicits.Strings(),
 		OrderOnly:       params.OrderOnly.Strings(),
@@ -1743,6 +1820,9 @@ func convertBuildParams(params BuildParams) blueprint.BuildParams {
 	}
 	if params.Output != nil {
 		bparams.Outputs = append(bparams.Outputs, params.Output.String())
+	}
+	if params.SymlinkOutput != nil {
+		bparams.SymlinkOutputs = append(bparams.SymlinkOutputs, params.SymlinkOutput.String())
 	}
 	if params.ImplicitOutput != nil {
 		bparams.ImplicitOutputs = append(bparams.ImplicitOutputs, params.ImplicitOutput.String())
@@ -1759,6 +1839,7 @@ func convertBuildParams(params BuildParams) blueprint.BuildParams {
 
 	bparams.Outputs = proptools.NinjaEscapeList(bparams.Outputs)
 	bparams.ImplicitOutputs = proptools.NinjaEscapeList(bparams.ImplicitOutputs)
+	bparams.SymlinkOutputs = proptools.NinjaEscapeList(bparams.SymlinkOutputs)
 	bparams.Inputs = proptools.NinjaEscapeList(bparams.Inputs)
 	bparams.Implicits = proptools.NinjaEscapeList(bparams.Implicits)
 	bparams.OrderOnly = proptools.NinjaEscapeList(bparams.OrderOnly)
@@ -1815,7 +1896,15 @@ func (m *moduleContext) Build(pctx PackageContext, params BuildParams) {
 		m.buildParams = append(m.buildParams, params)
 	}
 
-	m.bp.Build(pctx.PackageContext, convertBuildParams(params))
+	bparams := convertBuildParams(params)
+	err := validateBuildParams(bparams)
+	if err != nil {
+		m.ModuleErrorf(
+			"%s: build parameter validation failed: %s",
+			m.ModuleName(),
+			err.Error())
+	}
+	m.bp.Build(pctx.PackageContext, bparams)
 }
 
 func (m *moduleContext) Phony(name string, deps ...Path) {
@@ -2001,6 +2090,20 @@ func (b *baseModuleContext) GetTagPath() []blueprint.DependencyTag {
 	return b.tagPath
 }
 
+func (b *baseModuleContext) VisitAllModuleVariants(visit func(Module)) {
+	b.bp.VisitAllModuleVariants(func(module blueprint.Module) {
+		visit(module.(Module))
+	})
+}
+
+func (b *baseModuleContext) PrimaryModule() Module {
+	return b.bp.PrimaryModule().(Module)
+}
+
+func (b *baseModuleContext) FinalModule() Module {
+	return b.bp.FinalModule().(Module)
+}
+
 // A regexp for removing boilerplate from BaseDependencyTag from the string representation of
 // a dependency tag.
 var tagCleaner = regexp.MustCompile(`\QBaseDependencyTag:{}\E(, )?`)
@@ -2036,20 +2139,6 @@ func (b *baseModuleContext) GetPathString(skipFirst bool) string {
 	return sb.String()
 }
 
-func (m *moduleContext) VisitAllModuleVariants(visit func(Module)) {
-	m.bp.VisitAllModuleVariants(func(module blueprint.Module) {
-		visit(module.(Module))
-	})
-}
-
-func (m *moduleContext) PrimaryModule() Module {
-	return m.bp.PrimaryModule().(Module)
-}
-
-func (m *moduleContext) FinalModule() Module {
-	return m.bp.FinalModule().(Module)
-}
-
 func (m *moduleContext) ModuleSubDir() string {
 	return m.bp.ModuleSubDir()
 }
@@ -2075,7 +2164,7 @@ func (b *baseModuleContext) Os() OsType {
 }
 
 func (b *baseModuleContext) Host() bool {
-	return b.os.Class == Host || b.os.Class == HostCross
+	return b.os.Class == Host
 }
 
 func (b *baseModuleContext) Device() bool {
@@ -2146,6 +2235,10 @@ func (m *moduleContext) InstallInSanitizerDir() bool {
 
 func (m *moduleContext) InstallInRamdisk() bool {
 	return m.module.InstallInRamdisk()
+}
+
+func (m *moduleContext) InstallInVendorRamdisk() bool {
+	return m.module.InstallInVendorRamdisk()
 }
 
 func (m *moduleContext) InstallInRecovery() bool {
@@ -2535,30 +2628,36 @@ func (c *buildTargetSingleton) GenerateBuildActions(ctx SingletonContext) {
 	}
 
 	// Create (host|host-cross|target)-<OS> phony rules to build a reduced checkbuild.
-	osDeps := map[OsType]Paths{}
+	type osAndCross struct {
+		os        OsType
+		hostCross bool
+	}
+	osDeps := map[osAndCross]Paths{}
 	ctx.VisitAllModules(func(module Module) {
 		if module.Enabled() {
-			os := module.Target().Os
-			osDeps[os] = append(osDeps[os], module.base().checkbuildFiles...)
+			key := osAndCross{os: module.Target().Os, hostCross: module.Target().HostCross}
+			osDeps[key] = append(osDeps[key], module.base().checkbuildFiles...)
 		}
 	})
 
 	osClass := make(map[string]Paths)
-	for os, deps := range osDeps {
+	for key, deps := range osDeps {
 		var className string
 
-		switch os.Class {
+		switch key.os.Class {
 		case Host:
-			className = "host"
-		case HostCross:
-			className = "host-cross"
+			if key.hostCross {
+				className = "host-cross"
+			} else {
+				className = "host"
+			}
 		case Device:
 			className = "target"
 		default:
 			continue
 		}
 
-		name := className + "-" + os.Name
+		name := className + "-" + key.os.Name
 		osClass[className] = append(osClass[className], PathForPhony(ctx, name))
 
 		ctx.Phony(name, deps...)

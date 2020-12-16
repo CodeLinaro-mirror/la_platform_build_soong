@@ -223,7 +223,25 @@ func (p *vendorSnapshotLibraryDecorator) link(ctx ModuleContext,
 		tocFile := android.PathForModuleOut(ctx, libName+".toc")
 		p.tocFile = android.OptionalPathForPath(tocFile)
 		TransformSharedObjectToToc(ctx, in, tocFile, builderFlags)
+
+		ctx.SetProvider(SharedLibraryInfoProvider, SharedLibraryInfo{
+			SharedLibrary:           in,
+			UnstrippedSharedLibrary: p.unstrippedOutputFile,
+
+			TableOfContents: p.tocFile,
+		})
 	}
+
+	if p.static() {
+		depSet := android.NewDepSetBuilder(android.TOPOLOGICAL).Direct(in).Build()
+		ctx.SetProvider(StaticLibraryInfoProvider, StaticLibraryInfo{
+			StaticLibrary: in,
+
+			TransitiveStaticLibrariesForOrdering: depSet,
+		})
+	}
+
+	p.libraryDecorator.flagExporter.setProvider(ctx)
 
 	return in
 }
@@ -537,7 +555,7 @@ func isVendorProprietaryModule(ctx android.BaseModuleContext) bool {
 // AOSP. They are not guaranteed to be compatible with older vendor images. (e.g. might
 // depend on newer VNDK) So they are captured as vendor snapshot To build older vendor
 // image and newer system image altogether.
-func isVendorSnapshotModule(m *Module, inVendorProprietaryPath bool) bool {
+func isVendorSnapshotModule(m *Module, inVendorProprietaryPath bool, apexInfo android.ApexInfo) bool {
 	if !m.Enabled() || m.Properties.HideFromMake {
 		return false
 	}
@@ -562,7 +580,7 @@ func isVendorSnapshotModule(m *Module, inVendorProprietaryPath bool) bool {
 		return false
 	}
 	// the module must be installed in /vendor
-	if !m.IsForPlatform() || m.isSnapshotPrebuilt() || !m.inVendor() {
+	if !apexInfo.IsForPlatform() || m.isSnapshotPrebuilt() || !m.inVendor() {
 		return false
 	}
 	// skip kernel_headers which always depend on vendor
@@ -735,13 +753,14 @@ func (c *vendorSnapshotSingleton) GenerateBuildActions(ctx android.SingletonCont
 		var propOut string
 
 		if l, ok := m.linker.(snapshotLibraryInterface); ok {
+			exporterInfo := ctx.ModuleProvider(m, FlagExporterInfoProvider).(FlagExporterInfo)
 
 			// library flags
-			prop.ExportedFlags = l.exportedFlags()
-			for _, dir := range l.exportedDirs() {
+			prop.ExportedFlags = exporterInfo.Flags
+			for _, dir := range exporterInfo.IncludeDirs {
 				prop.ExportedDirs = append(prop.ExportedDirs, filepath.Join("include", dir.String()))
 			}
-			for _, dir := range l.exportedSystemDirs() {
+			for _, dir := range exporterInfo.SystemIncludeDirs {
 				prop.ExportedSystemDirs = append(prop.ExportedSystemDirs, filepath.Join("include", dir.String()))
 			}
 			// shared libs dependencies aren't meaningful on static or header libs
@@ -825,6 +844,7 @@ func (c *vendorSnapshotSingleton) GenerateBuildActions(ctx android.SingletonCont
 
 		moduleDir := ctx.ModuleDir(module)
 		inVendorProprietaryPath := isVendorProprietaryPath(moduleDir)
+		apexInfo := ctx.ModuleProvider(module, android.ApexInfoProvider).(android.ApexInfo)
 
 		if m.ExcludeFromVendorSnapshot() {
 			if inVendorProprietaryPath {
@@ -842,7 +862,7 @@ func (c *vendorSnapshotSingleton) GenerateBuildActions(ctx android.SingletonCont
 			}
 		}
 
-		if !isVendorSnapshotModule(m, inVendorProprietaryPath) {
+		if !isVendorSnapshotModule(m, inVendorProprietaryPath, apexInfo) {
 			return
 		}
 
@@ -985,9 +1005,10 @@ func VendorSnapshotSourceMutator(ctx android.BottomUpMutatorContext) {
 		// But we can't just check SocSpecific() since we already passed the image mutator.
 		// Check ramdisk and recovery to see if we are real "vendor: true" module.
 		ramdisk_available := module.InRamdisk() && !module.OnlyInRamdisk()
+		vendor_ramdisk_available := module.InVendorRamdisk() && !module.OnlyInVendorRamdisk()
 		recovery_available := module.InRecovery() && !module.OnlyInRecovery()
 
-		if !ramdisk_available && !recovery_available {
+		if !ramdisk_available && !recovery_available && !vendor_ramdisk_available {
 			vendorSnapshotsLock.Lock()
 			defer vendorSnapshotsLock.Unlock()
 

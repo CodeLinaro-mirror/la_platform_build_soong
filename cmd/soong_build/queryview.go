@@ -31,7 +31,7 @@ import (
 const (
 	// The default `load` preamble for every generated BUILD file.
 	soongModuleLoad = `package(default_visibility = ["//visibility:public"])
-load("//:soong_module.bzl", "soong_module")
+load("//build/bazel/queryview_rules:soong_module.bzl", "soong_module")
 
 `
 
@@ -62,7 +62,7 @@ load("//:soong_module.bzl", "soong_module")
 	soongModuleBzl = `
 %s
 
-load(":providers.bzl", "SoongModuleInfo")
+load("//build/bazel/queryview_rules:providers.bzl", "SoongModuleInfo")
 
 def _generic_soong_module_impl(ctx):
     return [
@@ -147,31 +147,6 @@ var (
 		"bool":        true, // e.g. True
 		"string_list": true, // e.g. ["a", "b"]
 		"string":      true, // e.g. "a"
-	}
-
-	// TODO(b/166563303): Specific properties of some module types aren't
-	// recognized by the documentation generator. As a workaround, hardcode a
-	// mapping of the module type to prop name to prop type here, and ultimately
-	// fix the documentation generator to also parse these properties correctly.
-	additionalPropTypes = map[string]map[string]string{
-		// sdk and module_exports props are created at runtime using reflection.
-		// bpdocs isn't wired up to read runtime generated structs.
-		"sdk": {
-			"java_header_libs":    "string_list",
-			"java_sdk_libs":       "string_list",
-			"java_system_modules": "string_list",
-			"native_header_libs":  "string_list",
-			"native_libs":         "string_list",
-			"native_objects":      "string_list",
-			"native_shared_libs":  "string_list",
-			"native_static_libs":  "string_list",
-		},
-		"module_exports": {
-			"java_libs":          "string_list",
-			"java_tests":         "string_list",
-			"native_binaries":    "string_list",
-			"native_shared_libs": "string_list",
-		},
 	}
 
 	// Certain module property names are blocklisted/ignored here, for the reasons commented.
@@ -395,7 +370,7 @@ func createRuleShims(packages []*bpdoc.Package) (map[string]RuleShim, error) {
 
 		// Canonicalize and normalize module property types to Bazel attribute types
 		starlarkAttrType := prop.Type
-		if starlarkAttrType == "list of strings" {
+		if starlarkAttrType == "list of string" {
 			starlarkAttrType = "string_list"
 		} else if starlarkAttrType == "int64" {
 			starlarkAttrType = "int"
@@ -421,7 +396,7 @@ func createRuleShims(packages []*bpdoc.Package) (map[string]RuleShim, error) {
 
 	ruleShims := map[string]RuleShim{}
 	for _, pkg := range packages {
-		content := "load(\":providers.bzl\", \"SoongModuleInfo\")\n"
+		content := "load(\"//build/bazel/queryview_rules:providers.bzl\", \"SoongModuleInfo\")\n"
 
 		bzlFileName := strings.ReplaceAll(pkg.Path, "android/soong/", "")
 		bzlFileName = strings.ReplaceAll(bzlFileName, ".", "_")
@@ -439,8 +414,19 @@ func createRuleShims(packages []*bpdoc.Package) (map[string]RuleShim, error) {
 				attrs += propToAttr(prop, prop.Name)
 			}
 
-			for propName, propType := range additionalPropTypes[moduleTypeTemplate.Name] {
-				attrs += fmt.Sprintf("        %q: attr.%s(),\n", propName, propType)
+			moduleTypeName := moduleTypeTemplate.Name
+
+			// Certain SDK-related module types dynamically inject properties, instead of declaring
+			// them as structs. These properties are registered in an SdkMemberTypesRegistry. If
+			// the module type name matches, add these properties into the rule definition.
+			var registeredTypes []android.SdkMemberType
+			if moduleTypeName == "module_exports" || moduleTypeName == "module_exports_snapshot" {
+				registeredTypes = android.ModuleExportsMemberTypes.RegisteredTypes()
+			} else if moduleTypeName == "sdk" || moduleTypeName == "sdk_snapshot" {
+				registeredTypes = android.SdkMemberTypes.RegisteredTypes()
+			}
+			for _, memberType := range registeredTypes {
+				attrs += fmt.Sprintf("        %q: attr.string_list(),\n", memberType.SdkPropertyName())
 			}
 
 			attrs += "    },"
@@ -455,10 +441,10 @@ func createRuleShims(packages []*bpdoc.Package) (map[string]RuleShim, error) {
 	return ruleShims, nil
 }
 
-func createBazelOverlay(ctx *android.Context, bazelOverlayDir string) error {
+func createBazelQueryView(ctx *android.Context, bazelQueryViewDir string) error {
 	blueprintCtx := ctx.Context
 	blueprintCtx.VisitAllModules(func(module blueprint.Module) {
-		buildFile, err := buildFileForModule(blueprintCtx, module)
+		buildFile, err := buildFileForModule(blueprintCtx, module, bazelQueryViewDir)
 		if err != nil {
 			panic(err)
 		}
@@ -466,16 +452,15 @@ func createBazelOverlay(ctx *android.Context, bazelOverlayDir string) error {
 		buildFile.Write([]byte(generateSoongModuleTarget(blueprintCtx, module) + "\n\n"))
 		buildFile.Close()
 	})
+	var err error
 
-	if err := writeReadOnlyFile(bazelOverlayDir, "WORKSPACE", ""); err != nil {
+	// Write top level files: WORKSPACE and BUILD. These files are empty.
+	if err = writeReadOnlyFile(bazelQueryViewDir, "WORKSPACE", ""); err != nil {
 		return err
 	}
 
-	if err := writeReadOnlyFile(bazelOverlayDir, "BUILD", ""); err != nil {
-		return err
-	}
-
-	if err := writeReadOnlyFile(bazelOverlayDir, "providers.bzl", providersBzl); err != nil {
+	// Used to denote that the top level directory is a package.
+	if err = writeReadOnlyFile(bazelQueryViewDir, "BUILD", ""); err != nil {
 		return err
 	}
 
@@ -488,13 +473,22 @@ func createBazelOverlay(ctx *android.Context, bazelOverlayDir string) error {
 		return err
 	}
 
+	// Write .bzl Starlark files into the bazel_rules top level directory (provider and rule definitions)
+	bazelRulesDir := bazelQueryViewDir + "/build/bazel/queryview_rules"
+	if err = writeReadOnlyFile(bazelRulesDir, "BUILD", ""); err != nil {
+		return err
+	}
+	if err = writeReadOnlyFile(bazelRulesDir, "providers.bzl", providersBzl); err != nil {
+		return err
+	}
+
 	for bzlFileName, ruleShim := range ruleShims {
-		if err := writeReadOnlyFile(bazelOverlayDir, bzlFileName+".bzl", ruleShim.content); err != nil {
+		if err = writeReadOnlyFile(bazelRulesDir, bzlFileName+".bzl", ruleShim.content); err != nil {
 			return err
 		}
 	}
 
-	return writeReadOnlyFile(bazelOverlayDir, "soong_module.bzl", generateSoongModuleBzl(ruleShims))
+	return writeReadOnlyFile(bazelRulesDir, "soong_module.bzl", generateSoongModuleBzl(ruleShims))
 }
 
 // Generate the content of soong_module.bzl with the rule shim load statements
@@ -503,7 +497,7 @@ func generateSoongModuleBzl(bzlLoads map[string]RuleShim) string {
 	var loadStmts string
 	var moduleRuleMap string
 	for bzlFileName, ruleShim := range bzlLoads {
-		loadStmt := "load(\"//:"
+		loadStmt := "load(\"//build/bazel/queryview_rules:"
 		loadStmt += bzlFileName
 		loadStmt += ".bzl\""
 		for _, rule := range ruleShim.rules {
@@ -569,12 +563,11 @@ func generateSoongModuleTarget(
 		attributes)
 }
 
-func buildFileForModule(ctx *blueprint.Context, module blueprint.Module) (*os.File, error) {
+func buildFileForModule(
+	ctx *blueprint.Context, module blueprint.Module, bazelQueryViewDir string) (*os.File, error) {
 	// Create nested directories for the BUILD file
-	dirPath := filepath.Join(bazelOverlayDir, packagePath(ctx, module))
-	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
-		os.MkdirAll(dirPath, os.ModePerm)
-	}
+	dirPath := filepath.Join(bazelQueryViewDir, packagePath(ctx, module))
+	createDirectoryIfNonexistent(dirPath)
 	// Open the file for appending, and create it if it doesn't exist
 	f, err := os.OpenFile(
 		filepath.Join(dirPath, "BUILD.bazel"),
@@ -596,10 +589,17 @@ func buildFileForModule(ctx *blueprint.Context, module blueprint.Module) (*os.Fi
 	return f, nil
 }
 
-// The overlay directory should be read-only, sufficient for bazel query. The files
+func createDirectoryIfNonexistent(dir string) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		os.MkdirAll(dir, os.ModePerm)
+	}
+}
+
+// The QueryView directory should be read-only, sufficient for bazel query. The files
 // are not intended to be edited by end users.
 func writeReadOnlyFile(dir string, baseName string, content string) error {
-	pathToFile := filepath.Join(bazelOverlayDir, baseName)
+	createDirectoryIfNonexistent(dir)
+	pathToFile := filepath.Join(dir, baseName)
 	// 0444 is read-only
 	return ioutil.WriteFile(pathToFile, []byte(content), 0444)
 }

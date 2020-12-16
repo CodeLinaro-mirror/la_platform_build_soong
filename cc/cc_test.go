@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 
@@ -54,8 +53,8 @@ func TestMain(m *testing.M) {
 
 func testCcWithConfig(t *testing.T, config android.Config) *android.TestContext {
 	t.Helper()
-	ctx := CreateTestContext()
-	ctx.Register(config)
+	ctx := CreateTestContext(config)
+	ctx.Register()
 
 	_, errs := ctx.ParseFileList(".", []string{"Android.bp"})
 	android.FailIfErrored(t, errs)
@@ -85,8 +84,8 @@ func testCcNoVndk(t *testing.T, bp string) *android.TestContext {
 func testCcErrorWithConfig(t *testing.T, pattern string, config android.Config) {
 	t.Helper()
 
-	ctx := CreateTestContext()
-	ctx.Register(config)
+	ctx := CreateTestContext(config)
+	ctx.Register()
 
 	_, errs := ctx.ParseFileList(".", []string{"Android.bp"})
 	if len(errs) > 0 {
@@ -104,6 +103,7 @@ func testCcErrorWithConfig(t *testing.T, pattern string, config android.Config) 
 }
 
 func testCcError(t *testing.T, pattern string, bp string) {
+	t.Helper()
 	config := TestConfig(buildDir, android.Android, nil, bp, nil)
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
 	config.TestProductVariables.Platform_vndk_version = StringPtr("VER")
@@ -112,6 +112,7 @@ func testCcError(t *testing.T, pattern string, bp string) {
 }
 
 func testCcErrorProductVndk(t *testing.T, pattern string, bp string) {
+	t.Helper()
 	config := TestConfig(buildDir, android.Android, nil, bp, nil)
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
 	config.TestProductVariables.ProductVndkVersion = StringPtr("current")
@@ -325,6 +326,7 @@ func TestVndk(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -334,6 +336,7 @@ func TestVndk(t *testing.T) {
 		cc_library {
 			name: "libvndk_private",
 			vendor_available: false,
+			product_available: false,
 			vndk: {
 				enabled: true,
 			},
@@ -344,6 +347,7 @@ func TestVndk(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -355,6 +359,7 @@ func TestVndk(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp_private",
 			vendor_available: false,
+			product_available: false,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -385,14 +390,22 @@ func TestVndk(t *testing.T) {
 
 	config := TestConfig(buildDir, android.Android, nil, bp, nil)
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
+	config.TestProductVariables.ProductVndkVersion = StringPtr("current")
 	config.TestProductVariables.Platform_vndk_version = StringPtr("VER")
 
 	ctx := testCcWithConfig(t, config)
 
-	checkVndkModule(t, ctx, "libvndk", "vndk-VER", false, "", vendorVariant)
-	checkVndkModule(t, ctx, "libvndk_private", "vndk-VER", false, "", vendorVariant)
-	checkVndkModule(t, ctx, "libvndk_sp", "vndk-sp-VER", true, "", vendorVariant)
-	checkVndkModule(t, ctx, "libvndk_sp_private", "vndk-sp-VER", true, "", vendorVariant)
+	// subdir == "" because VNDK libs are not supposed to be installed separately.
+	// They are installed as part of VNDK APEX instead.
+	checkVndkModule(t, ctx, "libvndk", "", false, "", vendorVariant)
+	checkVndkModule(t, ctx, "libvndk_private", "", false, "", vendorVariant)
+	checkVndkModule(t, ctx, "libvndk_sp", "", true, "", vendorVariant)
+	checkVndkModule(t, ctx, "libvndk_sp_private", "", true, "", vendorVariant)
+
+	checkVndkModule(t, ctx, "libvndk", "", false, "", productVariant)
+	checkVndkModule(t, ctx, "libvndk_private", "", false, "", productVariant)
+	checkVndkModule(t, ctx, "libvndk_sp", "", true, "", productVariant)
+	checkVndkModule(t, ctx, "libvndk_sp_private", "", true, "", productVariant)
 
 	// Check VNDK snapshot output.
 
@@ -451,6 +464,7 @@ func TestVndkWithHostSupported(t *testing.T) {
 		cc_library {
 			name: "libvndk_host_supported",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -460,6 +474,7 @@ func TestVndkWithHostSupported(t *testing.T) {
 		cc_library {
 			name: "libvndk_host_supported_but_disabled_on_device",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -500,6 +515,7 @@ func TestVndkUsingCoreVariant(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -509,6 +525,7 @@ func TestVndkUsingCoreVariant(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -519,6 +536,7 @@ func TestVndkUsingCoreVariant(t *testing.T) {
 		cc_library {
 			name: "libvndk2",
 			vendor_available: false,
+			product_available: false,
 			vndk: {
 				enabled: true,
 			},
@@ -644,6 +662,7 @@ func TestVndkWhenVndkVersionIsNotSet(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -662,12 +681,28 @@ func TestVndkWhenVndkVersionIsNotSet(t *testing.T) {
 	})
 }
 
+func TestVndkModuleError(t *testing.T) {
+	// Check the error message for vendor_available and product_available properties.
+	testCcError(t, "product_available: may not have different value than `vendor_available`", `
+		cc_library {
+			name: "libvndk",
+			vendor_available: true,
+			product_available: false,
+			vndk: {
+				enabled: true,
+			},
+			nocrt: true,
+		}
+	`)
+}
+
 func TestVndkDepError(t *testing.T) {
 	// Check whether an error is emitted when a VNDK lib depends on a system lib.
 	testCcError(t, "dependency \".*\" of \".*\" missing variant", `
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -686,6 +721,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -705,6 +741,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -724,6 +761,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -744,6 +782,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -755,6 +794,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -767,6 +807,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -786,6 +827,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libvndkprivate",
 			vendor_available: false,
+			product_available: false,
 			vndk: {
 				enabled: true,
 			},
@@ -805,6 +847,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libvndksp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -825,6 +868,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libvndkspprivate",
 			vendor_available: false,
+			product_available: false,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -847,16 +891,18 @@ func TestDoubleLoadbleDep(t *testing.T) {
 		cc_library {
 			name: "libllndk",
 			shared_libs: ["libdoubleloadable"],
+			llndk_stubs: "libllndk.llndk",
 		}
 
 		llndk_library {
-			name: "libllndk",
+			name: "libllndk.llndk",
 			symbol_file: "",
 		}
 
 		cc_library {
 			name: "libdoubleloadable",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -868,16 +914,18 @@ func TestDoubleLoadbleDep(t *testing.T) {
 		cc_library {
 			name: "libllndk",
 			shared_libs: ["libvndksp"],
+			llndk_stubs: "libllndk.llndk",
 		}
 
 		llndk_library {
-			name: "libllndk",
+			name: "libllndk.llndk",
 			symbol_file: "",
 		}
 
 		cc_library {
 			name: "libvndksp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -904,6 +952,7 @@ func TestDoubleLoadbleDep(t *testing.T) {
 		cc_library {
 			name: "libdoubleloadable",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -914,6 +963,7 @@ func TestDoubleLoadbleDep(t *testing.T) {
 		cc_library {
 			name: "libnondoubleloadable",
 			vendor_available: false,
+			product_available: false,
 			vndk: {
 				enabled: true,
 			},
@@ -925,10 +975,11 @@ func TestDoubleLoadbleDep(t *testing.T) {
 		cc_library {
 			name: "libllndk",
 			shared_libs: ["libcoreonly"],
+			llndk_stubs: "libllndk.llndk",
 		}
 
 		llndk_library {
-			name: "libllndk",
+			name: "libllndk.llndk",
 			symbol_file: "",
 		}
 
@@ -951,6 +1002,7 @@ func TestVendorSnapshotCapture(t *testing.T) {
 	cc_library {
 		name: "libvndk",
 		vendor_available: true,
+		product_available: true,
 		vndk: {
 			enabled: true,
 		},
@@ -1084,6 +1136,7 @@ func TestVendorSnapshotUse(t *testing.T) {
 	cc_library {
 		name: "libvndk",
 		vendor_available: true,
+		product_available: true,
 		vndk: {
 			enabled: true,
 		},
@@ -1118,12 +1171,14 @@ func TestVendorSnapshotUse(t *testing.T) {
 		version: "BOARD",
 		target_arch: "arm64",
 		vendor_available: true,
+		product_available: true,
 		vndk: {
 			enabled: true,
 		},
 		arch: {
 			arm64: {
 				srcs: ["libvndk.so"],
+				export_include_dirs: ["include/libvndk"],
 			},
 		},
 	}
@@ -1150,6 +1205,7 @@ func TestVendorSnapshotUse(t *testing.T) {
 		shared_libs: ["libvndk"],
 		static_libs: ["libvendor", "libvendor_without_snapshot"],
 		compile_multilib: "64",
+		srcs: ["client.cpp"],
 	}
 
 	cc_binary {
@@ -1161,6 +1217,7 @@ func TestVendorSnapshotUse(t *testing.T) {
 		system_shared_libs: [],
 		static_libs: ["libvndk"],
 		compile_multilib: "64",
+		srcs: ["bin.cpp"],
 	}
 
 	vendor_snapshot_static {
@@ -1171,6 +1228,7 @@ func TestVendorSnapshotUse(t *testing.T) {
 		arch: {
 			arm64: {
 				src: "libvndk.a",
+				export_include_dirs: ["include/libvndk"],
 			},
 		},
 	}
@@ -1183,6 +1241,7 @@ func TestVendorSnapshotUse(t *testing.T) {
 		arch: {
 			arm64: {
 				src: "libvendor.so",
+				export_include_dirs: ["include/libvendor"],
 			},
 		},
 	}
@@ -1195,6 +1254,7 @@ func TestVendorSnapshotUse(t *testing.T) {
 		arch: {
 			arm64: {
 				src: "libvendor.a",
+				export_include_dirs: ["include/libvendor"],
 			},
 		},
 	}
@@ -1214,22 +1274,27 @@ func TestVendorSnapshotUse(t *testing.T) {
 	depsBp := GatherRequiredDepsForTest(android.Android)
 
 	mockFS := map[string][]byte{
-		"deps/Android.bp":      []byte(depsBp),
-		"framework/Android.bp": []byte(frameworkBp),
-		"vendor/Android.bp":    []byte(vendorProprietaryBp),
-		"vendor/libvndk.a":     nil,
-		"vendor/libvendor.a":   nil,
-		"vendor/libvendor.so":  nil,
-		"vendor/bin":           nil,
-		"vndk/Android.bp":      []byte(vndkBp),
-		"vndk/libvndk.so":      nil,
+		"deps/Android.bp":              []byte(depsBp),
+		"framework/Android.bp":         []byte(frameworkBp),
+		"vendor/Android.bp":            []byte(vendorProprietaryBp),
+		"vendor/bin":                   nil,
+		"vendor/bin.cpp":               nil,
+		"vendor/client.cpp":            nil,
+		"vendor/include/libvndk/a.h":   nil,
+		"vendor/include/libvendor/b.h": nil,
+		"vendor/libvndk.a":             nil,
+		"vendor/libvendor.a":           nil,
+		"vendor/libvendor.so":          nil,
+		"vndk/Android.bp":              []byte(vndkBp),
+		"vndk/include/libvndk/a.h":     nil,
+		"vndk/libvndk.so":              nil,
 	}
 
 	config := TestConfig(buildDir, android.Android, nil, "", mockFS)
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("BOARD")
 	config.TestProductVariables.Platform_vndk_version = StringPtr("VER")
-	ctx := CreateTestContext()
-	ctx.Register(config)
+	ctx := CreateTestContext(config)
+	ctx.Register()
 
 	_, errs := ctx.ParseFileList(".", []string{"deps/Android.bp", "framework/Android.bp", "vendor/Android.bp", "vndk/Android.bp"})
 	android.FailIfErrored(t, errs)
@@ -1241,27 +1306,41 @@ func TestVendorSnapshotUse(t *testing.T) {
 	binaryVariant := "android_vendor.BOARD_arm64_armv8-a"
 
 	// libclient uses libvndk.vndk.BOARD.arm64, libvendor.vendor_static.BOARD.arm64, libvendor_without_snapshot
-	libclientLdRule := ctx.ModuleForTests("libclient", sharedVariant).Rule("ld")
-	libclientFlags := libclientLdRule.Args["libFlags"]
+	libclientCcFlags := ctx.ModuleForTests("libclient", sharedVariant).Rule("cc").Args["cFlags"]
+	for _, includeFlags := range []string{
+		"-Ivndk/include/libvndk",     // libvndk
+		"-Ivendor/include/libvendor", // libvendor
+	} {
+		if !strings.Contains(libclientCcFlags, includeFlags) {
+			t.Errorf("flags for libclient must contain %#v, but was %#v.",
+				includeFlags, libclientCcFlags)
+		}
+	}
 
+	libclientLdFlags := ctx.ModuleForTests("libclient", sharedVariant).Rule("ld").Args["libFlags"]
 	for _, input := range [][]string{
 		[]string{sharedVariant, "libvndk.vndk.BOARD.arm64"},
 		[]string{staticVariant, "libvendor.vendor_static.BOARD.arm64"},
 		[]string{staticVariant, "libvendor_without_snapshot"},
 	} {
 		outputPaths := getOutputPaths(ctx, input[0] /* variant */, []string{input[1]} /* module name */)
-		if !strings.Contains(libclientFlags, outputPaths[0].String()) {
-			t.Errorf("libflags for libclient must contain %#v, but was %#v", outputPaths[0], libclientFlags)
+		if !strings.Contains(libclientLdFlags, outputPaths[0].String()) {
+			t.Errorf("libflags for libclient must contain %#v, but was %#v", outputPaths[0], libclientLdFlags)
 		}
 	}
 
 	// bin_without_snapshot uses libvndk.vendor_static.BOARD.arm64
-	binWithoutSnapshotLdRule := ctx.ModuleForTests("bin_without_snapshot", binaryVariant).Rule("ld")
-	binWithoutSnapshotFlags := binWithoutSnapshotLdRule.Args["libFlags"]
+	binWithoutSnapshotCcFlags := ctx.ModuleForTests("bin_without_snapshot", binaryVariant).Rule("cc").Args["cFlags"]
+	if !strings.Contains(binWithoutSnapshotCcFlags, "-Ivendor/include/libvndk") {
+		t.Errorf("flags for bin_without_snapshot must contain %#v, but was %#v.",
+			"-Ivendor/include/libvndk", binWithoutSnapshotCcFlags)
+	}
+
+	binWithoutSnapshotLdFlags := ctx.ModuleForTests("bin_without_snapshot", binaryVariant).Rule("ld").Args["libFlags"]
 	libVndkStaticOutputPaths := getOutputPaths(ctx, staticVariant, []string{"libvndk.vendor_static.BOARD.arm64"})
-	if !strings.Contains(binWithoutSnapshotFlags, libVndkStaticOutputPaths[0].String()) {
+	if !strings.Contains(binWithoutSnapshotLdFlags, libVndkStaticOutputPaths[0].String()) {
 		t.Errorf("libflags for bin_without_snapshot must contain %#v, but was %#v",
-			libVndkStaticOutputPaths[0], binWithoutSnapshotFlags)
+			libVndkStaticOutputPaths[0], binWithoutSnapshotLdFlags)
 	}
 
 	// libvendor.so is installed by libvendor.vendor_shared.BOARD.arm64
@@ -1372,8 +1451,8 @@ func TestVendorSnapshotExclude(t *testing.T) {
 	config := TestConfig(buildDir, android.Android, nil, "", mockFS)
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
 	config.TestProductVariables.Platform_vndk_version = StringPtr("VER")
-	ctx := CreateTestContext()
-	ctx.Register(config)
+	ctx := CreateTestContext(config)
+	ctx.Register()
 
 	_, errs := ctx.ParseFileList(".", []string{"deps/Android.bp", "framework/Android.bp", "device/Android.bp"})
 	android.FailIfErrored(t, errs)
@@ -1462,8 +1541,8 @@ func TestVendorSnapshotExcludeInVendorProprietaryPathErrors(t *testing.T) {
 	config := TestConfig(buildDir, android.Android, nil, "", mockFS)
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
 	config.TestProductVariables.Platform_vndk_version = StringPtr("VER")
-	ctx := CreateTestContext()
-	ctx.Register(config)
+	ctx := CreateTestContext(config)
+	ctx.Register()
 
 	_, errs := ctx.ParseFileList(".", []string{"deps/Android.bp", "device/Android.bp"})
 	android.FailIfErrored(t, errs)
@@ -1503,8 +1582,8 @@ func TestVendorSnapshotExcludeWithVendorAvailable(t *testing.T) {
 	config := TestConfig(buildDir, android.Android, nil, "", mockFS)
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
 	config.TestProductVariables.Platform_vndk_version = StringPtr("VER")
-	ctx := CreateTestContext()
-	ctx.Register(config)
+	ctx := CreateTestContext(config)
+	ctx.Register()
 
 	_, errs := ctx.ParseFileList(".", []string{"deps/Android.bp", "framework/Android.bp"})
 	android.FailIfErrored(t, errs)
@@ -1524,16 +1603,18 @@ func TestDoubleLoadableDepError(t *testing.T) {
 		cc_library {
 			name: "libllndk",
 			shared_libs: ["libnondoubleloadable"],
+			llndk_stubs: "libllndk.llndk",
 		}
 
 		llndk_library {
-			name: "libllndk",
+			name: "libllndk.llndk",
 			symbol_file: "",
 		}
 
 		cc_library {
 			name: "libnondoubleloadable",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -1546,10 +1627,11 @@ func TestDoubleLoadableDepError(t *testing.T) {
 			name: "libllndk",
 			no_libcrt: true,
 			shared_libs: ["libnondoubleloadable"],
+			llndk_stubs: "libllndk.llndk",
 		}
 
 		llndk_library {
-			name: "libllndk",
+			name: "libllndk.llndk",
 			symbol_file: "",
 		}
 
@@ -1586,6 +1668,7 @@ func TestDoubleLoadableDepError(t *testing.T) {
 		cc_library {
 			name: "libnondoubleloadable",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -1597,6 +1680,7 @@ func TestDoubleLoadableDepError(t *testing.T) {
 		cc_library {
 			name: "libdoubleloadable",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -1607,6 +1691,7 @@ func TestDoubleLoadableDepError(t *testing.T) {
 		cc_library {
 			name: "libnondoubleloadable",
 			vendor_available: false,
+			product_available: false,
 			vndk: {
 				enabled: true,
 			},
@@ -1618,10 +1703,11 @@ func TestDoubleLoadableDepError(t *testing.T) {
 		cc_library {
 			name: "libllndk",
 			shared_libs: ["libcoreonly"],
+			llndk_stubs: "libllndk.llndk",
 		}
 
 		llndk_library {
-			name: "libllndk",
+			name: "libllndk.llndk",
 			symbol_file: "",
 		}
 
@@ -1638,12 +1724,43 @@ func TestDoubleLoadableDepError(t *testing.T) {
 	`)
 }
 
+func TestCheckVndkMembershipBeforeDoubleLoadable(t *testing.T) {
+	testCcError(t, "module \"libvndksp\" variant .*: .*: VNDK-SP must only depend on VNDK-SP", `
+		cc_library {
+			name: "libvndksp",
+			shared_libs: ["libanothervndksp"],
+			vendor_available: true,
+			product_available: true,
+			vndk: {
+				enabled: true,
+				support_system_process: true,
+			}
+		}
+
+		cc_library {
+			name: "libllndk",
+			shared_libs: ["libanothervndksp"],
+		}
+
+		llndk_library {
+			name: "libllndk",
+			symbol_file: "",
+		}
+
+		cc_library {
+			name: "libanothervndksp",
+			vendor_available: true,
+		}
+	`)
+}
+
 func TestVndkExt(t *testing.T) {
 	// This test checks the VNDK-Ext properties.
 	bp := `
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -1652,11 +1769,15 @@ func TestVndkExt(t *testing.T) {
 		cc_library {
 			name: "libvndk2",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
 			target: {
 				vendor: {
+					suffix: "-suffix",
+				},
+				product: {
 					suffix: "-suffix",
 				},
 			},
@@ -1726,6 +1847,7 @@ func TestVndkExtWithoutBoardVndkVersion(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -1756,6 +1878,7 @@ func TestVndkExtWithoutProductVndkVersion(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -1786,6 +1909,7 @@ func TestVndkExtError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -1806,6 +1930,7 @@ func TestVndkExtError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -1826,6 +1951,7 @@ func TestVndkExtError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -1846,6 +1972,7 @@ func TestVndkExtError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -1856,6 +1983,7 @@ func TestVndkExtError(t *testing.T) {
 			name: "libvndk_ext_product",
 			product_specific: true,
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				extends: "libvndk",
@@ -1871,6 +1999,7 @@ func TestVndkExtInconsistentSupportSystemProcessError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -1893,6 +2022,7 @@ func TestVndkExtInconsistentSupportSystemProcessError(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -1919,6 +2049,7 @@ func TestVndkExtVendorAvailableFalseError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: false,
+			product_available: false,
 			vndk: {
 				enabled: true,
 			},
@@ -1940,6 +2071,7 @@ func TestVndkExtVendorAvailableFalseError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: false,
+			product_available: false,
 			vndk: {
 				enabled: true,
 			},
@@ -1964,6 +2096,7 @@ func TestVendorModuleUseVndkExt(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -1983,6 +2116,7 @@ func TestVendorModuleUseVndkExt(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -2016,6 +2150,7 @@ func TestVndkExtUseVendorLib(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2045,6 +2180,7 @@ func TestVndkExtUseVendorLib(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -2077,6 +2213,7 @@ func TestProductVndkExtDependency(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2097,6 +2234,7 @@ func TestProductVndkExtDependency(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -2144,6 +2282,7 @@ func TestVndkSpExtUseVndkError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2153,6 +2292,7 @@ func TestVndkSpExtUseVndkError(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -2179,6 +2319,7 @@ func TestVndkSpExtUseVndkError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2198,6 +2339,7 @@ func TestVndkSpExtUseVndkError(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -2226,6 +2368,7 @@ func TestVndkUseVndkExtError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2245,6 +2388,7 @@ func TestVndkUseVndkExtError(t *testing.T) {
 		cc_library {
 			name: "libvndk2",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2257,6 +2401,7 @@ func TestVndkUseVndkExtError(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2276,6 +2421,7 @@ func TestVndkUseVndkExtError(t *testing.T) {
 		cc_library {
 			name: "libvndk2",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2292,6 +2438,7 @@ func TestVndkUseVndkExtError(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -2313,6 +2460,7 @@ func TestVndkUseVndkExtError(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp_2",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -2326,6 +2474,7 @@ func TestVndkUseVndkExtError(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2345,6 +2494,7 @@ func TestVndkUseVndkExtError(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp2",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2362,14 +2512,16 @@ func TestEnforceProductVndkVersion(t *testing.T) {
 	bp := `
 		cc_library {
 			name: "libllndk",
+			llndk_stubs: "libllndk.llndk",
 		}
 		llndk_library {
-			name: "libllndk",
+			name: "libllndk.llndk",
 			symbol_file: "",
 		}
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2378,6 +2530,7 @@ func TestEnforceProductVndkVersion(t *testing.T) {
 		cc_library {
 			name: "libvndk_sp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -2387,6 +2540,11 @@ func TestEnforceProductVndkVersion(t *testing.T) {
 		cc_library {
 			name: "libva",
 			vendor_available: true,
+			nocrt: true,
+		}
+		cc_library {
+			name: "libpa",
+			product_available: true,
 			nocrt: true,
 		}
 		cc_library {
@@ -2402,7 +2560,7 @@ func TestEnforceProductVndkVersion(t *testing.T) {
 				"libllndk",
 				"libvndk",
 				"libvndk_sp",
-				"libva",
+				"libpa",
 				"libproduct_va",
 			],
 			nocrt: true,
@@ -2428,8 +2586,8 @@ func TestEnforceProductVndkVersion(t *testing.T) {
 
 	ctx := testCcWithConfig(t, config)
 
-	checkVndkModule(t, ctx, "libvndk", "vndk-VER", false, "", productVariant)
-	checkVndkModule(t, ctx, "libvndk_sp", "vndk-sp-VER", true, "", productVariant)
+	checkVndkModule(t, ctx, "libvndk", "", false, "", productVariant)
+	checkVndkModule(t, ctx, "libvndk_sp", "", true, "", productVariant)
 }
 
 func TestEnforceProductVndkVersionErrors(t *testing.T) {
@@ -2474,6 +2632,7 @@ func TestEnforceProductVndkVersionErrors(t *testing.T) {
 		cc_library {
 			name: "libvndk_private",
 			vendor_available: false,
+			product_available: false,
 			vndk: {
 				enabled: true,
 			},
@@ -2517,6 +2676,7 @@ func TestMakeLinkType(t *testing.T) {
 		cc_library {
 			name: "libvndk",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2524,6 +2684,7 @@ func TestMakeLinkType(t *testing.T) {
 		cc_library {
 			name: "libvndksp",
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 				support_system_process: true,
@@ -2532,6 +2693,7 @@ func TestMakeLinkType(t *testing.T) {
 		cc_library {
 			name: "libvndkprivate",
 			vendor_available: false,
+			product_available: false,
 			vndk: {
 				enabled: true,
 			},
@@ -2554,6 +2716,7 @@ func TestMakeLinkType(t *testing.T) {
 			target_arch: "arm",
 			binder32bit: true,
 			vendor_available: true,
+			product_available: true,
 			vndk: {
 				enabled: true,
 			},
@@ -2565,16 +2728,18 @@ func TestMakeLinkType(t *testing.T) {
 		}
 		cc_library {
 			name: "libllndk",
+			llndk_stubs: "libllndk.llndk",
 		}
 		llndk_library {
-			name: "libllndk",
+			name: "libllndk.llndk",
 			symbol_file: "",
 		}
 		cc_library {
 			name: "libllndkprivate",
+			llndk_stubs: "libllndkprivate.llndk",
 		}
 		llndk_library {
-			name: "libllndkprivate",
+			name: "libllndkprivate.llndk",
 			vendor_available: false,
 			symbol_file: "",
 		}`
@@ -2890,59 +3055,6 @@ func parseModuleDeps(text string) (modulesInOrder []android.Path, allDeps map[an
 	return modulesInOrder, allDeps
 }
 
-func TestLinkReordering(t *testing.T) {
-	for _, testCase := range staticLinkDepOrderTestCases {
-		errs := []string{}
-
-		// parse testcase
-		_, givenTransitiveDeps := parseModuleDeps(testCase.inStatic)
-		expectedModuleNames, expectedTransitiveDeps := parseModuleDeps(testCase.outOrdered)
-		if testCase.allOrdered == "" {
-			// allow the test case to skip specifying allOrdered
-			testCase.allOrdered = testCase.outOrdered
-		}
-		_, expectedAllDeps := parseModuleDeps(testCase.allOrdered)
-		_, givenAllSharedDeps := parseModuleDeps(testCase.inShared)
-
-		// For each module whose post-reordered dependencies were specified, validate that
-		// reordering the inputs produces the expected outputs.
-		for _, moduleName := range expectedModuleNames {
-			moduleDeps := givenTransitiveDeps[moduleName]
-			givenSharedDeps := givenAllSharedDeps[moduleName]
-			orderedAllDeps, orderedDeclaredDeps := orderDeps(moduleDeps, givenSharedDeps, givenTransitiveDeps)
-
-			correctAllOrdered := expectedAllDeps[moduleName]
-			if !reflect.DeepEqual(orderedAllDeps, correctAllOrdered) {
-				errs = append(errs, fmt.Sprintf("orderDeps returned incorrect orderedAllDeps."+
-					"\nin static:%q"+
-					"\nin shared:%q"+
-					"\nmodule:   %v"+
-					"\nexpected: %s"+
-					"\nactual:   %s",
-					testCase.inStatic, testCase.inShared, moduleName, correctAllOrdered, orderedAllDeps))
-			}
-
-			correctOutputDeps := expectedTransitiveDeps[moduleName]
-			if !reflect.DeepEqual(correctOutputDeps, orderedDeclaredDeps) {
-				errs = append(errs, fmt.Sprintf("orderDeps returned incorrect orderedDeclaredDeps."+
-					"\nin static:%q"+
-					"\nin shared:%q"+
-					"\nmodule:   %v"+
-					"\nexpected: %s"+
-					"\nactual:   %s",
-					testCase.inStatic, testCase.inShared, moduleName, correctOutputDeps, orderedDeclaredDeps))
-			}
-		}
-
-		if len(errs) > 0 {
-			sort.Strings(errs)
-			for _, err := range errs {
-				t.Error(err)
-			}
-		}
-	}
-}
-
 func getOutputPaths(ctx *android.TestContext, variant string, moduleNames []string) (paths android.Paths) {
 	for _, moduleName := range moduleNames {
 		module := ctx.ModuleForTests(moduleName, variant).Module().(*Module)
@@ -2977,8 +3089,8 @@ func TestStaticLibDepReordering(t *testing.T) {
 
 	variant := "android_arm64_armv8-a_static"
 	moduleA := ctx.ModuleForTests("a", variant).Module().(*Module)
-	actual := moduleA.depsInLinkOrder
-	expected := getOutputPaths(ctx, variant, []string{"c", "b", "d"})
+	actual := ctx.ModuleProvider(moduleA, StaticLibraryInfoProvider).(StaticLibraryInfo).TransitiveStaticLibrariesForOrdering.ToList()
+	expected := getOutputPaths(ctx, variant, []string{"a", "c", "b", "d"})
 
 	if !reflect.DeepEqual(actual, expected) {
 		t.Errorf("staticDeps orderings were not propagated correctly"+
@@ -3011,8 +3123,8 @@ func TestStaticLibDepReorderingWithShared(t *testing.T) {
 
 	variant := "android_arm64_armv8-a_static"
 	moduleA := ctx.ModuleForTests("a", variant).Module().(*Module)
-	actual := moduleA.depsInLinkOrder
-	expected := getOutputPaths(ctx, variant, []string{"c", "b"})
+	actual := ctx.ModuleProvider(moduleA, StaticLibraryInfoProvider).(StaticLibraryInfo).TransitiveStaticLibrariesForOrdering.ToList()
+	expected := getOutputPaths(ctx, variant, []string{"a", "c", "b"})
 
 	if !reflect.DeepEqual(actual, expected) {
 		t.Errorf("staticDeps orderings did not account for shared libs"+
@@ -3025,6 +3137,7 @@ func TestStaticLibDepReorderingWithShared(t *testing.T) {
 }
 
 func checkEquals(t *testing.T, message string, expected, actual interface{}) {
+	t.Helper()
 	if !reflect.DeepEqual(actual, expected) {
 		t.Errorf(message+
 			"\nactual:   %v"+
@@ -3040,19 +3153,20 @@ func TestLlndkLibrary(t *testing.T) {
 	cc_library {
 		name: "libllndk",
 		stubs: { versions: ["1", "2"] },
+		llndk_stubs: "libllndk.llndk",
 	}
 	llndk_library {
-		name: "libllndk",
+		name: "libllndk.llndk",
 	}
 	`)
 	actual := ctx.ModuleVariantsForTests("libllndk.llndk")
 	expected := []string{
-		"android_vendor.VER_arm64_armv8-a_shared",
 		"android_vendor.VER_arm64_armv8-a_shared_1",
 		"android_vendor.VER_arm64_armv8-a_shared_2",
-		"android_vendor.VER_arm_armv7-a-neon_shared",
+		"android_vendor.VER_arm64_armv8-a_shared",
 		"android_vendor.VER_arm_armv7-a-neon_shared_1",
 		"android_vendor.VER_arm_armv7-a-neon_shared_2",
+		"android_vendor.VER_arm_armv7-a-neon_shared",
 	}
 	checkEquals(t, "variants for llndk stubs", expected, actual)
 
@@ -3070,9 +3184,14 @@ func TestLlndkHeaders(t *testing.T) {
 		export_include_dirs: ["my_include"],
 	}
 	llndk_library {
-		name: "libllndk",
+		name: "libllndk.llndk",
 		export_llndk_headers: ["libllndk_headers"],
 	}
+	cc_library {
+		name: "libllndk",
+		llndk_stubs: "libllndk.llndk",
+	}
+
 	cc_library {
 		name: "libvendor",
 		shared_libs: ["libllndk"],
@@ -3581,7 +3700,7 @@ func TestStaticDepsOrderWithStubs(t *testing.T) {
 		cc_binary {
 			name: "mybin",
 			srcs: ["foo.c"],
-			static_libs: ["libfooB"],
+			static_libs: ["libfooC", "libfooB"],
 			static_executable: true,
 			stl: "none",
 		}
@@ -3602,8 +3721,8 @@ func TestStaticDepsOrderWithStubs(t *testing.T) {
 			},
 		}`)
 
-	mybin := ctx.ModuleForTests("mybin", "android_arm64_armv8-a").Module().(*Module)
-	actual := mybin.depsInLinkOrder
+	mybin := ctx.ModuleForTests("mybin", "android_arm64_armv8-a").Rule("ld")
+	actual := mybin.Implicits[:2]
 	expected := getOutputPaths(ctx, "android_arm64_armv8-a_static", []string{"libfooB", "libfooC"})
 
 	if !reflect.DeepEqual(actual, expected) {
@@ -3763,11 +3882,11 @@ func TestProductVariableDefaults(t *testing.T) {
 	config := TestConfig(buildDir, android.Android, nil, bp, nil)
 	config.TestProductVariables.Debuggable = BoolPtr(true)
 
-	ctx := CreateTestContext()
+	ctx := CreateTestContext(config)
 	ctx.PreDepsMutators(func(ctx android.RegisterMutatorsContext) {
 		ctx.BottomUp("variable", android.VariableMutator).Parallel()
 	})
-	ctx.Register(config)
+	ctx.Register()
 
 	_, errs := ctx.ParseFileList(".", []string{"Android.bp"})
 	android.FailIfErrored(t, errs)
@@ -3778,4 +3897,47 @@ func TestProductVariableDefaults(t *testing.T) {
 	if !android.InList("-DBAR", libfoo.flags.Local.CppFlags) {
 		t.Errorf("expected -DBAR in cppflags, got %q", libfoo.flags.Local.CppFlags)
 	}
+}
+
+func TestEmptyWholeStaticLibsAllowMissingDependencies(t *testing.T) {
+	t.Parallel()
+	bp := `
+		cc_library_static {
+			name: "libfoo",
+			srcs: ["foo.c"],
+			whole_static_libs: ["libbar"],
+		}
+
+		cc_library_static {
+			name: "libbar",
+			whole_static_libs: ["libmissing"],
+		}
+	`
+
+	config := TestConfig(buildDir, android.Android, nil, bp, nil)
+	config.TestProductVariables.Allow_missing_dependencies = BoolPtr(true)
+
+	ctx := CreateTestContext(config)
+	ctx.SetAllowMissingDependencies(true)
+	ctx.Register()
+
+	_, errs := ctx.ParseFileList(".", []string{"Android.bp"})
+	android.FailIfErrored(t, errs)
+	_, errs = ctx.PrepareBuildActions(config)
+	android.FailIfErrored(t, errs)
+
+	libbar := ctx.ModuleForTests("libbar", "android_arm64_armv8-a_static").Output("libbar.a")
+	if g, w := libbar.Rule, android.ErrorRule; g != w {
+		t.Fatalf("Expected libbar rule to be %q, got %q", w, g)
+	}
+
+	if g, w := libbar.Args["error"], "missing dependencies: libmissing"; !strings.Contains(g, w) {
+		t.Errorf("Expected libbar error to contain %q, was %q", w, g)
+	}
+
+	libfoo := ctx.ModuleForTests("libfoo", "android_arm64_armv8-a_static").Output("libfoo.a")
+	if g, w := libfoo.Inputs.Strings(), libbar.Output.String(); !android.InList(w, g) {
+		t.Errorf("Expected libfoo.a to depend on %q, got %q", w, g)
+	}
+
 }
