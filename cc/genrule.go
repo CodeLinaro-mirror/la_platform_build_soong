@@ -75,7 +75,15 @@ func (g *GenruleExtraProperties) VendorRamdiskVariantNeeded(ctx android.BaseModu
 }
 
 func (g *GenruleExtraProperties) RecoveryVariantNeeded(ctx android.BaseModuleContext) bool {
-	return Bool(g.Recovery_available)
+	// If the build is using a snapshot, the recovery variant under AOSP directories
+	// is not needed.
+	recoverySnapshotVersion := ctx.DeviceConfig().RecoverySnapshotVersion()
+	if recoverySnapshotVersion != "current" && recoverySnapshotVersion != "" &&
+		!isRecoveryProprietaryModule(ctx) {
+		return false
+	} else {
+		return Bool(g.Recovery_available)
+	}
 }
 
 func (g *GenruleExtraProperties) ExtraImageVariations(ctx android.BaseModuleContext) []string {
@@ -101,8 +109,7 @@ func (g *GenruleExtraProperties) ExtraImageVariations(ctx android.BaseModuleCont
 		return variants
 	}
 
-	// TODO(b/150902910): vendor_available will not create product variant. Remove Bool(g.Vendor_available)
-	if Bool(g.Vendor_available) || Bool(g.Product_available) || ctx.ProductSpecific() {
+	if Bool(g.Product_available) || ctx.ProductSpecific() {
 		variants = append(variants, ProductVariationPrefix+ctx.DeviceConfig().PlatformVndkVersion())
 		if vndkVersion := ctx.DeviceConfig().ProductVndkVersion(); vndkVersion != "current" {
 			variants = append(variants, ProductVariationPrefix+vndkVersion)

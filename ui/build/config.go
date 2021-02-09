@@ -46,7 +46,8 @@ type configImpl struct {
 	verbose        bool
 	checkbuild     bool
 	dist           bool
-	skipMake       bool
+	skipConfig     bool
+	skipKati       bool
 	skipSoongTests bool
 
 	// From the product config
@@ -55,6 +56,7 @@ type configImpl struct {
 	katiSuffix      string
 	targetDevice    string
 	targetDeviceDir string
+	fullBuild       bool
 
 	// Autodetected
 	totalRAM uint64
@@ -64,6 +66,12 @@ type configImpl struct {
 	brokenNinjaEnvVars []string
 
 	pathReplaced bool
+
+	useBazel bool
+
+	// During Bazel execution, Bazel cannot write outside OUT_DIR.
+	// So if DIST_DIR is set to an external dir (outside of OUT_DIR), we need to rig it temporarily and then migrate files at the end of the build.
+	riggedDistDirForBazel string
 }
 
 const srcDirFileCheck = "build/soong/root.bp"
@@ -220,7 +228,7 @@ func NewConfig(ctx Context, args ...string) Config {
 		ctx.Fatalln("Directory names containing spaces are not supported")
 	}
 
-	if distDir := ret.DistDir(); strings.ContainsRune(distDir, ' ') {
+	if distDir := ret.RealDistDir(); strings.ContainsRune(distDir, ' ') {
 		ctx.Println("The absolute path of your dist directory ($DIST_DIR) contains a space character:")
 		ctx.Println()
 		ctx.Printf("%q\n", distDir)
@@ -274,14 +282,24 @@ func NewConfig(ctx Context, args ...string) Config {
 		}
 	}
 
-	bpd := shared.BazelMetricsDir(ret.OutDir())
+	bpd := ret.BazelMetricsDir()
 	if err := os.RemoveAll(bpd); err != nil {
 		ctx.Fatalf("Unable to remove bazel profile directory %q: %v", bpd, err)
 	}
+
+	ret.useBazel = ret.environ.IsEnvTrue("USE_BAZEL")
+
 	if ret.UseBazel() {
 		if err := os.MkdirAll(bpd, 0777); err != nil {
 			ctx.Fatalf("Failed to create bazel profile directory %q: %v", bpd, err)
 		}
+	}
+
+	if ret.UseBazel() {
+		ret.riggedDistDirForBazel = filepath.Join(ret.OutDir(), "dist")
+	} else {
+		// Not rigged
+		ret.riggedDistDirForBazel = ret.distDir
 	}
 
 	c := Config{ret}
@@ -536,7 +554,10 @@ func (c *configImpl) parseArgs(ctx Context, args []string) {
 		} else if arg == "showcommands" {
 			c.verbose = true
 		} else if arg == "--skip-make" {
-			c.skipMake = true
+			c.skipConfig = true
+			c.skipKati = true
+		} else if arg == "--skip-kati" {
+			c.skipKati = true
 		} else if arg == "--skip-soong-tests" {
 			c.skipSoongTests = true
 		} else if len(arg) > 0 && arg[0] == '-' {
@@ -597,19 +618,19 @@ func (c *configImpl) configureLocale(ctx Context) {
 
 	// For LANG and LC_*, only preserve the evaluated version of
 	// LC_MESSAGES
-	user_lang := ""
+	userLang := ""
 	if lc_all, ok := c.environ.Get("LC_ALL"); ok {
-		user_lang = lc_all
+		userLang = lc_all
 	} else if lc_messages, ok := c.environ.Get("LC_MESSAGES"); ok {
-		user_lang = lc_messages
+		userLang = lc_messages
 	} else if lang, ok := c.environ.Get("LANG"); ok {
-		user_lang = lang
+		userLang = lang
 	}
 
 	c.environ.UnsetWithPrefix("LC_")
 
-	if user_lang != "" {
-		c.environ.Set("LC_MESSAGES", user_lang)
+	if userLang != "" {
+		c.environ.Set("LC_MESSAGES", userLang)
 	}
 
 	// The for LANG, use C.UTF-8 if it exists (Debian currently, proposed
@@ -693,14 +714,26 @@ func (c *configImpl) OutDir() string {
 }
 
 func (c *configImpl) DistDir() string {
+	if c.UseBazel() {
+		return c.riggedDistDirForBazel
+	} else {
+		return c.distDir
+	}
+}
+
+func (c *configImpl) RealDistDir() string {
 	return c.distDir
 }
 
 func (c *configImpl) NinjaArgs() []string {
-	if c.skipMake {
+	if c.skipKati {
 		return c.arguments
 	}
 	return c.ninjaArgs
+}
+
+func (c *configImpl) BazelOutDir() string {
+	return filepath.Join(c.OutDir(), "bazel")
 }
 
 func (c *configImpl) SoongOutDir() string {
@@ -736,8 +769,12 @@ func (c *configImpl) IsVerbose() bool {
 	return c.verbose
 }
 
-func (c *configImpl) SkipMake() bool {
-	return c.skipMake
+func (c *configImpl) SkipKati() bool {
+	return c.skipKati
+}
+
+func (c *configImpl) SkipConfig() bool {
+	return c.skipConfig
 }
 
 func (c *configImpl) TargetProduct() string {
@@ -753,6 +790,14 @@ func (c *configImpl) TargetDevice() string {
 
 func (c *configImpl) SetTargetDevice(device string) {
 	c.targetDevice = device
+}
+
+func (c *configImpl) FullBuild() bool {
+	return c.fullBuild
+}
+
+func (c *configImpl) SetFullBuild(fullBuild bool) {
+	c.fullBuild = fullBuild
 }
 
 func (c *configImpl) TargetBuildVariant() string {
@@ -851,13 +896,7 @@ func (c *configImpl) UseRBE() bool {
 }
 
 func (c *configImpl) UseBazel() bool {
-	if v, ok := c.environ.Get("USE_BAZEL"); ok {
-		v = strings.TrimSpace(v)
-		if v != "" && v != "false" {
-			return true
-		}
-	}
-	return false
+	return c.useBazel
 }
 
 func (c *configImpl) StartRBE() bool {
@@ -874,14 +913,14 @@ func (c *configImpl) StartRBE() bool {
 	return true
 }
 
-func (c *configImpl) logDir() string {
+func (c *configImpl) rbeLogDir() string {
 	for _, f := range []string{"RBE_log_dir", "FLAG_log_dir"} {
 		if v, ok := c.environ.Get(f); ok {
 			return v
 		}
 	}
 	if c.Dist() {
-		return filepath.Join(c.DistDir(), "logs")
+		return c.LogsDir()
 	}
 	return c.OutDir()
 }
@@ -892,7 +931,7 @@ func (c *configImpl) rbeStatsOutputDir() string {
 			return v
 		}
 	}
-	return c.logDir()
+	return c.rbeLogDir()
 }
 
 func (c *configImpl) rbeLogPath() string {
@@ -901,7 +940,7 @@ func (c *configImpl) rbeLogPath() string {
 			return v
 		}
 	}
-	return fmt.Sprintf("text://%v/reproxy_log.txt", c.logDir())
+	return fmt.Sprintf("text://%v/reproxy_log.txt", c.rbeLogDir())
 }
 
 func (c *configImpl) rbeExecRoot() string {
@@ -1108,4 +1147,22 @@ func (c *configImpl) MetricsUploaderApp() string {
 		return p
 	}
 	return ""
+}
+
+// LogsDir returns the logs directory where build log and metrics
+// files are located. By default, the logs directory is the out
+// directory. If the argument dist is specified, the logs directory
+// is <dist_dir>/logs.
+func (c *configImpl) LogsDir() string {
+	if c.Dist() {
+		// Always write logs to the real dist dir, even if Bazel is using a rigged dist dir for other files
+		return filepath.Join(c.RealDistDir(), "logs")
+	}
+	return c.OutDir()
+}
+
+// BazelMetricsDir returns the <logs dir>/bazel_metrics directory
+// where the bazel profiles are located.
+func (c *configImpl) BazelMetricsDir() string {
+	return filepath.Join(c.LogsDir(), "bazel_metrics")
 }

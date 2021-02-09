@@ -137,13 +137,13 @@ func transformSrctoCrate(ctx ModuleContext, main android.Path, deps PathDeps, fl
 	var implicitOutputs android.WritablePaths
 
 	output.outputFile = outputFile
-	crate_name := ctx.RustModule().CrateName()
+	crateName := ctx.RustModule().CrateName()
 	targetTriple := ctx.toolchain().RustTriple()
 
 	// libstd requires a specific environment variable to be set. This is
 	// not officially documented and may be removed in the future. See
 	// https://github.com/rust-lang/rust/blob/master/library/std/src/env.rs#L866.
-	if crate_name == "std" {
+	if crateName == "std" {
 		envVars = append(envVars, "STD_ENV_ARCH="+config.StdEnvArch[ctx.RustModule().Arch().ArchType])
 	}
 
@@ -153,8 +153,8 @@ func transformSrctoCrate(ctx ModuleContext, main android.Path, deps PathDeps, fl
 	rustcFlags = append(rustcFlags, flags.GlobalRustFlags...)
 	rustcFlags = append(rustcFlags, flags.RustFlags...)
 	rustcFlags = append(rustcFlags, "--crate-type="+crate_type)
-	if crate_name != "" {
-		rustcFlags = append(rustcFlags, "--crate-name="+crate_name)
+	if crateName != "" {
+		rustcFlags = append(rustcFlags, "--crate-name="+crateName)
 	}
 	if targetTriple != "" {
 		rustcFlags = append(rustcFlags, "--target="+targetTriple)
@@ -189,6 +189,7 @@ func transformSrctoCrate(ctx ModuleContext, main android.Path, deps PathDeps, fl
 	implicits = append(implicits, rustLibsToPaths(deps.ProcMacros)...)
 	implicits = append(implicits, deps.StaticLibs...)
 	implicits = append(implicits, deps.SharedLibs...)
+	implicits = append(implicits, deps.srcProviderFiles...)
 
 	if deps.CrtBegin.Valid() {
 		implicits = append(implicits, deps.CrtBegin.Path(), deps.CrtEnd.Path())
@@ -200,7 +201,9 @@ func transformSrctoCrate(ctx ModuleContext, main android.Path, deps PathDeps, fl
 		profileEmitArg := strings.TrimPrefix(cc.PwdPrefix(), "PWD=") + "/"
 
 		if outputFile.Ext() != "" {
-			gcnoFile = android.PathForModuleOut(ctx, pathtools.ReplaceExtension(outputFile.Base(), "gcno"))
+			// rustc seems to split the output filename at the first '.' when determining the gcno filename
+			// so we need to do the same here.
+			gcnoFile = android.PathForModuleOut(ctx, strings.Split(outputFile.Base(), ".")[0]+".gcno")
 			rustcFlags = append(rustcFlags, "-Z profile-emit="+profileEmitArg+android.PathForModuleOut(
 				ctx, pathtools.ReplaceExtension(outputFile.Base(), "gcda")).String())
 		} else {

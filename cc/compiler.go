@@ -123,6 +123,9 @@ type BaseCompilerProperties struct {
 
 		// whether to generate traces (for systrace) for this interface
 		Generate_traces *bool
+
+		// list of flags that will be passed to the AIDL compiler
+		Flags []string
 	}
 
 	Renderscript struct {
@@ -366,7 +369,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 		}
 		if ctx.Device() {
 			flags.Global.CommonFlags = append(flags.Global.CommonFlags,
-				fmt.Sprintf("-D__ANDROID_SDK_VERSION__=%d",
+				fmt.Sprintf("-D__ANDROID_APEX_MIN_SDK_VERSION__=%d",
 					ctx.apexSdkVersion().FinalOrFutureInt()))
 		}
 	}
@@ -479,8 +482,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 	}
 
 	if ctx.inProduct() {
-		// TODO(b/150902910): must use 'compiler.Properties.Target.Product.Cflags'
-		flags.Local.CFlags = append(flags.Local.CFlags, esc(compiler.Properties.Target.Vendor.Cflags)...)
+		flags.Local.CFlags = append(flags.Local.CFlags, esc(compiler.Properties.Target.Product.Cflags)...)
 	}
 
 	if ctx.inRecovery() {
@@ -522,6 +524,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 	}
 
 	if compiler.hasSrcExt(".aidl") {
+		flags.aidlFlags = append(flags.aidlFlags, compiler.Properties.Aidl.Flags...)
 		if len(compiler.Properties.Aidl.Local_include_dirs) > 0 {
 			localAidlIncludeDirs := android.PathsForModuleSrc(ctx, compiler.Properties.Aidl.Local_include_dirs)
 			flags.aidlFlags = append(flags.aidlFlags, includeDirsToFlags(localAidlIncludeDirs))
@@ -649,7 +652,7 @@ func (compiler *baseCompiler) compile(ctx ModuleContext, flags Flags, deps PathD
 func compileObjs(ctx android.ModuleContext, flags builderFlags,
 	subdir string, srcFiles, pathDeps android.Paths, cFlagsDeps android.Paths) Objects {
 
-	return TransformSourceToObj(ctx, subdir, srcFiles, flags, pathDeps, cFlagsDeps)
+	return transformSourceToObj(ctx, subdir, srcFiles, flags, pathDeps, cFlagsDeps)
 }
 
 var thirdPartyDirPrefixExceptions = []*regexp.Regexp{
@@ -686,6 +689,9 @@ type RustBindgenClangProperties struct {
 
 	// list of shared libraries that provide headers for this binding.
 	Shared_libs []string `android:"arch_variant"`
+
+	// List of libraries which export include paths required for this module
+	Header_libs []string `android:"arch_variant,variant_prepend"`
 
 	// list of clang flags required to correctly interpret the headers.
 	Cflags []string `android:"arch_variant"`

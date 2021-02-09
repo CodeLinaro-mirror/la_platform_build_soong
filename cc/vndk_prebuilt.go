@@ -130,7 +130,7 @@ func (p *vndkPrebuiltLibraryDecorator) link(ctx ModuleContext,
 	flags Flags, deps PathDeps, objs Objects) android.Path {
 
 	if !p.matchesWithDevice(ctx.DeviceConfig()) {
-		ctx.Module().SkipInstall()
+		ctx.Module().HideFromMake()
 		return nil
 	}
 
@@ -154,7 +154,7 @@ func (p *vndkPrebuiltLibraryDecorator) link(ctx ModuleContext,
 		// depending on a table of contents file instead of the library itself.
 		tocFile := android.PathForModuleOut(ctx, libName+".toc")
 		p.tocFile = android.OptionalPathForPath(tocFile)
-		TransformSharedObjectToToc(ctx, in, tocFile, builderFlags)
+		transformSharedObjectToToc(ctx, in, tocFile, builderFlags)
 
 		p.androidMkSuffix = p.NameSuffix()
 
@@ -175,7 +175,7 @@ func (p *vndkPrebuiltLibraryDecorator) link(ctx ModuleContext,
 		return in
 	}
 
-	ctx.Module().SkipInstall()
+	ctx.Module().HideFromMake()
 	return nil
 }
 

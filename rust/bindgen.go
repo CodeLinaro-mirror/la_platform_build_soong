@@ -31,12 +31,19 @@ var (
 	// bindgen should specify its own Clang revision so updating Clang isn't potentially blocked on bindgen failures.
 	bindgenClangVersion = "clang-r399163b"
 
+	_ = pctx.VariableFunc("bindgenClangVersion", func(ctx android.PackageVarContext) string {
+		if override := ctx.Config().Getenv("LLVM_BINDGEN_PREBUILTS_VERSION"); override != "" {
+			return override
+		}
+		return bindgenClangVersion
+	})
+
 	//TODO(b/160803703) Use a prebuilt bindgen instead of the built bindgen.
 	_ = pctx.HostBinToolVariable("bindgenCmd", "bindgen")
 	_ = pctx.SourcePathVariable("bindgenClang",
-		"${cc_config.ClangBase}/${config.HostPrebuiltTag}/"+bindgenClangVersion+"/bin/clang")
+		"${cc_config.ClangBase}/${config.HostPrebuiltTag}/${bindgenClangVersion}/bin/clang")
 	_ = pctx.SourcePathVariable("bindgenLibClang",
-		"${cc_config.ClangBase}/${config.HostPrebuiltTag}/"+bindgenClangVersion+"/lib64/")
+		"${cc_config.ClangBase}/${config.HostPrebuiltTag}/${bindgenClangVersion}/lib64/")
 
 	//TODO(ivanlozano) Switch this to RuleBuilder
 	bindgen = pctx.AndroidStaticRule("bindgen",
@@ -258,5 +265,6 @@ func (b *bindgenDecorator) SourceProviderDeps(ctx DepsContext, deps Deps) Deps {
 
 	deps.SharedLibs = append(deps.SharedLibs, b.ClangProperties.Shared_libs...)
 	deps.StaticLibs = append(deps.StaticLibs, b.ClangProperties.Static_libs...)
+	deps.HeaderLibs = append(deps.StaticLibs, b.ClangProperties.Header_libs...)
 	return deps
 }

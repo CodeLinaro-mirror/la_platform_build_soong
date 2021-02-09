@@ -183,7 +183,7 @@ func InitDefaultsModule(module DefaultsModule) {
 
 	initAndroidModuleBase(module)
 	initProductVariableModule(module)
-	InitArchModule(module)
+	initArchModule(module)
 	InitDefaultableModule(module)
 
 	// Add properties that will not have defaults applied to them.
@@ -203,6 +203,9 @@ func InitDefaultsModule(module DefaultsModule) {
 	// The visibility property needs to be checked (but not parsed) by the visibility module during
 	// its checking phase and parsing phase so add it to the list as a normal property.
 	AddVisibilityProperty(module, "visibility", &commonProperties.Visibility)
+
+	// The applicable licenses property for defaults is 'licenses'.
+	setPrimaryLicensesProperty(module, "licenses", &commonProperties.Licenses)
 
 	base.module = module
 }

@@ -44,6 +44,14 @@ func testSdkWithJava(t *testing.T, bp string) *testSdkResult {
 		"api/system-server-removed.txt":                     nil,
 		"build/soong/scripts/gen-java-current-api-files.sh": nil,
 		"docs/known_doctags":                                nil,
+		"100/public/api/myjavalib.txt":                      nil,
+		"100/public/api/myjavalib-removed.txt":              nil,
+		"100/system/api/myjavalib.txt":                      nil,
+		"100/system/api/myjavalib-removed.txt":              nil,
+		"100/module-lib/api/myjavalib.txt":                  nil,
+		"100/module-lib/api/myjavalib-removed.txt":          nil,
+		"100/system-server/api/myjavalib.txt":               nil,
+		"100/system-server/api/myjavalib-removed.txt":       nil,
 	}
 
 	// for java_sdk_library tests
@@ -84,6 +92,10 @@ java_import {
 	name: "framework", 
 	sdk_version: "none",
 }
+prebuilt_apis {
+	name: "sdk",
+	api_dirs: ["100"],
+}
 ` + bp
 
 	return testSdkWithFs(t, bp, fs)
@@ -122,6 +134,7 @@ java_import {
     name: "mysdk_sdkmember@current",
     sdk_member_name: "sdkmember",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/sdkmember.jar"],
 }
 
@@ -129,6 +142,7 @@ java_import {
     name: "sdkmember",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/sdkmember.jar"],
 }
 
@@ -247,6 +261,7 @@ java_import {
     name: "mysdk_myjavalib@current",
     sdk_member_name: "myjavalib",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/myjavalib.jar"],
 }
 
@@ -254,6 +269,7 @@ java_import {
     name: "myjavalib",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/myjavalib.jar"],
 }
 
@@ -302,6 +318,7 @@ java_import {
     name: "mysdk_myjavalib@current",
     sdk_member_name: "myjavalib",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     device_supported: false,
     host_supported: true,
     jars: ["java/myjavalib.jar"],
@@ -311,6 +328,7 @@ java_import {
     name: "myjavalib",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     device_supported: false,
     host_supported: true,
     jars: ["java/myjavalib.jar"],
@@ -357,6 +375,7 @@ java_import {
     name: "mysdk_myjavalib@current",
     sdk_member_name: "myjavalib",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     host_supported: true,
     target: {
         android: {
@@ -372,6 +391,7 @@ java_import {
     name: "myjavalib",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     host_supported: true,
     target: {
         android: {
@@ -426,6 +446,7 @@ java_import {
     name: "myexports_myjavalib@current",
     sdk_member_name: "myjavalib",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/myjavalib.jar"],
 }
 
@@ -433,6 +454,7 @@ java_import {
     name: "myjavalib",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/myjavalib.jar"],
 }
 
@@ -446,6 +468,61 @@ module_exports_snapshot {
 		checkAllCopyRules(`
 .intermediates/myjavalib/android_common/withres/myjavalib.jar -> java/myjavalib.jar
 aidl/foo/bar/Test.aidl -> aidl/aidl/foo/bar/Test.aidl
+`),
+	)
+}
+
+func TestSnapshotWithJavaBootLibrary(t *testing.T) {
+	result := testSdkWithJava(t, `
+		module_exports {
+			name: "myexports",
+			java_boot_libs: ["myjavalib"],
+		}
+
+		java_library {
+			name: "myjavalib",
+			srcs: ["Test.java"],
+			java_resources: ["resource.txt"],
+			// The aidl files should not be copied to the snapshot because a java_boot_libs member is not
+			// intended to be used for compiling Java, only for accessing the dex implementation jar.
+			aidl: {
+				export_include_dirs: ["aidl"],
+			},
+			system_modules: "none",
+			sdk_version: "none",
+			compile_dex: true,
+		}
+	`)
+
+	result.CheckSnapshot("myexports", "",
+		checkAndroidBpContents(`
+// This is auto-generated. DO NOT EDIT.
+
+java_import {
+    name: "myexports_myjavalib@current",
+    sdk_member_name: "myjavalib",
+    visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
+    jars: ["java_boot_libs/snapshot/jars/are/invalid/myjavalib.jar"],
+}
+
+java_import {
+    name: "myjavalib",
+    prefer: false,
+    visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
+    jars: ["java_boot_libs/snapshot/jars/are/invalid/myjavalib.jar"],
+}
+
+module_exports_snapshot {
+    name: "myexports@current",
+    visibility: ["//visibility:public"],
+    java_boot_libs: ["myexports_myjavalib@current"],
+}
+
+`),
+		checkAllCopyRules(`
+.intermediates/myexports/common_os/empty -> java_boot_libs/snapshot/jars/are/invalid/myjavalib.jar
 `),
 	)
 }
@@ -481,6 +558,7 @@ java_import {
     name: "myexports_myjavalib@current",
     sdk_member_name: "myjavalib",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     device_supported: false,
     host_supported: true,
     jars: ["java/myjavalib.jar"],
@@ -490,6 +568,7 @@ java_import {
     name: "myjavalib",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     device_supported: false,
     host_supported: true,
     jars: ["java/myjavalib.jar"],
@@ -535,6 +614,7 @@ java_test_import {
     name: "myexports_myjavatests@current",
     sdk_member_name: "myjavatests",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/myjavatests.jar"],
     test_config: "java/myjavatests-AndroidTest.xml",
 }
@@ -543,6 +623,7 @@ java_test_import {
     name: "myjavatests",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/myjavatests.jar"],
     test_config: "java/myjavatests-AndroidTest.xml",
 }
@@ -588,6 +669,7 @@ java_test_import {
     name: "myexports_myjavatests@current",
     sdk_member_name: "myjavatests",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     device_supported: false,
     host_supported: true,
     jars: ["java/myjavatests.jar"],
@@ -598,6 +680,7 @@ java_test_import {
     name: "myjavatests",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     device_supported: false,
     host_supported: true,
     jars: ["java/myjavatests.jar"],
@@ -655,6 +738,7 @@ java_import {
     name: "mysdk_exported-system-module@current",
     sdk_member_name: "exported-system-module",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/exported-system-module.jar"],
 }
 
@@ -662,6 +746,7 @@ java_import {
     name: "exported-system-module",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/exported-system-module.jar"],
 }
 
@@ -669,6 +754,7 @@ java_import {
     name: "mysdk_system-module@current",
     sdk_member_name: "system-module",
     visibility: ["//visibility:private"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/system-module.jar"],
 }
 
@@ -676,6 +762,7 @@ java_import {
     name: "mysdk_system-module",
     prefer: false,
     visibility: ["//visibility:private"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/system-module.jar"],
 }
 
@@ -747,6 +834,7 @@ java_import {
     name: "mysdk_system-module@current",
     sdk_member_name: "system-module",
     visibility: ["//visibility:private"],
+    apex_available: ["//apex_available:platform"],
     device_supported: false,
     host_supported: true,
     jars: ["java/system-module.jar"],
@@ -756,6 +844,7 @@ java_import {
     name: "mysdk_system-module",
     prefer: false,
     visibility: ["//visibility:private"],
+    apex_available: ["//apex_available:platform"],
     device_supported: false,
     host_supported: true,
     jars: ["java/system-module.jar"],
@@ -836,6 +925,7 @@ java_import {
     name: "myexports_hostjavalib@current",
     sdk_member_name: "hostjavalib",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     device_supported: false,
     host_supported: true,
     jars: ["java/hostjavalib.jar"],
@@ -845,6 +935,7 @@ java_import {
     name: "hostjavalib",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     device_supported: false,
     host_supported: true,
     jars: ["java/hostjavalib.jar"],
@@ -854,6 +945,7 @@ java_import {
     name: "myexports_androidjavalib@current",
     sdk_member_name: "androidjavalib",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/androidjavalib.jar"],
 }
 
@@ -861,6 +953,7 @@ java_import {
     name: "androidjavalib",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     jars: ["java/androidjavalib.jar"],
 }
 
@@ -868,6 +961,7 @@ java_import {
     name: "myexports_myjavalib@current",
     sdk_member_name: "myjavalib",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     host_supported: true,
     target: {
         android: {
@@ -883,6 +977,7 @@ java_import {
     name: "myjavalib",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     host_supported: true,
     target: {
         android: {
@@ -948,21 +1043,21 @@ java_sdk_library_import {
     shared_library: false,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "current",
     },
     system: {
         jars: ["sdk_library/system/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/system/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/system/myjavalib_stub_sources"],
         current_api: "sdk_library/system/myjavalib.txt",
         removed_api: "sdk_library/system/myjavalib-removed.txt",
         sdk_version: "system_current",
     },
     test: {
         jars: ["sdk_library/test/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/test/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/test/myjavalib_stub_sources"],
         current_api: "sdk_library/test/myjavalib.txt",
         removed_api: "sdk_library/test/myjavalib-removed.txt",
         sdk_version: "test_current",
@@ -977,21 +1072,21 @@ java_sdk_library_import {
     shared_library: false,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "current",
     },
     system: {
         jars: ["sdk_library/system/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/system/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/system/myjavalib_stub_sources"],
         current_api: "sdk_library/system/myjavalib.txt",
         removed_api: "sdk_library/system/myjavalib-removed.txt",
         sdk_version: "system_current",
     },
     test: {
         jars: ["sdk_library/test/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/test/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/test/myjavalib_stub_sources"],
         current_api: "sdk_library/test/myjavalib.txt",
         removed_api: "sdk_library/test/myjavalib-removed.txt",
         sdk_version: "test_current",
@@ -1045,10 +1140,11 @@ java_sdk_library_import {
     name: "mysdk_myjavalib@current",
     sdk_member_name: "myjavalib",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     shared_library: true,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "none",
@@ -1059,10 +1155,11 @@ java_sdk_library_import {
     name: "myjavalib",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     shared_library: true,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "none",
@@ -1112,10 +1209,11 @@ java_sdk_library_import {
     name: "mysdk_myjavalib@current",
     sdk_member_name: "myjavalib",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     shared_library: true,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "module_current",
@@ -1126,10 +1224,11 @@ java_sdk_library_import {
     name: "myjavalib",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     shared_library: true,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "module_current",
@@ -1186,14 +1285,14 @@ java_sdk_library_import {
     shared_library: true,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "current",
     },
     system: {
         jars: ["sdk_library/system/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/system/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/system/myjavalib_stub_sources"],
         current_api: "sdk_library/system/myjavalib.txt",
         removed_api: "sdk_library/system/myjavalib-removed.txt",
         sdk_version: "system_current",
@@ -1208,14 +1307,14 @@ java_sdk_library_import {
     shared_library: true,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "current",
     },
     system: {
         jars: ["sdk_library/system/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/system/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/system/myjavalib_stub_sources"],
         current_api: "sdk_library/system/myjavalib.txt",
         removed_api: "sdk_library/system/myjavalib-removed.txt",
         sdk_version: "system_current",
@@ -1279,21 +1378,21 @@ java_sdk_library_import {
     shared_library: true,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "current",
     },
     system: {
         jars: ["sdk_library/system/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/system/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/system/myjavalib_stub_sources"],
         current_api: "sdk_library/system/myjavalib.txt",
         removed_api: "sdk_library/system/myjavalib-removed.txt",
         sdk_version: "system_current",
     },
     module_lib: {
         jars: ["sdk_library/module-lib/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/module-lib/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/module-lib/myjavalib_stub_sources"],
         current_api: "sdk_library/module-lib/myjavalib.txt",
         removed_api: "sdk_library/module-lib/myjavalib-removed.txt",
         sdk_version: "module_current",
@@ -1308,21 +1407,21 @@ java_sdk_library_import {
     shared_library: true,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "current",
     },
     system: {
         jars: ["sdk_library/system/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/system/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/system/myjavalib_stub_sources"],
         current_api: "sdk_library/system/myjavalib.txt",
         removed_api: "sdk_library/system/myjavalib-removed.txt",
         sdk_version: "system_current",
     },
     module_lib: {
         jars: ["sdk_library/module-lib/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/module-lib/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/module-lib/myjavalib_stub_sources"],
         current_api: "sdk_library/module-lib/myjavalib.txt",
         removed_api: "sdk_library/module-lib/myjavalib-removed.txt",
         sdk_version: "module_current",
@@ -1387,14 +1486,14 @@ java_sdk_library_import {
     shared_library: true,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "current",
     },
     system_server: {
         jars: ["sdk_library/system-server/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/system-server/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/system-server/myjavalib_stub_sources"],
         current_api: "sdk_library/system-server/myjavalib.txt",
         removed_api: "sdk_library/system-server/myjavalib-removed.txt",
         sdk_version: "system_server_current",
@@ -1409,14 +1508,14 @@ java_sdk_library_import {
     shared_library: true,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "current",
     },
     system_server: {
         jars: ["sdk_library/system-server/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/system-server/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/system-server/myjavalib_stub_sources"],
         current_api: "sdk_library/system-server/myjavalib.txt",
         removed_api: "sdk_library/system-server/myjavalib-removed.txt",
         sdk_version: "system_server_current",
@@ -1476,7 +1575,7 @@ java_sdk_library_import {
     shared_library: true,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "current",
@@ -1492,7 +1591,7 @@ java_sdk_library_import {
     shared_library: true,
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "current",
@@ -1547,11 +1646,12 @@ java_sdk_library_import {
     name: "mysdk_myjavalib@current",
     sdk_member_name: "myjavalib",
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     shared_library: true,
     doctag_files: ["doctags/docs/known_doctags"],
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "current",
@@ -1562,11 +1662,12 @@ java_sdk_library_import {
     name: "myjavalib",
     prefer: false,
     visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
     shared_library: true,
     doctag_files: ["doctags/docs/known_doctags"],
     public: {
         jars: ["sdk_library/public/myjavalib-stubs.jar"],
-        stub_srcs: ["sdk_library/public/myjavalib_stub_sources/**/*.java"],
+        stub_srcs: ["sdk_library/public/myjavalib_stub_sources"],
         current_api: "sdk_library/public/myjavalib.txt",
         removed_api: "sdk_library/public/myjavalib-removed.txt",
         sdk_version: "current",
