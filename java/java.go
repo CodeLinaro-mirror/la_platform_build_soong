@@ -1041,7 +1041,15 @@ func (j *Module) collectDeps(ctx android.ModuleContext) deps {
 					// Normally the package rule runs aapt, which includes the resource,
 					// but we're not running that in our package rule so just copy in the
 					// resource files here.
-					deps.staticResourceJars = append(deps.staticResourceJars, dep.(*AndroidApp).exportPackage)
+					var exportPackage android.Path
+					if androidAppImport, ok := dep.(*AndroidAppImport); ok {
+						exportPackage = androidAppImport.ExportPackage()
+					} else {
+						exportPackage = dep.(*AndroidApp).exportPackage
+					}
+					if exportPackage != nil {
+						deps.staticResourceJars = append(deps.staticResourceJars, exportPackage)
+					}
 				}
 			case kotlinStdlibTag:
 				deps.kotlinStdlib = append(deps.kotlinStdlib, dep.HeaderJars()...)
@@ -1660,6 +1668,9 @@ func (j *Module) compile(ctx android.ModuleContext, aaptSrcJar android.Path) {
 		j.linter.compileSdkVersion = lintSDKVersionString(j.sdkVersion())
 		j.linter.javaLanguageLevel = flags.javaVersion.String()
 		j.linter.kotlinLanguageLevel = "1.3"
+		if j.ApexName() != "" && ctx.Config().UnbundledBuild() {
+			j.linter.buildModuleReportZip = true
+		}
 		j.linter.lint(ctx)
 	}
 
@@ -2527,6 +2538,10 @@ func (a *Import) JacocoReportClassesFile() android.Path {
 	return nil
 }
 
+func (j *Import) LintDepSets() LintDepSets {
+	return LintDepSets{}
+}
+
 func (j *Import) DepsMutator(ctx android.BottomUpMutatorContext) {
 	ctx.AddVariationDependencies(nil, libTag, j.properties.Libs...)
 
@@ -2789,6 +2804,10 @@ func (j *DexImport) Stem() string {
 
 func (a *DexImport) JacocoReportClassesFile() android.Path {
 	return nil
+}
+
+func (a *DexImport) LintDepSets() LintDepSets {
+	return LintDepSets{}
 }
 
 func (j *DexImport) IsInstallable() bool {

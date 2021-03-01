@@ -36,6 +36,9 @@ import (
 var Bool = proptools.Bool
 var String = proptools.String
 
+// StringDefault re-exports proptools.StringDefault for the android package.
+var StringDefault = proptools.StringDefault
+
 const FutureApiLevel = 10000
 
 // The configuration file name
@@ -961,6 +964,10 @@ func (c *config) HasMultilibConflict(arch ArchType) bool {
 	return c.multilibConflicts[arch]
 }
 
+func (c *config) PrebuiltHiddenApiDir(ctx PathContext) string {
+	return String(c.productVariables.PrebuiltHiddenApiDir)
+}
+
 func (c *deviceConfig) Arches() []Arch {
 	var arches []Arch
 	for _, target := range c.config.Targets[Android] {
@@ -986,6 +993,10 @@ func (c *deviceConfig) VendorPath() string {
 
 func (c *deviceConfig) VndkVersion() string {
 	return String(c.config.productVariables.DeviceVndkVersion)
+}
+
+func (c *deviceConfig) RecoverySnapshotVersion() string {
+	return String(c.config.productVariables.RecoverySnapshotVersion)
 }
 
 func (c *deviceConfig) PlatformVndkVersion() string {
@@ -1294,4 +1305,20 @@ func (c *deviceConfig) DeviceSecondaryArchVariant() string {
 
 func (c *deviceConfig) BoardUsesRecoveryAsBoot() bool {
 	return Bool(c.config.productVariables.BoardUsesRecoveryAsBoot)
+}
+
+func (c *deviceConfig) DirectedVendorSnapshot() bool {
+	return c.config.productVariables.DirectedVendorSnapshot
+}
+
+func (c *deviceConfig) VendorSnapshotModules() map[string]bool {
+	return c.config.productVariables.VendorSnapshotModules
+}
+
+func (c *deviceConfig) DirectedRecoverySnapshot() bool {
+	return c.config.productVariables.DirectedRecoverySnapshot
+}
+
+func (c *deviceConfig) RecoverySnapshotModules() map[string]bool {
+	return c.config.productVariables.RecoverySnapshotModules
 }
