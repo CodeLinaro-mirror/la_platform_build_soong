@@ -31,6 +31,7 @@ var vendorSnapshotSingleton = snapshotSingleton{
 	true,
 	vendorSnapshotImageSingleton,
 	false, /* fake */
+	true,  /* usesLlndkLibraries */
 }
 
 var vendorFakeSnapshotSingleton = snapshotSingleton{
@@ -40,6 +41,7 @@ var vendorFakeSnapshotSingleton = snapshotSingleton{
 	true,
 	vendorSnapshotImageSingleton,
 	true, /* fake */
+	true, /* usesLlndkLibraries */
 }
 
 var recoverySnapshotSingleton = snapshotSingleton{
@@ -49,6 +51,17 @@ var recoverySnapshotSingleton = snapshotSingleton{
 	false,
 	recoverySnapshotImageSingleton,
 	false, /* fake */
+	false, /* usesLlndkLibraries */
+}
+
+var ramdiskSnapshotSingleton = snapshotSingleton{
+	"ramdisk",
+	"SOONG_RAMDISK_SNAPSHOT_ZIP",
+	android.OptionalPath{},
+	false,
+	ramdiskSnapshotImageSingleton,
+	false, /* fake */
+	false, /* usesLlndkLibraries */
 }
 
 func VendorSnapshotSingleton() android.Singleton {
@@ -61,6 +74,10 @@ func VendorFakeSnapshotSingleton() android.Singleton {
 
 func RecoverySnapshotSingleton() android.Singleton {
 	return &recoverySnapshotSingleton
+}
+
+func RamdiskSnapshotSingleton() android.Singleton {
+	return &ramdiskSnapshotSingleton
 }
 
 type snapshotSingleton struct {
@@ -86,6 +103,9 @@ type snapshotSingleton struct {
 	// Fake snapshot is a snapshot whose prebuilt binaries and headers are empty.
 	// It is much faster to generate, and can be used to inspect dependencies.
 	fake bool
+
+	// Whether the image uses llndk libraries.
+	usesLlndkLibraries bool
 }
 
 var (
@@ -109,7 +129,15 @@ var (
 		"kernel",
 		"vendor",
 	}
-
+	// Modules under following directories are ignored. They are OEM's and vendor's
+	// proprietary modules(device/, kernel/, vendor/, and hardware/).
+	// TODO(b/65377115): Clean up these with more maintainable way
+	ramdiskProprietaryDirs = []string{
+		"device",
+		"hardware",
+		"kernel",
+		"vendor",
+	}
 	// Modules under following directories are included as they are in AOSP,
 	// although hardware/ and kernel/ are normally for vendor's own.
 	// TODO(b/65377115): Clean up these with more maintainable way
@@ -132,6 +160,10 @@ func isVendorProprietaryPath(dir string) bool {
 
 func isRecoveryProprietaryPath(dir string) bool {
 	return isProprietaryPath(dir, recoveryProprietaryDirs)
+}
+
+func isRamdiskProprietaryPath(dir string) bool {
+	return isProprietaryPath(dir, ramdiskProprietaryDirs)
 }
 
 // Determine if a dir under source tree is an SoC-owned proprietary directory, such as
@@ -196,6 +228,27 @@ func isRecoveryProprietaryModule(ctx android.BaseModuleContext) bool {
 
 	return false
 }
+func isRamdiskProprietaryModule(ctx android.BaseModuleContext) bool {
+
+	// Any module in a vendor proprietary path is a vendor proprietary
+	// module.
+	if isRamdiskProprietaryPath(ctx.ModuleDir()) {
+		return true
+	}
+
+	// However if the module is not in a vendor proprietary path, it may
+	// still be a vendor proprietary module. This happens for cc modules
+	// that are excluded from the vendor snapshot, and it means that the
+	// vendor has assumed control of the framework-provided module.
+
+	if c, ok := ctx.Module().(*Module); ok {
+		if c.ExcludeFromRamdiskSnapshot() {
+			return true
+		}
+	}
+
+	return false
+}
 
 // Determines if the module is a candidate for snapshot.
 func isSnapshotAware(cfg android.DeviceConfig, m *Module, inProprietaryPath bool, image snapshotImage) bool {
@@ -229,13 +282,6 @@ func isSnapshotAware(cfg android.DeviceConfig, m *Module, inProprietaryPath bool
 	}
 	// skip kernel_headers which always depend on vendor
 	if _, ok := m.linker.(*kernelHeadersDecorator); ok {
-		return false
-	}
-	// skip llndk_library and llndk_headers which are backward compatible
-	if _, ok := m.linker.(*llndkStubDecorator); ok {
-		return false
-	}
-	if _, ok := m.linker.(*llndkHeadersDecorator); ok {
 		return false
 	}
 
@@ -368,6 +414,7 @@ func (c *snapshotSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 			Sanitize           string   `json:",omitempty"`
 			SanitizeMinimalDep bool     `json:",omitempty"`
 			SanitizeUbsanDep   bool     `json:",omitempty"`
+			IsLlndk            bool     `json:",omitempty"`
 
 			// binary flags
 			Symlinks []string `json:",omitempty"`
@@ -383,7 +430,12 @@ func (c *snapshotSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 		}{}
 
 		// Common properties among snapshots.
-		prop.ModuleName = ctx.ModuleName(m)
+		if m.isLlndk(ctx.Config()) && c.usesLlndkLibraries {
+			prop.ModuleName = m.BaseModuleName()
+			prop.IsLlndk = true
+		} else {
+			prop.ModuleName = ctx.ModuleName(m)
+		}
 		if c.supportsVndkExt && m.isVndkExt() {
 			// vndk exts are installed to /vendor/lib(64)?/vndk(-sp)?
 			if m.isVndkSp() {
