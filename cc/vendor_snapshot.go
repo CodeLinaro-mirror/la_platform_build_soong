@@ -23,8 +23,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/google/blueprint/proptools"
-
 	"android/soong/android"
 )
 
@@ -177,15 +175,15 @@ func isVendorProprietaryModule(ctx android.BaseModuleContext) bool {
 
 func isRecoveryProprietaryModule(ctx android.BaseModuleContext) bool {
 
-	// Any module in a vendor proprietary path is a vendor proprietary
+	// Any module in a recovery proprietary path is a recovery proprietary
 	// module.
 	if isRecoveryProprietaryPath(ctx.ModuleDir()) {
 		return true
 	}
 
-	// However if the module is not in a vendor proprietary path, it may
-	// still be a vendor proprietary module. This happens for cc modules
-	// that are excluded from the vendor snapshot, and it means that the
+	// However if the module is not in a recovery proprietary path, it may
+	// still be a recovery proprietary module. This happens for cc modules
+	// that are excluded from the recovery snapshot, and it means that the
 	// vendor has assumed control of the framework-provided module.
 
 	if c, ok := ctx.Module().(*Module); ok {
@@ -198,7 +196,7 @@ func isRecoveryProprietaryModule(ctx android.BaseModuleContext) bool {
 }
 
 // Determines if the module is a candidate for snapshot.
-func isSnapshotAware(m *Module, inProprietaryPath bool, apexInfo android.ApexInfo, image snapshotImage) bool {
+func isSnapshotAware(cfg android.DeviceConfig, m *Module, inProprietaryPath bool, apexInfo android.ApexInfo, image snapshotImage) bool {
 	if !m.Enabled() || m.Properties.HideFromMake {
 		return false
 	}
@@ -260,7 +258,7 @@ func isSnapshotAware(m *Module, inProprietaryPath bool, apexInfo android.ApexInf
 			}
 		}
 		if l.static() {
-			return m.outputFile.Valid() && proptools.BoolDefault(image.available(m), true)
+			return m.outputFile.Valid() && !image.private(m)
 		}
 		if l.shared() {
 			if !m.outputFile.Valid() {
@@ -278,7 +276,7 @@ func isSnapshotAware(m *Module, inProprietaryPath bool, apexInfo android.ApexInf
 
 	// Binaries and Objects
 	if m.binary() || m.object() {
-		return m.outputFile.Valid() && proptools.BoolDefault(image.available(m), true)
+		return m.outputFile.Valid()
 	}
 
 	return false
@@ -289,6 +287,7 @@ func isSnapshotAware(m *Module, inProprietaryPath bool, apexInfo android.ApexInf
 type snapshotJsonFlags struct {
 	ModuleName          string `json:",omitempty"`
 	RelativeInstallPath string `json:",omitempty"`
+	AndroidMkSuffix     string `json:",omitempty"`
 
 	// library flags
 	ExportedDirs       []string `json:",omitempty"`
@@ -368,18 +367,19 @@ func (c *snapshotSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 
 	var headers android.Paths
 
-	copyFile := copyFileRule
-	if c.fake {
-		// All prebuilt binaries and headers are installed by copyFile function. This makes a fake
-		// snapshot just touch prebuilts and headers, rather than installing real files.
-		copyFile = func(ctx android.SingletonContext, path android.Path, out string) android.OutputPath {
+	copyFile := func(ctx android.SingletonContext, path android.Path, out string, fake bool) android.OutputPath {
+		if fake {
+			// All prebuilt binaries and headers are installed by copyFile function. This makes a fake
+			// snapshot just touch prebuilts and headers, rather than installing real files.
 			return writeStringToFileRule(ctx, "", out)
+		} else {
+			return copyFileRule(ctx, path, out)
 		}
 	}
 
 	// installSnapshot function copies prebuilt file (.so, .a, or executable) and json flag file.
 	// For executables, init_rc and vintf_fragments files are also copied.
-	installSnapshot := func(m *Module) android.Paths {
+	installSnapshot := func(m *Module, fake bool) android.Paths {
 		targetArch := "arch-" + m.Target().Arch.ArchType.String()
 		if m.Target().Arch.ArchVariant != "" {
 			targetArch += "-" + m.Target().Arch.ArchVariant
@@ -401,6 +401,7 @@ func (c *snapshotSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 		} else {
 			prop.RelativeInstallPath = m.RelativeInstallPath()
 		}
+		prop.AndroidMkSuffix = m.Properties.SubName
 		prop.RuntimeLibs = m.Properties.SnapshotRuntimeLibs
 		prop.Required = m.RequiredModuleNames()
 		for _, path := range m.InitRc() {
@@ -415,7 +416,7 @@ func (c *snapshotSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 			out := filepath.Join(configsDir, path.Base())
 			if !installedConfigs[out] {
 				installedConfigs[out] = true
-				ret = append(ret, copyFile(ctx, path, out))
+				ret = append(ret, copyFile(ctx, path, out, fake))
 			}
 		}
 
@@ -466,7 +467,7 @@ func (c *snapshotSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 					prop.ModuleName += ".cfi"
 				}
 				snapshotLibOut := filepath.Join(snapshotArchDir, targetArch, libType, stem)
-				ret = append(ret, copyFile(ctx, libPath, snapshotLibOut))
+				ret = append(ret, copyFile(ctx, libPath, snapshotLibOut, fake))
 			} else {
 				stem = ctx.ModuleName(m)
 			}
@@ -480,7 +481,7 @@ func (c *snapshotSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 			// install bin
 			binPath := m.outputFile.Path()
 			snapshotBinOut := filepath.Join(snapshotArchDir, targetArch, "binary", binPath.Base())
-			ret = append(ret, copyFile(ctx, binPath, snapshotBinOut))
+			ret = append(ret, copyFile(ctx, binPath, snapshotBinOut, fake))
 			propOut = snapshotBinOut + ".json"
 		} else if m.object() {
 			// object files aren't installed to the device, so their names can conflict.
@@ -488,7 +489,7 @@ func (c *snapshotSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 			objPath := m.outputFile.Path()
 			snapshotObjOut := filepath.Join(snapshotArchDir, targetArch, "object",
 				ctx.ModuleName(m)+filepath.Ext(objPath.Base()))
-			ret = append(ret, copyFile(ctx, objPath, snapshotObjOut))
+			ret = append(ret, copyFile(ctx, objPath, snapshotObjOut, fake))
 			propOut = snapshotObjOut + ".json"
 		} else {
 			ctx.Errorf("unknown module %q in vendor snapshot", m.String())
@@ -522,26 +523,23 @@ func (c *snapshotSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 				ctx.Errorf("module %q in vendor proprietary path %q may not use \"exclude_from_vendor_snapshot: true\"", m.String(), moduleDir)
 				return
 			}
-			if Bool(c.image.available(m)) {
-				// Error: may not combine "vendor_available:
-				// true" with "exclude_from_vendor_snapshot:
-				// true".
-				ctx.Errorf(
-					"module %q may not use both \""+
-						c.name+
-						"_available: true\" and \"exclude_from_vendor_snapshot: true\"",
-					m.String())
-				return
-			}
 		}
 
-		if !isSnapshotAware(m, inProprietaryPath, apexInfo, c.image) {
+		if !isSnapshotAware(ctx.DeviceConfig(), m, inProprietaryPath, apexInfo, c.image) {
 			return
 		}
 
-		// installSnapshot installs prebuilts and json flag files
-		snapshotOutputs = append(snapshotOutputs, installSnapshot(m)...)
+		// If we are using directed snapshot and a module is not included in the
+		// list, we will still include the module as if it was a fake module.
+		// The reason is that soong needs all the dependencies to be present, even
+		// if they are not using during the build.
+		installAsFake := c.fake
+		if c.image.excludeFromDirectedSnapshot(ctx.DeviceConfig(), m.BaseModuleName()) {
+			installAsFake = true
+		}
 
+		// installSnapshot installs prebuilts and json flag files
+		snapshotOutputs = append(snapshotOutputs, installSnapshot(m, installAsFake)...)
 		// just gather headers and notice files here, because they are to be deduplicated
 		if l, ok := m.linker.(snapshotLibraryInterface); ok {
 			headers = append(headers, l.snapshotHeaders()...)
@@ -560,7 +558,7 @@ func (c *snapshotSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 
 	// install all headers after removing duplicates
 	for _, header := range android.FirstUniquePaths(headers) {
-		snapshotOutputs = append(snapshotOutputs, copyFile(ctx, header, filepath.Join(includeDir, header.String())))
+		snapshotOutputs = append(snapshotOutputs, copyFile(ctx, header, filepath.Join(includeDir, header.String()), c.fake))
 	}
 
 	// All artifacts are ready. Sort them to normalize ninja and then zip.

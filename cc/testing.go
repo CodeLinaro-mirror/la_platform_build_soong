@@ -25,7 +25,6 @@ func RegisterRequiredBuildComponentsForTest(ctx android.RegistrationContext) {
 	RegisterBinaryBuildComponents(ctx)
 	RegisterLibraryBuildComponents(ctx)
 	RegisterLibraryHeadersBuildComponents(ctx)
-	genrule.RegisterGenruleBuildComponents(ctx)
 
 	ctx.RegisterModuleType("toolchain_library", ToolchainLibraryFactory)
 	ctx.RegisterModuleType("llndk_library", LlndkLibraryFactory)
@@ -43,6 +42,7 @@ func GatherRequiredDepsForTest(oses ...android.OsType) string {
 			name: "libatomic",
 			defaults: ["linux_bionic_supported"],
 			vendor_available: true,
+			vendor_ramdisk_available: true,
 			product_available: true,
 			recovery_available: true,
 			native_bridge_supported: true,
@@ -52,6 +52,7 @@ func GatherRequiredDepsForTest(oses ...android.OsType) string {
 		toolchain_library {
 			name: "libcompiler_rt-extras",
 			vendor_available: true,
+			vendor_ramdisk_available: true,
 			product_available: true,
 			recovery_available: true,
 			src: "",
@@ -60,6 +61,7 @@ func GatherRequiredDepsForTest(oses ...android.OsType) string {
 		toolchain_library {
 			name: "libclang_rt.builtins-arm-android",
 			vendor_available: true,
+			vendor_ramdisk_available: true,
 			product_available: true,
 			recovery_available: true,
 			native_bridge_supported: true,
@@ -69,6 +71,7 @@ func GatherRequiredDepsForTest(oses ...android.OsType) string {
 		toolchain_library {
 			name: "libclang_rt.builtins-aarch64-android",
 			vendor_available: true,
+			vendor_ramdisk_available: true,
 			product_available: true,
 			recovery_available: true,
 			native_bridge_supported: true,
@@ -93,6 +96,7 @@ func GatherRequiredDepsForTest(oses ...android.OsType) string {
 		toolchain_library {
 			name: "libclang_rt.builtins-i686-android",
 			vendor_available: true,
+			vendor_ramdisk_available: true,
 			product_available: true,
 			recovery_available: true,
 			native_bridge_supported: true,
@@ -103,6 +107,18 @@ func GatherRequiredDepsForTest(oses ...android.OsType) string {
 			name: "libclang_rt.builtins-x86_64-android",
 			defaults: ["linux_bionic_supported"],
 			vendor_available: true,
+			vendor_ramdisk_available: true,
+			product_available: true,
+			recovery_available: true,
+			native_bridge_supported: true,
+			src: "",
+		}
+
+		toolchain_library {
+			name: "libunwind",
+			defaults: ["linux_bionic_supported"],
+			vendor_available: true,
+			vendor_ramdisk_available: true,
 			product_available: true,
 			recovery_available: true,
 			native_bridge_supported: true,
@@ -228,6 +244,7 @@ func GatherRequiredDepsForTest(oses ...android.OsType) string {
 		cc_library {
 			name: "libprofile-extras",
 			vendor_available: true,
+			vendor_ramdisk_available: true,
 			product_available: true,
 			recovery_available: true,
 			native_coverage: false,
@@ -238,6 +255,7 @@ func GatherRequiredDepsForTest(oses ...android.OsType) string {
 		cc_library {
 			name: "libprofile-clang-extras",
 			vendor_available: true,
+			vendor_ramdisk_available: true,
 			product_available: true,
 			recovery_available: true,
 			native_coverage: false,
@@ -309,6 +327,7 @@ func GatherRequiredDepsForTest(oses ...android.OsType) string {
 			system_shared_libs: [],
 			stl: "none",
 			vendor_available: true,
+			vendor_ramdisk_available: true,
 			product_available: true,
 			recovery_available: true,
 			host_supported: true,
@@ -346,6 +365,7 @@ func GatherRequiredDepsForTest(oses ...android.OsType) string {
 			stl: "none",
 			host_supported: false,
 			vendor_available: true,
+			vendor_ramdisk_available: true,
 			product_available: true,
 			recovery_available: true,
 			min_sdk_version: "29",
@@ -370,6 +390,7 @@ func GatherRequiredDepsForTest(oses ...android.OsType) string {
 			defaults: ["linux_bionic_supported"],
 			recovery_available: true,
 			vendor_available: true,
+			vendor_ramdisk_available: true,
 			product_available: true,
 			native_bridge_supported: true,
 			stl: "none",
@@ -569,6 +590,7 @@ func TestConfig(buildDir string, os android.OsType, env map[string]string,
 
 func CreateTestContext(config android.Config) *android.TestContext {
 	ctx := android.NewTestArchContext(config)
+	genrule.RegisterGenruleBuildComponents(ctx)
 	ctx.RegisterModuleType("cc_fuzz", FuzzFactory)
 	ctx.RegisterModuleType("cc_test", TestFactory)
 	ctx.RegisterModuleType("cc_test_library", TestLibraryFactory)
@@ -576,17 +598,13 @@ func CreateTestContext(config android.Config) *android.TestContext {
 	ctx.RegisterModuleType("vendor_public_library", vendorPublicLibraryFactory)
 	ctx.RegisterModuleType("filegroup", android.FileGroupFactory)
 	ctx.RegisterModuleType("vndk_prebuilt_shared", VndkPrebuiltSharedFactory)
-	ctx.RegisterModuleType("vendor_snapshot_shared", VendorSnapshotSharedFactory)
-	ctx.RegisterModuleType("vendor_snapshot_static", VendorSnapshotStaticFactory)
-	ctx.RegisterModuleType("vendor_snapshot_binary", VendorSnapshotBinaryFactory)
+	vendorSnapshotImageSingleton.init(ctx)
+	recoverySnapshotImageSingleton.init(ctx)
 	RegisterVndkLibraryTxtTypes(ctx)
 	ctx.PreArchMutators(android.RegisterDefaultsPreArchMutators)
 	android.RegisterPrebuiltMutators(ctx)
 	RegisterRequiredBuildComponentsForTest(ctx)
 	ctx.RegisterSingletonType("vndk-snapshot", VndkSnapshotSingleton)
-	ctx.RegisterSingletonType("vendor-snapshot", VendorSnapshotSingleton)
-	ctx.RegisterSingletonType("vendor-fake-snapshot", VendorFakeSnapshotSingleton)
-	ctx.RegisterSingletonType("recovery-snapshot", RecoverySnapshotSingleton)
 
 	return ctx
 }

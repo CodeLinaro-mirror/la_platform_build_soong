@@ -19,6 +19,7 @@ import (
 	"io"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -449,24 +450,39 @@ func (l *libraryDecorator) collectHeadersForSnapshot(ctx android.ModuleContext) 
 			}
 			continue
 		}
-		exts := headerExts
-		// Glob all files under this special directory, because of C++ headers.
-		if strings.HasPrefix(dir, "external/libcxx/include") {
-			exts = []string{""}
+		glob, err := ctx.GlobWithDeps(dir+"/**/*", nil)
+		if err != nil {
+			ctx.ModuleErrorf("glob failed: %#v", err)
+			return
 		}
-		for _, ext := range exts {
-			glob, err := ctx.GlobWithDeps(dir+"/**/*"+ext, nil)
-			if err != nil {
-				ctx.ModuleErrorf("glob failed: %#v", err)
-				return
-			}
-			for _, header := range glob {
-				if strings.HasSuffix(header, "/") {
+		isLibcxx := strings.HasPrefix(dir, "external/libcxx/include")
+		j := 0
+		for i, header := range glob {
+			if isLibcxx {
+				// Glob all files under this special directory, because of C++ headers with no
+				// extension.
+				if !strings.HasSuffix(header, "/") {
 					continue
 				}
-				ret = append(ret, android.PathForSource(ctx, header))
+			} else {
+				// Filter out only the files with extensions that are headers.
+				found := false
+				for _, ext := range headerExts {
+					if strings.HasSuffix(header, ext) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					continue
+				}
 			}
+			if i != j {
+				glob[j] = glob[i]
+			}
+			j++
 		}
+		glob = glob[:j]
 	}
 
 	// Collect generated headers
@@ -632,6 +648,11 @@ func (library *libraryDecorator) compile(ctx ModuleContext, flags Flags, deps Pa
 		return objs
 	}
 	if library.buildStubs() {
+		symbolFile := String(library.Properties.Stubs.Symbol_file)
+		if symbolFile != "" && !strings.HasSuffix(symbolFile, ".map.txt") {
+			ctx.PropertyErrorf("symbol_file", "%q doesn't have .map.txt suffix", symbolFile)
+			return Objects{}
+		}
 		objs, versionScript := compileStubLibrary(ctx, flags, String(library.Properties.Stubs.Symbol_file), library.MutatedProperties.StubsVersion, "--apex")
 		library.versionScriptPath = android.OptionalPathForPath(versionScript)
 		return objs
@@ -1292,9 +1313,8 @@ func (library *libraryDecorator) link(ctx ModuleContext,
 			dir := android.PathForModuleGen(ctx, "aidl")
 			library.reexportDirs(dir)
 
-			// TODO: restrict to aidl deps
-			library.reexportDeps(library.baseCompiler.pathDeps...)
-			library.addExportedGeneratedHeaders(library.baseCompiler.pathDeps...)
+			library.reexportDeps(library.baseCompiler.aidlOrderOnlyDeps...)
+			library.addExportedGeneratedHeaders(library.baseCompiler.aidlHeaders...)
 		}
 	}
 
@@ -1308,9 +1328,8 @@ func (library *libraryDecorator) link(ctx ModuleContext,
 			includes = append(includes, flags.proto.Dir)
 			library.reexportDirs(includes...)
 
-			// TODO: restrict to proto deps
-			library.reexportDeps(library.baseCompiler.pathDeps...)
-			library.addExportedGeneratedHeaders(library.baseCompiler.pathDeps...)
+			library.reexportDeps(library.baseCompiler.protoOrderOnlyDeps...)
+			library.addExportedGeneratedHeaders(library.baseCompiler.protoHeaders...)
 		}
 	}
 
@@ -1318,25 +1337,27 @@ func (library *libraryDecorator) link(ctx ModuleContext,
 	if library.baseCompiler.hasSrcExt(".sysprop") {
 		dir := android.PathForModuleGen(ctx, "sysprop", "include")
 		if library.Properties.Sysprop.Platform != nil {
-			isClientProduct := ctx.ProductSpecific() && !ctx.useVndk()
-			isClientVendor := ctx.useVndk()
 			isOwnerPlatform := Bool(library.Properties.Sysprop.Platform)
 
 			// If the owner is different from the user, expose public header. That is,
 			// 1) if the user is product (as owner can only be platform / vendor)
-			// 2) if one is platform and the other is vendor
-			// Exceptions are ramdisk and recovery. They are not enforced at all. So
-			// they always use internal header.
-			if !ctx.inRamdisk() && !ctx.inVendorRamdisk() && !ctx.inRecovery() &&
-				(isClientProduct || (isOwnerPlatform == isClientVendor)) {
+			// 2) if the owner is platform and the client is vendor
+			// We don't care Platform -> Vendor dependency as it's already forbidden.
+			if ctx.Device() && (ctx.ProductSpecific() || (isOwnerPlatform && ctx.inVendor())) {
 				dir = android.PathForModuleGen(ctx, "sysprop/public", "include")
 			}
 		}
 
+		// Make sure to only export headers which are within the include directory.
+		_, headers := android.FilterPathListPredicate(library.baseCompiler.syspropHeaders, func(path android.Path) bool {
+			_, isRel := android.MaybeRel(ctx, dir.String(), path.String())
+			return isRel
+		})
+
 		// Add sysprop-related directories to the exported directories of this library.
 		library.reexportDirs(dir)
-		library.reexportDeps(library.baseCompiler.pathDeps...)
-		library.addExportedGeneratedHeaders(library.baseCompiler.pathDeps...)
+		library.reexportDeps(library.baseCompiler.syspropOrderOnlyDeps...)
+		library.addExportedGeneratedHeaders(headers...)
 	}
 
 	// Add stub-related flags if this library is a stub library.
@@ -1351,8 +1372,11 @@ func (library *libraryDecorator) link(ctx ModuleContext,
 func (library *libraryDecorator) exportVersioningMacroIfNeeded(ctx android.BaseModuleContext) {
 	if library.buildStubs() && library.stubsVersion() != "" && !library.skipAPIDefine {
 		name := versioningMacroName(ctx.Module().(*Module).ImplementationModuleName(ctx))
-		ver := library.stubsVersion()
-		library.reexportFlags("-D" + name + "=" + ver)
+		apiLevel, err := android.ApiLevelFromUser(ctx, library.stubsVersion())
+		if err != nil {
+			ctx.ModuleErrorf("Can't export version macro: %s", err.Error())
+		}
+		library.reexportFlags("-D" + name + "=" + strconv.Itoa(apiLevel.FinalOrPreviewInt()))
 	}
 }
 

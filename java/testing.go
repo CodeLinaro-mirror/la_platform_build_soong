@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"android/soong/android"
@@ -86,8 +87,11 @@ func prebuiltApisFilesForLibs(apiLevels []string, sdkLibs []string) map[string][
 		for _, lib := range sdkLibs {
 			for _, scope := range []string{"public", "system", "module-lib", "system-server", "test"} {
 				fs[fmt.Sprintf("prebuilts/sdk/%s/%s/%s.jar", level, scope, lib)] = nil
-				fs[fmt.Sprintf("prebuilts/sdk/%s/%s/api/%s.txt", level, scope, lib)] = nil
-				fs[fmt.Sprintf("prebuilts/sdk/%s/%s/api/%s-removed.txt", level, scope, lib)] = nil
+				// No finalized API files for "current"
+				if level != "current" {
+					fs[fmt.Sprintf("prebuilts/sdk/%s/%s/api/%s.txt", level, scope, lib)] = nil
+					fs[fmt.Sprintf("prebuilts/sdk/%s/%s/api/%s-removed.txt", level, scope, lib)] = nil
+				}
 			}
 		}
 		fs[fmt.Sprintf("prebuilts/sdk/%s/public/framework.aidl", level)] = nil
@@ -95,6 +99,33 @@ func prebuiltApisFilesForLibs(apiLevels []string, sdkLibs []string) map[string][
 	return fs
 }
 
+// Register build components provided by this package that are needed by tests.
+//
+// In particular this must register all the components that are used in the `Android.bp` snippet
+// returned by GatherRequiredDepsForTest()
+func RegisterRequiredBuildComponentsForTest(ctx android.RegistrationContext) {
+	RegisterAARBuildComponents(ctx)
+	RegisterAppBuildComponents(ctx)
+	RegisterAppImportBuildComponents(ctx)
+	RegisterAppSetBuildComponents(ctx)
+	RegisterBootImageBuildComponents(ctx)
+	RegisterDexpreoptBootJarsComponents(ctx)
+	RegisterDocsBuildComponents(ctx)
+	RegisterGenRuleBuildComponents(ctx)
+	RegisterJavaBuildComponents(ctx)
+	RegisterPrebuiltApisBuildComponents(ctx)
+	RegisterRuntimeResourceOverlayBuildComponents(ctx)
+	RegisterSdkLibraryBuildComponents(ctx)
+	RegisterStubsBuildComponents(ctx)
+	RegisterSystemModulesBuildComponents(ctx)
+
+	// Make sure that any tool related module types needed by dexpreopt have been registered.
+	dexpreopt.RegisterToolModulesForTest(ctx)
+}
+
+// Gather the module definitions needed by tests that depend upon code from this package.
+//
+// Returns an `Android.bp` snippet that defines the modules that are needed by this package.
 func GatherRequiredDepsForTest() string {
 	var bp string
 
@@ -181,6 +212,16 @@ func GatherRequiredDepsForTest() string {
 		`, extra)
 	}
 
+	// Make sure that any tools needed for dexpreopting are defined.
+	bp += dexpreopt.BpToolModulesForTest()
+
+	// Make sure that the dex_bootjars singleton module is instantiated for the tests.
+	bp += `
+		dex_bootjars {
+			name: "dex_bootjars",
+		}
+`
+
 	return bp
 }
 
@@ -195,5 +236,14 @@ func CheckModuleDependencies(t *testing.T, ctx *android.TestContext, name, varia
 
 	if actual := deps; !reflect.DeepEqual(expected, actual) {
 		t.Errorf("expected %#q, found %#q", expected, actual)
+	}
+}
+
+func CheckHiddenAPIRuleInputs(t *testing.T, expected string, hiddenAPIRule android.TestingBuildParams) {
+	t.Helper()
+	actual := strings.TrimSpace(strings.Join(android.NormalizePathsForTesting(hiddenAPIRule.Implicits), "\n"))
+	expected = strings.TrimSpace(expected)
+	if actual != expected {
+		t.Errorf("Expected hiddenapi rule inputs:\n%s\nactual inputs:\n%s", expected, actual)
 	}
 }

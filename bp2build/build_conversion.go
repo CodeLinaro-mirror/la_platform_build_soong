@@ -16,6 +16,7 @@ package bp2build
 
 import (
 	"android/soong/android"
+	"android/soong/bazel"
 	"fmt"
 	"reflect"
 	"strings"
@@ -29,8 +30,62 @@ type BazelAttributes struct {
 }
 
 type BazelTarget struct {
-	name    string
-	content string
+	name            string
+	content         string
+	ruleClass       string
+	bzlLoadLocation string
+}
+
+// IsLoadedFromStarlark determines if the BazelTarget's rule class is loaded from a .bzl file,
+// as opposed to a native rule built into Bazel.
+func (t BazelTarget) IsLoadedFromStarlark() bool {
+	return t.bzlLoadLocation != ""
+}
+
+// BazelTargets is a typedef for a slice of BazelTarget objects.
+type BazelTargets []BazelTarget
+
+// String returns the string representation of BazelTargets, without load
+// statements (use LoadStatements for that), since the targets are usually not
+// adjacent to the load statements at the top of the BUILD file.
+func (targets BazelTargets) String() string {
+	var res string
+	for i, target := range targets {
+		res += target.content
+		if i != len(targets)-1 {
+			res += "\n\n"
+		}
+	}
+	return res
+}
+
+// LoadStatements return the string representation of the sorted and deduplicated
+// Starlark rule load statements needed by a group of BazelTargets.
+func (targets BazelTargets) LoadStatements() string {
+	bzlToLoadedSymbols := map[string][]string{}
+	for _, target := range targets {
+		if target.IsLoadedFromStarlark() {
+			bzlToLoadedSymbols[target.bzlLoadLocation] =
+				append(bzlToLoadedSymbols[target.bzlLoadLocation], target.ruleClass)
+		}
+	}
+
+	var loadStatements []string
+	for bzl, ruleClasses := range bzlToLoadedSymbols {
+		loadStatement := "load(\""
+		loadStatement += bzl
+		loadStatement += "\", "
+		ruleClasses = android.SortedUniqueStrings(ruleClasses)
+		for i, ruleClass := range ruleClasses {
+			loadStatement += "\"" + ruleClass + "\""
+			if i != len(ruleClasses)-1 {
+				loadStatement += ", "
+			}
+		}
+		loadStatement += ")"
+		loadStatements = append(loadStatements, loadStatement)
+	}
+	return strings.Join(android.SortedUniqueStrings(loadStatements), "\n")
 }
 
 type bpToBuildContext interface {
@@ -46,6 +101,40 @@ type bpToBuildContext interface {
 type CodegenContext struct {
 	config  android.Config
 	context android.Context
+	mode    CodegenMode
+}
+
+func (c *CodegenContext) Mode() CodegenMode {
+	return c.mode
+}
+
+// CodegenMode is an enum to differentiate code-generation modes.
+type CodegenMode int
+
+const (
+	// Bp2Build: generate BUILD files with targets buildable by Bazel directly.
+	//
+	// This mode is used for the Soong->Bazel build definition conversion.
+	Bp2Build CodegenMode = iota
+
+	// QueryView: generate BUILD files with targets representing fully mutated
+	// Soong modules, representing the fully configured Soong module graph with
+	// variants and dependency endges.
+	//
+	// This mode is used for discovering and introspecting the existing Soong
+	// module graph.
+	QueryView
+)
+
+func (mode CodegenMode) String() string {
+	switch mode {
+	case Bp2Build:
+		return "Bp2Build"
+	case QueryView:
+		return "QueryView"
+	default:
+		return fmt.Sprintf("%d", mode)
+	}
 }
 
 func (ctx CodegenContext) AddNinjaFileDeps(...string) {}
@@ -54,10 +143,11 @@ func (ctx CodegenContext) Context() android.Context   { return ctx.context }
 
 // NewCodegenContext creates a wrapper context that conforms to PathContext for
 // writing BUILD files in the output directory.
-func NewCodegenContext(config android.Config, context android.Context) CodegenContext {
+func NewCodegenContext(config android.Config, context android.Context, mode CodegenMode) CodegenContext {
 	return CodegenContext{
 		context: context,
 		config:  config,
+		mode:    mode,
 	}
 }
 
@@ -73,14 +163,75 @@ func propsToAttributes(props map[string]string) string {
 	return attributes
 }
 
-func GenerateSoongModuleTargets(ctx bpToBuildContext) map[string][]BazelTarget {
-	buildFileToTargets := make(map[string][]BazelTarget)
-	ctx.VisitAllModules(func(m blueprint.Module) {
-		dir := ctx.ModuleDir(m)
-		t := generateSoongModuleTarget(ctx, m)
-		buildFileToTargets[ctx.ModuleDir(m)] = append(buildFileToTargets[dir], t)
+func GenerateBazelTargets(ctx CodegenContext) (map[string]BazelTargets, CodegenMetrics) {
+	buildFileToTargets := make(map[string]BazelTargets)
+
+	// Simple metrics tracking for bp2build
+	totalModuleCount := 0
+	ruleClassCount := make(map[string]int)
+
+	bpCtx := ctx.Context()
+	bpCtx.VisitAllModules(func(m blueprint.Module) {
+		dir := bpCtx.ModuleDir(m)
+		var t BazelTarget
+
+		switch ctx.Mode() {
+		case Bp2Build:
+			if b, ok := m.(android.BazelTargetModule); !ok {
+				// Only include regular Soong modules (non-BazelTargetModules) into the total count.
+				totalModuleCount += 1
+				return
+			} else {
+				t = generateBazelTarget(bpCtx, m, b)
+				ruleClassCount[t.ruleClass] += 1
+			}
+		case QueryView:
+			// Blocklist certain module types from being generated.
+			if canonicalizeModuleType(bpCtx.ModuleType(m)) == "package" {
+				// package module name contain slashes, and thus cannot
+				// be mapped cleanly to a bazel label.
+				return
+			}
+			t = generateSoongModuleTarget(bpCtx, m)
+		default:
+			panic(fmt.Errorf("Unknown code-generation mode: %s", ctx.Mode()))
+		}
+
+		buildFileToTargets[dir] = append(buildFileToTargets[dir], t)
 	})
-	return buildFileToTargets
+
+	metrics := CodegenMetrics{
+		TotalModuleCount: totalModuleCount,
+		RuleClassCount:   ruleClassCount,
+	}
+
+	return buildFileToTargets, metrics
+}
+
+func generateBazelTarget(ctx bpToBuildContext, m blueprint.Module, b android.BazelTargetModule) BazelTarget {
+	ruleClass := b.RuleClass()
+	bzlLoadLocation := b.BzlLoadLocation()
+
+	// extract the bazel attributes from the module.
+	props := getBuildProperties(ctx, m)
+
+	delete(props.Attrs, "bp2build_available")
+
+	// Return the Bazel target with rule class and attributes, ready to be
+	// code-generated.
+	attributes := propsToAttributes(props.Attrs)
+	targetName := targetNameForBp2Build(ctx, m)
+	return BazelTarget{
+		name:            targetName,
+		ruleClass:       ruleClass,
+		bzlLoadLocation: bzlLoadLocation,
+		content: fmt.Sprintf(
+			bazelTarget,
+			ruleClass,
+			targetName,
+			attributes,
+		),
+	}
 }
 
 // Convert a module and its deps and props into a Bazel macro/rule
@@ -203,6 +354,44 @@ func prettyPrint(propertyValue reflect.Value, indent int) (string, error) {
 		ret += makeIndent(indent)
 		ret += "]"
 	case reflect.Struct:
+		// Special cases where the bp2build sends additional information to the codegenerator
+		// by wrapping the attributes in a custom struct type.
+		if labels, ok := propertyValue.Interface().(bazel.LabelList); ok {
+			// TODO(b/165114590): convert glob syntax
+			return prettyPrint(reflect.ValueOf(labels.Includes), indent)
+		} else if label, ok := propertyValue.Interface().(bazel.Label); ok {
+			return fmt.Sprintf("%q", label.Label), nil
+		} else if stringList, ok := propertyValue.Interface().(bazel.StringListAttribute); ok {
+			// A Bazel string_list attribute that may contain a select statement.
+			ret, err := prettyPrint(reflect.ValueOf(stringList.Value), indent)
+			if err != nil {
+				return ret, err
+			}
+
+			if !stringList.HasArchSpecificValues() {
+				// Select statement not needed.
+				return ret, nil
+			}
+
+			ret += " + " + "select({\n"
+			for _, arch := range android.ArchTypeList() {
+				value := stringList.GetValueForArch(arch.Name)
+				if len(value) > 0 {
+					ret += makeIndent(indent + 1)
+					list, _ := prettyPrint(reflect.ValueOf(value), indent+1)
+					ret += fmt.Sprintf("\"%s\": %s,\n", platformArchMap[arch], list)
+				}
+			}
+
+			ret += makeIndent(indent + 1)
+			list, _ := prettyPrint(reflect.ValueOf(stringList.GetValueForArch("default")), indent+1)
+			ret += fmt.Sprintf("\"%s\": %s,\n", "//conditions:default", list)
+
+			ret += makeIndent(indent)
+			ret += "})"
+			return ret, err
+		}
+
 		ret = "{\n"
 		// Sort and print the struct props by the key.
 		structProps := extractStructProperties(propertyValue, indent)
@@ -304,6 +493,10 @@ func makeIndent(indent int) string {
 		panic(fmt.Errorf("indent column cannot be less than 0, but got %d", indent))
 	}
 	return strings.Repeat("    ", indent)
+}
+
+func targetNameForBp2Build(c bpToBuildContext, logicModule blueprint.Module) string {
+	return strings.Replace(c.ModuleName(logicModule), bazel.BazelTargetModuleNamePrefix, "", 1)
 }
 
 func targetNameWithVariant(c bpToBuildContext, logicModule blueprint.Module) string {

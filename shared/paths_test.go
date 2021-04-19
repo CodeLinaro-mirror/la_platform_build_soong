@@ -1,4 +1,4 @@
-// Copyright 2015 Google Inc. All rights reserved.
+// Copyright 2021 Google Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,13 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-bootstrap_go_binary {
-    name: "soong_env",
-    deps: [
-        "soong-env",
-    ],
-    srcs: [
-        "soong_env.go",
-    ],
-    default: true,
+package shared
+
+import (
+	"testing"
+)
+
+func assertEqual(t *testing.T, expected, actual string) {
+	t.Helper()
+	if expected != actual {
+		t.Errorf("expected %q != got %q", expected, actual)
+	}
+}
+
+func TestJoinPath(t *testing.T) {
+	assertEqual(t, "/a/b", JoinPath("c/d", "/a/b"))
+	assertEqual(t, "a/b", JoinPath("a", "b"))
+	assertEqual(t, "/a/b", JoinPath("x", "/a", "b"))
 }

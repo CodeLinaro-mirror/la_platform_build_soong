@@ -121,13 +121,10 @@ type variableProperties struct {
 			Cppflags []string
 		}
 
-		Use_lmkd_stats_log struct {
-			Cflags []string
-		}
-
 		Arc struct {
 			Cflags            []string `android:"arch_variant"`
 			Exclude_srcs      []string `android:"arch_variant"`
+			Header_libs       []string `android:"arch_variant"`
 			Include_dirs      []string `android:"arch_variant"`
 			Shared_libs       []string `android:"arch_variant"`
 			Static_libs       []string `android:"arch_variant"`
@@ -203,11 +200,9 @@ type productVariables struct {
 	CrossHostArch          *string `json:",omitempty"`
 	CrossHostSecondaryArch *string `json:",omitempty"`
 
-	DeviceResourceOverlays  []string `json:",omitempty"`
-	ProductResourceOverlays []string `json:",omitempty"`
-	EnforceRROTargets       []string `json:",omitempty"`
-	// TODO(b/150820813) Some modules depend on static overlay, remove this after eliminating the dependency.
-	EnforceRROExemptedTargets  []string `json:",omitempty"`
+	DeviceResourceOverlays     []string `json:",omitempty"`
+	ProductResourceOverlays    []string `json:",omitempty"`
+	EnforceRROTargets          []string `json:",omitempty"`
 	EnforceRROExcludedOverlays []string `json:",omitempty"`
 
 	AAPTCharacteristics *string  `json:",omitempty"`
@@ -240,7 +235,6 @@ type productVariables struct {
 	Treble_linker_namespaces     *bool `json:",omitempty"`
 	Enforce_vintf_manifest       *bool `json:",omitempty"`
 	Uml                          *bool `json:",omitempty"`
-	Use_lmkd_stats_log           *bool `json:",omitempty"`
 	Arc                          *bool `json:",omitempty"`
 	MinimizeJavaDebugInfo        *bool `json:",omitempty"`
 
@@ -309,6 +303,12 @@ type productVariables struct {
 	VndkUseCoreVariant         *bool `json:",omitempty"`
 	VndkSnapshotBuildArtifacts *bool `json:",omitempty"`
 
+	DirectedVendorSnapshot bool            `json:",omitempty"`
+	VendorSnapshotModules  map[string]bool `json:",omitempty"`
+
+	DirectedRecoverySnapshot bool            `json:",omitempty"`
+	RecoverySnapshotModules  map[string]bool `json:",omitempty"`
+
 	BoardVendorSepolicyDirs      []string `json:",omitempty"`
 	BoardOdmSepolicyDirs         []string `json:",omitempty"`
 	BoardReqdMaskPolicy          []string `json:",omitempty"`
@@ -364,6 +364,12 @@ type productVariables struct {
 	BoardKernelModuleInterfaceVersions []string `json:",omitempty"`
 
 	BoardMoveRecoveryResourcesToVendorBoot *bool `json:",omitempty"`
+
+	PrebuiltHiddenApiDir *string `json:",omitempty"`
+
+	ShippingApiLevel *string `json:",omitempty"`
+
+	BuildBrokenVendorPropertyNamespace bool `json:",omitempty"`
 }
 
 func boolPtr(v bool) *bool {
@@ -435,13 +441,15 @@ func VariableMutator(mctx BottomUpMutatorContext) {
 
 	variableValues := reflect.ValueOf(a.variableProperties).Elem().FieldByName("Product_variables")
 
+	productVariables := reflect.ValueOf(mctx.Config().productVariables)
+
 	for i := 0; i < variableValues.NumField(); i++ {
 		variableValue := variableValues.Field(i)
 		name := variableValues.Type().Field(i).Name
 		property := "product_variables." + proptools.PropertyNameForField(name)
 
 		// Check that the variable was set for the product
-		val := reflect.ValueOf(mctx.Config().productVariables).FieldByName(name)
+		val := productVariables.FieldByName(name)
 		if !val.IsValid() || val.Kind() != reflect.Ptr || val.IsNil() {
 			continue
 		}

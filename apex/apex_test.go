@@ -19,6 +19,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -66,14 +67,14 @@ func testApexError(t *testing.T, pattern, bp string, handlers ...testCustomizer)
 	t.Fatalf("missing expected error %q (0 errors are returned)", pattern)
 }
 
-func testApex(t *testing.T, bp string, handlers ...testCustomizer) (*android.TestContext, android.Config) {
+func testApex(t *testing.T, bp string, handlers ...testCustomizer) *android.TestContext {
 	t.Helper()
 	ctx, config := testApexContext(t, bp, handlers...)
 	_, errs := ctx.ParseBlueprintsFiles(".")
 	android.FailIfErrored(t, errs)
 	_, errs = ctx.PrepareBuildActions(config)
 	android.FailIfErrored(t, errs)
-	return ctx, config
+	return ctx
 }
 
 type testCustomizer func(fs map[string][]byte, config android.Config)
@@ -143,17 +144,18 @@ func testApexContext(_ *testing.T, bp string, handlers ...testCustomizer) (*andr
 	bp = bp + java.GatherRequiredDepsForTest()
 
 	fs := map[string][]byte{
-		"a.java":                                              nil,
-		"PrebuiltAppFoo.apk":                                  nil,
-		"PrebuiltAppFooPriv.apk":                              nil,
-		"build/make/target/product/security":                  nil,
-		"apex_manifest.json":                                  nil,
-		"AndroidManifest.xml":                                 nil,
-		"system/sepolicy/apex/myapex-file_contexts":           nil,
-		"system/sepolicy/apex/myapex.updatable-file_contexts": nil,
-		"system/sepolicy/apex/myapex2-file_contexts":          nil,
-		"system/sepolicy/apex/otherapex-file_contexts":        nil,
-		"system/sepolicy/apex/com.android.vndk-file_contexts": nil,
+		"a.java":                                                      nil,
+		"PrebuiltAppFoo.apk":                                          nil,
+		"PrebuiltAppFooPriv.apk":                                      nil,
+		"build/make/target/product/security":                          nil,
+		"apex_manifest.json":                                          nil,
+		"AndroidManifest.xml":                                         nil,
+		"system/sepolicy/apex/myapex-file_contexts":                   nil,
+		"system/sepolicy/apex/myapex.updatable-file_contexts":         nil,
+		"system/sepolicy/apex/myapex2-file_contexts":                  nil,
+		"system/sepolicy/apex/otherapex-file_contexts":                nil,
+		"system/sepolicy/apex/com.android.vndk-file_contexts":         nil,
+		"system/sepolicy/apex/com.android.vndk.current-file_contexts": nil,
 		"mylib.cpp":                                  nil,
 		"mytest.cpp":                                 nil,
 		"mytest1.cpp":                                nil,
@@ -191,6 +193,7 @@ func testApexContext(_ *testing.T, bp string, handlers ...testCustomizer) (*andr
 		"AppSet.apks":                                nil,
 		"foo.rs":                                     nil,
 		"libfoo.jar":                                 nil,
+		"libbar.jar":                                 nil,
 	}
 
 	cc.GatherRequiredFilesForTest(fs)
@@ -226,18 +229,11 @@ func testApexContext(_ *testing.T, bp string, handlers ...testCustomizer) (*andr
 	android.RegisterPackageBuildComponents(ctx)
 	ctx.PreArchMutators(android.RegisterVisibilityRuleChecker)
 
-	ctx.RegisterModuleType("apex", BundleFactory)
-	ctx.RegisterModuleType("apex_test", testApexBundleFactory)
-	ctx.RegisterModuleType("apex_vndk", vndkApexBundleFactory)
-	ctx.RegisterModuleType("apex_key", ApexKeyFactory)
-	ctx.RegisterModuleType("apex_defaults", defaultsFactory)
-	ctx.RegisterModuleType("prebuilt_apex", PrebuiltFactory)
-	ctx.RegisterModuleType("override_apex", overrideApexFactory)
-	ctx.RegisterModuleType("apex_set", apexSetFactory)
+	registerApexBuildComponents(ctx)
+	registerApexKeyBuildComponents(ctx)
 
 	ctx.PreArchMutators(android.RegisterDefaultsPreArchMutators)
 	ctx.PreArchMutators(android.RegisterComponentsMutator)
-	ctx.PostDepsMutators(android.RegisterOverridePostDepsMutators)
 
 	android.RegisterPrebuiltMutators(ctx)
 
@@ -246,8 +242,13 @@ func testApexContext(_ *testing.T, bp string, handlers ...testCustomizer) (*andr
 	ctx.PreArchMutators(android.RegisterVisibilityRuleGatherer)
 	ctx.PostDepsMutators(android.RegisterVisibilityRuleEnforcer)
 
+	// These must come after prebuilts and visibility rules to match runtime.
+	ctx.PostDepsMutators(android.RegisterOverridePostDepsMutators)
+
+	// These must come after override rules to match the runtime.
 	cc.RegisterRequiredBuildComponentsForTest(ctx)
 	rust.RegisterRequiredBuildComponentsForTest(ctx)
+	java.RegisterRequiredBuildComponentsForTest(ctx)
 
 	ctx.RegisterModuleType("cc_test", cc.TestFactory)
 	ctx.RegisterModuleType("vndk_prebuilt_shared", cc.VndkPrebuiltSharedFactory)
@@ -256,19 +257,7 @@ func testApexContext(_ *testing.T, bp string, handlers ...testCustomizer) (*andr
 	ctx.RegisterModuleType("platform_compat_config", java.PlatformCompatConfigFactory)
 	ctx.RegisterModuleType("sh_binary", sh.ShBinaryFactory)
 	ctx.RegisterModuleType("filegroup", android.FileGroupFactory)
-	java.RegisterJavaBuildComponents(ctx)
-	java.RegisterSystemModulesBuildComponents(ctx)
-	java.RegisterAppBuildComponents(ctx)
-	java.RegisterAppImportBuildComponents(ctx)
-	java.RegisterAppSetBuildComponents(ctx)
-	java.RegisterRuntimeResourceOverlayBuildComponents(ctx)
-	java.RegisterSdkLibraryBuildComponents(ctx)
-	java.RegisterPrebuiltApisBuildComponents(ctx)
-	ctx.RegisterSingletonType("apex_keys_text", apexKeysTextFactory)
 	ctx.RegisterModuleType("bpf", bpf.BpfFactory)
-
-	ctx.PreDepsMutators(RegisterPreDepsMutators)
-	ctx.PostDepsMutators(RegisterPostDepsMutators)
 
 	ctx.Register()
 
@@ -361,7 +350,7 @@ func ensureListNotEmpty(t *testing.T, result []string) {
 
 // Minimal test
 func TestBasicApex(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex_defaults {
 			name: "myapex-defaults",
 			manifest: ":myapex.manifest",
@@ -382,6 +371,7 @@ func TestBasicApex(t *testing.T) {
 				"myjar",
 				"myjar_dex",
 			],
+			updatable: false,
 		}
 
 		apex {
@@ -482,6 +472,7 @@ func TestBasicApex(t *testing.T) {
 			binaries: ["foo"],
 			key: "myapex.key",
 			file_contexts: ":myapex-file_contexts",
+			updatable: false,
 		}
 
 		cc_library_shared {
@@ -569,7 +560,7 @@ func TestBasicApex(t *testing.T) {
 
 	// Make sure that Android.mk is created
 	ab := ctx.ModuleForTests("myapex", "android_common_myapex_image").Module().(*apexBundle)
-	data := android.AndroidMkDataForTest(t, config, "", ab)
+	data := android.AndroidMkDataForTest(t, ctx, ab)
 	var builder strings.Builder
 	data.Custom(&builder, ab.BaseModuleName(), "TARGET_", "", data)
 
@@ -665,7 +656,7 @@ func TestBasicApex(t *testing.T) {
 }
 
 func TestDefaults(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex_defaults {
 			name: "myapex-defaults",
 			key: "myapex.key",
@@ -675,6 +666,7 @@ func TestDefaults(t *testing.T) {
 			apps: ["AppFoo"],
 			rros: ["rro"],
 			bpfs: ["bpf"],
+			updatable: false,
 		}
 
 		prebuilt_etc {
@@ -739,10 +731,11 @@ func TestDefaults(t *testing.T) {
 }
 
 func TestApexManifest(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
+			updatable: false,
 		}
 
 		apex_key {
@@ -760,12 +753,13 @@ func TestApexManifest(t *testing.T) {
 }
 
 func TestBasicZipApex(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			payload_type: "zip",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -810,11 +804,12 @@ func TestBasicZipApex(t *testing.T) {
 }
 
 func TestApexWithStubs(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib", "mylib3"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -904,7 +899,7 @@ func TestApexWithStubs(t *testing.T) {
 
 func TestApexWithStubsWithMinSdkVersion(t *testing.T) {
 	t.Parallel()
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
@@ -977,8 +972,8 @@ func TestApexWithStubsWithMinSdkVersion(t *testing.T) {
 
 	mylibLdFlags := ctx.ModuleForTests("mylib", "android_arm64_armv8-a_shared_apex29").Rule("ld").Args["libFlags"]
 
-	// Ensure that mylib is linking with the version 29 stubs for mylib2
-	ensureContains(t, mylibLdFlags, "mylib2/android_arm64_armv8-a_shared_29/mylib2.so")
+	// Ensure that mylib is linking with the latest version of stub for mylib2
+	ensureContains(t, mylibLdFlags, "mylib2/android_arm64_armv8-a_shared_current/mylib2.so")
 	// ... and not linking to the non-stub (impl) variant of mylib2
 	ensureNotContains(t, mylibLdFlags, "mylib2/android_arm64_armv8-a_shared/mylib2.so")
 
@@ -1001,12 +996,87 @@ func TestApexWithStubsWithMinSdkVersion(t *testing.T) {
 	})
 }
 
+func TestApex_PlatformUsesLatestStubFromApex(t *testing.T) {
+	t.Parallel()
+	//   myapex (Z)
+	//      mylib -----------------.
+	//                             |
+	//   otherapex (29)            |
+	//      libstub's versions: 29 Z current
+	//                                  |
+	//   <platform>                     |
+	//      libplatform ----------------'
+	ctx := testApex(t, `
+		apex {
+			name: "myapex",
+			key: "myapex.key",
+			native_shared_libs: ["mylib"],
+			min_sdk_version: "Z", // non-final
+		}
+
+		cc_library {
+			name: "mylib",
+			srcs: ["mylib.cpp"],
+			shared_libs: ["libstub"],
+			apex_available: ["myapex"],
+			min_sdk_version: "Z",
+		}
+
+		apex_key {
+			name: "myapex.key",
+			public_key: "testkey.avbpubkey",
+			private_key: "testkey.pem",
+		}
+
+		apex {
+			name: "otherapex",
+			key: "myapex.key",
+			native_shared_libs: ["libstub"],
+			min_sdk_version: "29",
+		}
+
+		cc_library {
+			name: "libstub",
+			srcs: ["mylib.cpp"],
+			stubs: {
+				versions: ["29", "Z", "current"],
+			},
+			apex_available: ["otherapex"],
+			min_sdk_version: "29",
+		}
+
+		// platform module depending on libstub from otherapex should use the latest stub("current")
+		cc_library {
+			name: "libplatform",
+			srcs: ["mylib.cpp"],
+			shared_libs: ["libstub"],
+		}
+	`, func(fs map[string][]byte, config android.Config) {
+		config.TestProductVariables.Platform_sdk_codename = proptools.StringPtr("Z")
+		config.TestProductVariables.Platform_sdk_final = proptools.BoolPtr(false)
+		config.TestProductVariables.Platform_version_active_codenames = []string{"Z"}
+	})
+
+	// Ensure that mylib from myapex is built against the latest stub (current)
+	mylibCflags := ctx.ModuleForTests("mylib", "android_arm64_armv8-a_static_apex10000").Rule("cc").Args["cFlags"]
+	ensureContains(t, mylibCflags, "-D__LIBSTUB_API__=10000 ")
+	mylibLdflags := ctx.ModuleForTests("mylib", "android_arm64_armv8-a_shared_apex10000").Rule("ld").Args["libFlags"]
+	ensureContains(t, mylibLdflags, "libstub/android_arm64_armv8-a_shared_current/libstub.so ")
+
+	// Ensure that libplatform is built against latest stub ("current") of mylib3 from the apex
+	libplatformCflags := ctx.ModuleForTests("libplatform", "android_arm64_armv8-a_static").Rule("cc").Args["cFlags"]
+	ensureContains(t, libplatformCflags, "-D__LIBSTUB_API__=10000 ") // "current" maps to 10000
+	libplatformLdflags := ctx.ModuleForTests("libplatform", "android_arm64_armv8-a_shared").Rule("ld").Args["libFlags"]
+	ensureContains(t, libplatformLdflags, "libstub/android_arm64_armv8-a_shared_current/libstub.so ")
+}
+
 func TestApexWithExplicitStubsDependency(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex2",
 			key: "myapex2.key",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -1097,11 +1167,12 @@ func TestApexWithRuntimeLibsDependency(t *testing.T) {
 			    |
 			    `------> libbar
 	*/
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -1158,12 +1229,13 @@ func TestApexWithRuntimeLibsDependency(t *testing.T) {
 }
 
 func TestRuntimeApexShouldInstallHwasanIfLibcDependsOnIt(t *testing.T) {
-	ctx, _ := testApex(t, "", func(fs map[string][]byte, config android.Config) {
+	ctx := testApex(t, "", func(fs map[string][]byte, config android.Config) {
 		bp := `
 		apex {
 			name: "com.android.runtime",
 			key: "com.android.runtime.key",
 			native_shared_libs: ["libc"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -1221,12 +1293,13 @@ func TestRuntimeApexShouldInstallHwasanIfLibcDependsOnIt(t *testing.T) {
 }
 
 func TestRuntimeApexShouldInstallHwasanIfHwaddressSanitized(t *testing.T) {
-	ctx, _ := testApex(t, "", func(fs map[string][]byte, config android.Config) {
+	ctx := testApex(t, "", func(fs map[string][]byte, config android.Config) {
 		bp := `
 		apex {
 			name: "com.android.runtime",
 			key: "com.android.runtime.key",
 			native_shared_libs: ["libc"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -1290,28 +1363,29 @@ func TestApexDependsOnLLNDKTransitively(t *testing.T) {
 		shouldNotLink []string
 	}{
 		{
-			name:          "should link to the latest",
+			name:          "unspecified version links to the latest",
 			minSdkVersion: "",
 			apexVariant:   "apex10000",
 			shouldLink:    "30",
 			shouldNotLink: []string{"29"},
 		},
 		{
-			name:          "should link to llndk#29",
+			name:          "always use the latest",
 			minSdkVersion: "min_sdk_version: \"29\",",
 			apexVariant:   "apex29",
-			shouldLink:    "29",
-			shouldNotLink: []string{"30"},
+			shouldLink:    "30",
+			shouldNotLink: []string{"29"},
 		},
 	}
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, _ := testApex(t, `
+			ctx := testApex(t, `
 			apex {
 				name: "myapex",
 				key: "myapex.key",
 				use_vendor: true,
 				native_shared_libs: ["mylib"],
+				updatable: false,
 				`+tc.minSdkVersion+`
 			}
 
@@ -1372,11 +1446,12 @@ func TestApexDependsOnLLNDKTransitively(t *testing.T) {
 }
 
 func TestApexWithSystemLibsStubs(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib", "mylib_shared", "libdl", "libm"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -1463,11 +1538,11 @@ func TestApexWithSystemLibsStubs(t *testing.T) {
 }
 
 func TestApexMinSdkVersion_NativeModulesShouldBeBuiltAgainstStubs(t *testing.T) {
-	// there are three links between liba --> libz
-	// 1) myapex -> libx -> liba -> libz    : this should be #29 link, but fallback to #28
+	// there are three links between liba --> libz.
+	// 1) myapex -> libx -> liba -> libz    : this should be #30 link
 	// 2) otherapex -> liby -> liba -> libz : this should be #30 link
 	// 3) (platform) -> liba -> libz        : this should be non-stub link
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
@@ -1538,9 +1613,9 @@ func TestApexMinSdkVersion_NativeModulesShouldBeBuiltAgainstStubs(t *testing.T) 
 	}
 	// platform liba is linked to non-stub version
 	expectLink("liba", "shared", "libz", "shared")
-	// liba in myapex is linked to #28
-	expectLink("liba", "shared_apex29", "libz", "shared_28")
-	expectNoLink("liba", "shared_apex29", "libz", "shared_30")
+	// liba in myapex is linked to #30
+	expectLink("liba", "shared_apex29", "libz", "shared_30")
+	expectNoLink("liba", "shared_apex29", "libz", "shared_28")
 	expectNoLink("liba", "shared_apex29", "libz", "shared")
 	// liba in otherapex is linked to #30
 	expectLink("liba", "shared_apex30", "libz", "shared_30")
@@ -1549,7 +1624,7 @@ func TestApexMinSdkVersion_NativeModulesShouldBeBuiltAgainstStubs(t *testing.T) 
 }
 
 func TestApexMinSdkVersion_SupportsCodeNames(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
@@ -1598,11 +1673,12 @@ func TestApexMinSdkVersion_SupportsCodeNames(t *testing.T) {
 }
 
 func TestApexMinSdkVersion_DefaultsToLatest(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["libx"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -1643,11 +1719,12 @@ func TestApexMinSdkVersion_DefaultsToLatest(t *testing.T) {
 }
 
 func TestPlatformUsesLatestStubsFromApexes(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["libx"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -1690,7 +1767,7 @@ func TestPlatformUsesLatestStubsFromApexes(t *testing.T) {
 }
 
 func TestQApexesUseLatestStubsInBundledBuildsAndHWASAN(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
@@ -1729,7 +1806,7 @@ func TestQApexesUseLatestStubsInBundledBuildsAndHWASAN(t *testing.T) {
 }
 
 func TestQTargetApexUsesStaticUnwinder(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
@@ -1752,45 +1829,10 @@ func TestQTargetApexUsesStaticUnwinder(t *testing.T) {
 
 	// ensure apex variant of c++ is linked with static unwinder
 	cm := ctx.ModuleForTests("libc++", "android_arm64_armv8-a_shared_apex29").Module().(*cc.Module)
-	ensureListContains(t, cm.Properties.AndroidMkStaticLibs, "libgcc_stripped")
+	ensureListContains(t, cm.Properties.AndroidMkStaticLibs, "libunwind")
 	// note that platform variant is not.
 	cm = ctx.ModuleForTests("libc++", "android_arm64_armv8-a_shared").Module().(*cc.Module)
-	ensureListNotContains(t, cm.Properties.AndroidMkStaticLibs, "libgcc_stripped")
-}
-
-func TestApexMinSdkVersion_ErrorIfIncompatibleStubs(t *testing.T) {
-	testApexError(t, `"libz" .*: not found a version\(<=29\)`, `
-		apex {
-			name: "myapex",
-			key: "myapex.key",
-			native_shared_libs: ["libx"],
-			min_sdk_version: "29",
-		}
-
-		apex_key {
-			name: "myapex.key",
-			public_key: "testkey.avbpubkey",
-			private_key: "testkey.pem",
-		}
-
-		cc_library {
-			name: "libx",
-			shared_libs: ["libz"],
-			system_shared_libs: [],
-			stl: "none",
-			apex_available: [ "myapex" ],
-			min_sdk_version: "29",
-		}
-
-		cc_library {
-			name: "libz",
-			system_shared_libs: [],
-			stl: "none",
-			stubs: {
-				versions: ["30"],
-			},
-		}
-	`)
+	ensureListNotContains(t, cm.Properties.AndroidMkStaticLibs, "libunwind")
 }
 
 func TestApexMinSdkVersion_ErrorIfIncompatibleVersion(t *testing.T) {
@@ -1909,6 +1951,7 @@ func TestJavaStableSdkVersion(t *testing.T) {
 					name: "myapex",
 					java_libs: ["myjar"],
 					key: "myapex.key",
+					updatable: false,
 				}
 				apex_key {
 					name: "myapex.key",
@@ -1972,7 +2015,7 @@ func TestJavaStableSdkVersion(t *testing.T) {
 		},
 		{
 			name:          "Updatable apex with non-stable transitive dep",
-			expectedError: "compiles against Android API, but dependency \"transitive-jar\" is compiling against non-public Android API.",
+			expectedError: "compiles against Android API, but dependency \"transitive-jar\" is compiling against private API.",
 			bp: `
 				apex {
 					name: "myapex",
@@ -2090,7 +2133,7 @@ func TestApexMinSdkVersion_ErrorIfDepIsNewer_Java(t *testing.T) {
 }
 
 func TestApexMinSdkVersion_OkayEvenWhenDepIsNewer_IfItSatisfiesApexMinSdkVersion(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
@@ -2104,7 +2147,7 @@ func TestApexMinSdkVersion_OkayEvenWhenDepIsNewer_IfItSatisfiesApexMinSdkVersion
 			private_key: "testkey.pem",
 		}
 
-		// mylib in myapex will link to mylib2#29
+		// mylib in myapex will link to mylib2#30
 		// mylib in otherapex will link to mylib2(non-stub) in otherapex as well
 		cc_library {
 			name: "mylib",
@@ -2138,12 +2181,80 @@ func TestApexMinSdkVersion_OkayEvenWhenDepIsNewer_IfItSatisfiesApexMinSdkVersion
 		libFlags := ld.Args["libFlags"]
 		ensureContains(t, libFlags, "android_arm64_armv8-a_"+to_variant+"/"+to+".so")
 	}
-	expectLink("mylib", "shared_apex29", "mylib2", "shared_29")
+	expectLink("mylib", "shared_apex29", "mylib2", "shared_30")
 	expectLink("mylib", "shared_apex30", "mylib2", "shared_apex30")
 }
 
+func TestApexMinSdkVersion_WorksWithSdkCodename(t *testing.T) {
+	withSAsActiveCodeNames := func(fs map[string][]byte, config android.Config) {
+		config.TestProductVariables.Platform_sdk_codename = proptools.StringPtr("S")
+		config.TestProductVariables.Platform_version_active_codenames = []string{"S"}
+	}
+	testApexError(t, `libbar.*: should support min_sdk_version\(S\)`, `
+		apex {
+			name: "myapex",
+			key: "myapex.key",
+			native_shared_libs: ["libfoo"],
+			min_sdk_version: "S",
+		}
+		apex_key {
+			name: "myapex.key",
+			public_key: "testkey.avbpubkey",
+			private_key: "testkey.pem",
+		}
+		cc_library {
+			name: "libfoo",
+			shared_libs: ["libbar"],
+			apex_available: ["myapex"],
+			min_sdk_version: "29",
+		}
+		cc_library {
+			name: "libbar",
+			apex_available: ["myapex"],
+		}
+	`, withSAsActiveCodeNames)
+}
+
+func TestApexMinSdkVersion_WorksWithActiveCodenames(t *testing.T) {
+	withSAsActiveCodeNames := func(fs map[string][]byte, config android.Config) {
+		config.TestProductVariables.Platform_sdk_codename = proptools.StringPtr("S")
+		config.TestProductVariables.Platform_version_active_codenames = []string{"S", "T"}
+	}
+	ctx := testApex(t, `
+		apex {
+			name: "myapex",
+			key: "myapex.key",
+			native_shared_libs: ["libfoo"],
+			min_sdk_version: "S",
+		}
+		apex_key {
+			name: "myapex.key",
+			public_key: "testkey.avbpubkey",
+			private_key: "testkey.pem",
+		}
+		cc_library {
+			name: "libfoo",
+			shared_libs: ["libbar"],
+			apex_available: ["myapex"],
+			min_sdk_version: "S",
+		}
+		cc_library {
+			name: "libbar",
+			stubs: {
+				symbol_file: "libbar.map.txt",
+				versions: ["30", "S", "T"],
+			},
+		}
+	`, withSAsActiveCodeNames)
+
+	// ensure libfoo is linked with "S" version of libbar stub
+	libfoo := ctx.ModuleForTests("libfoo", "android_arm64_armv8-a_shared_apex10000")
+	libFlags := libfoo.Rule("ld").Args["libFlags"]
+	ensureContains(t, libFlags, "android_arm64_armv8-a_shared_T/libbar.so")
+}
+
 func TestFilesInSubDir(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
@@ -2151,6 +2262,7 @@ func TestFilesInSubDir(t *testing.T) {
 			binaries: ["mybin"],
 			prebuilts: ["myetc"],
 			compile_multilib: "both",
+			updatable: false,
 		}
 
 		apex_key {
@@ -2205,7 +2317,7 @@ func TestFilesInSubDir(t *testing.T) {
 }
 
 func TestFilesInSubDirWhenNativeBridgeEnabled(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
@@ -2217,6 +2329,7 @@ func TestFilesInSubDirWhenNativeBridgeEnabled(t *testing.T) {
 			},
 			compile_multilib: "both",
 			native_bridge_supported: true,
+			updatable: false,
 		}
 
 		apex_key {
@@ -2263,12 +2376,13 @@ func TestFilesInSubDirWhenNativeBridgeEnabled(t *testing.T) {
 }
 
 func TestUseVendor(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
 			use_vendor: true,
+			updatable: false,
 		}
 
 		apex_key {
@@ -2337,6 +2451,7 @@ func TestUseVendorNotAllowedForSystemApexes(t *testing.T) {
 			name: "myapex",
 			key: "myapex.key",
 			use_vendor: true,
+			updatable: false,
 		}
 		apex_key {
 			name: "myapex.key",
@@ -2355,6 +2470,7 @@ func TestUseVendorFailsIfNotVendorAvailable(t *testing.T) {
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
 			use_vendor: true,
+			updatable: false,
 		}
 
 		apex_key {
@@ -2373,12 +2489,13 @@ func TestUseVendorFailsIfNotVendorAvailable(t *testing.T) {
 }
 
 func TestVendorApex(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			binaries: ["mybin"],
 			vendor: true,
+			updatable: false,
 		}
 		apex_key {
 			name: "myapex.key",
@@ -2404,13 +2521,14 @@ func TestVendorApex(t *testing.T) {
 	})
 
 	apexBundle := ctx.ModuleForTests("myapex", "android_common_myapex_image").Module().(*apexBundle)
-	data := android.AndroidMkDataForTest(t, config, "", apexBundle)
+	data := android.AndroidMkDataForTest(t, ctx, apexBundle)
 	name := apexBundle.BaseModuleName()
 	prefix := "TARGET_"
 	var builder strings.Builder
 	data.Custom(&builder, name, prefix, "", data)
 	androidMk := builder.String()
-	ensureContains(t, androidMk, `LOCAL_MODULE_PATH := /tmp/target/product/test_device/vendor/apex`)
+	installPath := path.Join(buildDir, "../target/product/test_device/vendor/apex")
+	ensureContains(t, androidMk, "LOCAL_MODULE_PATH := "+installPath)
 
 	apexManifestRule := ctx.ModuleForTests("myapex", "android_common_myapex_image").Rule("apexManifestRule")
 	requireNativeLibs := names(apexManifestRule.Args["requireNativeLibs"])
@@ -2418,13 +2536,14 @@ func TestVendorApex(t *testing.T) {
 }
 
 func TestVendorApex_use_vndk_as_stable(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			binaries: ["mybin"],
 			vendor: true,
 			use_vndk_as_stable: true,
+			updatable: false,
 		}
 		apex_key {
 			name: "myapex.key",
@@ -2481,11 +2600,12 @@ func TestApex_withPrebuiltFirmware(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, _ := testApex(t, `
+			ctx := testApex(t, `
 				apex {
 					name: "myapex",
 					key: "myapex.key",
 					prebuilts: ["myfirmware"],
+					updatable: false,
 					`+tc.additionalProp+`
 				}
 				apex_key {
@@ -2508,12 +2628,13 @@ func TestApex_withPrebuiltFirmware(t *testing.T) {
 }
 
 func TestAndroidMk_UseVendorRequired(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			use_vendor: true,
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -2532,7 +2653,7 @@ func TestAndroidMk_UseVendorRequired(t *testing.T) {
 	})
 
 	apexBundle := ctx.ModuleForTests("myapex", "android_common_myapex_image").Module().(*apexBundle)
-	data := android.AndroidMkDataForTest(t, config, "", apexBundle)
+	data := android.AndroidMkDataForTest(t, ctx, apexBundle)
 	name := apexBundle.BaseModuleName()
 	prefix := "TARGET_"
 	var builder strings.Builder
@@ -2542,12 +2663,13 @@ func TestAndroidMk_UseVendorRequired(t *testing.T) {
 }
 
 func TestAndroidMk_VendorApexRequired(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			vendor: true,
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -2563,7 +2685,7 @@ func TestAndroidMk_VendorApexRequired(t *testing.T) {
 	`)
 
 	apexBundle := ctx.ModuleForTests("myapex", "android_common_myapex_image").Module().(*apexBundle)
-	data := android.AndroidMkDataForTest(t, config, "", apexBundle)
+	data := android.AndroidMkDataForTest(t, ctx, apexBundle)
 	name := apexBundle.BaseModuleName()
 	prefix := "TARGET_"
 	var builder strings.Builder
@@ -2573,12 +2695,13 @@ func TestAndroidMk_VendorApexRequired(t *testing.T) {
 }
 
 func TestAndroidMkWritesCommonProperties(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			vintf_fragments: ["fragment.xml"],
 			init_rc: ["init.rc"],
+			updatable: false,
 		}
 		apex_key {
 			name: "myapex.key",
@@ -2591,7 +2714,7 @@ func TestAndroidMkWritesCommonProperties(t *testing.T) {
 	`)
 
 	apexBundle := ctx.ModuleForTests("myapex", "android_common_myapex_image").Module().(*apexBundle)
-	data := android.AndroidMkDataForTest(t, config, "", apexBundle)
+	data := android.AndroidMkDataForTest(t, ctx, apexBundle)
 	name := apexBundle.BaseModuleName()
 	prefix := "TARGET_"
 	var builder strings.Builder
@@ -2602,11 +2725,12 @@ func TestAndroidMkWritesCommonProperties(t *testing.T) {
 }
 
 func TestStaticLinking(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -2646,13 +2770,14 @@ func TestStaticLinking(t *testing.T) {
 }
 
 func TestKeys(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex_keytest",
 			key: "myapex.key",
 			certificate: ":myapex.certificate",
 			native_shared_libs: ["mylib"],
 			file_contexts: ":myapex-file_contexts",
+			updatable: false,
 		}
 
 		cc_library {
@@ -2703,10 +2828,11 @@ func TestKeys(t *testing.T) {
 
 func TestCertificate(t *testing.T) {
 	t.Run("if unspecified, it defaults to DefaultAppCertificate", func(t *testing.T) {
-		ctx, _ := testApex(t, `
+		ctx := testApex(t, `
 			apex {
 				name: "myapex",
 				key: "myapex.key",
+				updatable: false,
 			}
 			apex_key {
 				name: "myapex.key",
@@ -2720,11 +2846,12 @@ func TestCertificate(t *testing.T) {
 		}
 	})
 	t.Run("override when unspecified", func(t *testing.T) {
-		ctx, _ := testApex(t, `
+		ctx := testApex(t, `
 			apex {
 				name: "myapex_keytest",
 				key: "myapex.key",
 				file_contexts: ":myapex-file_contexts",
+				updatable: false,
 			}
 			apex_key {
 				name: "myapex.key",
@@ -2742,11 +2869,12 @@ func TestCertificate(t *testing.T) {
 		}
 	})
 	t.Run("if specified as :module, it respects the prop", func(t *testing.T) {
-		ctx, _ := testApex(t, `
+		ctx := testApex(t, `
 			apex {
 				name: "myapex",
 				key: "myapex.key",
 				certificate: ":myapex.certificate",
+				updatable: false,
 			}
 			apex_key {
 				name: "myapex.key",
@@ -2764,12 +2892,13 @@ func TestCertificate(t *testing.T) {
 		}
 	})
 	t.Run("override when specifiec as <:module>", func(t *testing.T) {
-		ctx, _ := testApex(t, `
+		ctx := testApex(t, `
 			apex {
 				name: "myapex_keytest",
 				key: "myapex.key",
 				file_contexts: ":myapex-file_contexts",
 				certificate: ":myapex.certificate",
+				updatable: false,
 			}
 			apex_key {
 				name: "myapex.key",
@@ -2787,11 +2916,12 @@ func TestCertificate(t *testing.T) {
 		}
 	})
 	t.Run("if specified as name, finds it from DefaultDevKeyDir", func(t *testing.T) {
-		ctx, _ := testApex(t, `
+		ctx := testApex(t, `
 			apex {
 				name: "myapex",
 				key: "myapex.key",
 				certificate: "testkey",
+				updatable: false,
 			}
 			apex_key {
 				name: "myapex.key",
@@ -2805,12 +2935,13 @@ func TestCertificate(t *testing.T) {
 		}
 	})
 	t.Run("override when specified as <name>", func(t *testing.T) {
-		ctx, _ := testApex(t, `
+		ctx := testApex(t, `
 			apex {
 				name: "myapex_keytest",
 				key: "myapex.key",
 				file_contexts: ":myapex-file_contexts",
 				certificate: "testkey",
+				updatable: false,
 			}
 			apex_key {
 				name: "myapex.key",
@@ -2830,11 +2961,12 @@ func TestCertificate(t *testing.T) {
 }
 
 func TestMacro(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib", "mylib2"],
+			updatable: false,
 		}
 
 		apex {
@@ -2957,11 +3089,12 @@ func TestMacro(t *testing.T) {
 }
 
 func TestHeaderLibsDependency(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -3100,14 +3233,15 @@ func ensureExactContents(t *testing.T, ctx *android.TestContext, moduleName, var
 }
 
 func TestVndkApexCurrent(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex_vndk {
-			name: "myapex",
-			key: "myapex.key",
+			name: "com.android.vndk.current",
+			key: "com.android.vndk.current.key",
+			updatable: false,
 		}
 
 		apex_key {
-			name: "myapex.key",
+			name: "com.android.vndk.current.key",
 			public_key: "testkey.avbpubkey",
 			private_key: "testkey.pem",
 		}
@@ -3122,7 +3256,7 @@ func TestVndkApexCurrent(t *testing.T) {
 			},
 			system_shared_libs: [],
 			stl: "none",
-			apex_available: [ "myapex" ],
+			apex_available: [ "com.android.vndk.current" ],
 		}
 
 		cc_library {
@@ -3136,11 +3270,11 @@ func TestVndkApexCurrent(t *testing.T) {
 			},
 			system_shared_libs: [],
 			stl: "none",
-			apex_available: [ "myapex" ],
+			apex_available: [ "com.android.vndk.current" ],
 		}
 	`+vndkLibrariesTxtFiles("current"))
 
-	ensureExactContents(t, ctx, "myapex", "android_common_image", []string{
+	ensureExactContents(t, ctx, "com.android.vndk.current", "android_common_image", []string{
 		"lib/libvndk.so",
 		"lib/libvndksp.so",
 		"lib/libc++.so",
@@ -3156,14 +3290,15 @@ func TestVndkApexCurrent(t *testing.T) {
 }
 
 func TestVndkApexWithPrebuilt(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex_vndk {
-			name: "myapex",
-			key: "myapex.key",
+			name: "com.android.vndk.current",
+			key: "com.android.vndk.current.key",
+			updatable: false,
 		}
 
 		apex_key {
-			name: "myapex.key",
+			name: "com.android.vndk.current.key",
 			public_key: "testkey.avbpubkey",
 			private_key: "testkey.pem",
 		}
@@ -3178,7 +3313,7 @@ func TestVndkApexWithPrebuilt(t *testing.T) {
 			},
 			system_shared_libs: [],
 			stl: "none",
-			apex_available: [ "myapex" ],
+			apex_available: [ "com.android.vndk.current" ],
 		}
 
 		cc_prebuilt_library_shared {
@@ -3197,15 +3332,14 @@ func TestVndkApexWithPrebuilt(t *testing.T) {
 			},
 			system_shared_libs: [],
 			stl: "none",
-			apex_available: [ "myapex" ],
+			apex_available: [ "com.android.vndk.current" ],
 		}
 		`+vndkLibrariesTxtFiles("current"),
 		withFiles(map[string][]byte{
 			"libvndk.so":     nil,
 			"libvndk.arm.so": nil,
 		}))
-
-	ensureExactContents(t, ctx, "myapex", "android_common_image", []string{
+	ensureExactContents(t, ctx, "com.android.vndk.current", "android_common_image", []string{
 		"lib/libvndk.so",
 		"lib/libvndk.arm.so",
 		"lib64/libvndk.so",
@@ -3240,12 +3374,13 @@ func vndkLibrariesTxtFiles(vers ...string) (result string) {
 }
 
 func TestVndkApexVersion(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex_vndk {
-			name: "myapex_v27",
+			name: "com.android.vndk.v27",
 			key: "myapex.key",
 			file_contexts: ":myapex-file_contexts",
 			vndk_version: "27",
+			updatable: false,
 		}
 
 		apex_key {
@@ -3271,7 +3406,7 @@ func TestVndkApexVersion(t *testing.T) {
 					srcs: ["libvndk27_arm64.so"],
 				},
 			},
-			apex_available: [ "myapex_v27" ],
+			apex_available: [ "com.android.vndk.v27" ],
 		}
 
 		vndk_prebuilt_shared {
@@ -3300,73 +3435,27 @@ func TestVndkApexVersion(t *testing.T) {
 			"libvndk27_x86_64.so": nil,
 		}))
 
-	ensureExactContents(t, ctx, "myapex_v27", "android_common_image", []string{
+	ensureExactContents(t, ctx, "com.android.vndk.v27", "android_common_image", []string{
 		"lib/libvndk27_arm.so",
 		"lib64/libvndk27_arm64.so",
 		"etc/*",
 	})
 }
 
-func TestVndkApexErrorWithDuplicateVersion(t *testing.T) {
-	testApexError(t, `module "myapex_v27.*" .*: vndk_version: 27 is already defined in "myapex_v27.*"`, `
-		apex_vndk {
-			name: "myapex_v27",
-			key: "myapex.key",
-			file_contexts: ":myapex-file_contexts",
-			vndk_version: "27",
-		}
-		apex_vndk {
-			name: "myapex_v27_other",
-			key: "myapex.key",
-			file_contexts: ":myapex-file_contexts",
-			vndk_version: "27",
-		}
-
-		apex_key {
-			name: "myapex.key",
-			public_key: "testkey.avbpubkey",
-			private_key: "testkey.pem",
-		}
-
-		cc_library {
-			name: "libvndk",
-			srcs: ["mylib.cpp"],
-			vendor_available: true,
-			product_available: true,
-			vndk: {
-				enabled: true,
-			},
-			system_shared_libs: [],
-			stl: "none",
-		}
-
-		vndk_prebuilt_shared {
-			name: "libvndk",
-			version: "27",
-			vendor_available: true,
-			product_available: true,
-			vndk: {
-				enabled: true,
-			},
-			srcs: ["libvndk.so"],
-		}
-	`, withFiles(map[string][]byte{
-		"libvndk.so": nil,
-	}))
-}
-
 func TestVndkApexNameRule(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex_vndk {
-			name: "myapex",
+			name: "com.android.vndk.current",
 			key: "myapex.key",
 			file_contexts: ":myapex-file_contexts",
+			updatable: false,
 		}
 		apex_vndk {
-			name: "myapex_v28",
+			name: "com.android.vndk.v28",
 			key: "myapex.key",
 			file_contexts: ":myapex-file_contexts",
 			vndk_version: "28",
+			updatable: false,
 		}
 		apex_key {
 			name: "myapex.key",
@@ -3382,20 +3471,21 @@ func TestVndkApexNameRule(t *testing.T) {
 		}
 	}
 
-	assertApexName("com.android.vndk.vVER", "myapex")
-	assertApexName("com.android.vndk.v28", "myapex_v28")
+	assertApexName("com.android.vndk.vVER", "com.android.vndk.current")
+	assertApexName("com.android.vndk.v28", "com.android.vndk.v28")
 }
 
 func TestVndkApexSkipsNativeBridgeSupportedModules(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex_vndk {
-			name: "myapex",
-			key: "myapex.key",
+			name: "com.android.vndk.current",
+			key: "com.android.vndk.current.key",
 			file_contexts: ":myapex-file_contexts",
+			updatable: false,
 		}
 
 		apex_key {
-			name: "myapex.key",
+			name: "com.android.vndk.current.key",
 			public_key: "testkey.avbpubkey",
 			private_key: "testkey.pem",
 		}
@@ -3412,11 +3502,12 @@ func TestVndkApexSkipsNativeBridgeSupportedModules(t *testing.T) {
 			},
 			system_shared_libs: [],
 			stl: "none",
-			apex_available: [ "myapex" ],
+			apex_available: [ "com.android.vndk.current" ],
 		}
-		`+vndkLibrariesTxtFiles("current"), withNativeBridgeEnabled)
+		`+vndkLibrariesTxtFiles("current"),
+		withNativeBridgeEnabled)
 
-	ensureExactContents(t, ctx, "myapex", "android_common_image", []string{
+	ensureExactContents(t, ctx, "com.android.vndk.current", "android_common_image", []string{
 		"lib/libvndk.so",
 		"lib64/libvndk.so",
 		"lib/libc++.so",
@@ -3426,16 +3517,16 @@ func TestVndkApexSkipsNativeBridgeSupportedModules(t *testing.T) {
 }
 
 func TestVndkApexDoesntSupportNativeBridgeSupported(t *testing.T) {
-	testApexError(t, `module "myapex" .*: native_bridge_supported: .* doesn't support native bridge binary`, `
+	testApexError(t, `module "com.android.vndk.current" .*: native_bridge_supported: .* doesn't support native bridge binary`, `
 		apex_vndk {
-			name: "myapex",
-			key: "myapex.key",
+			name: "com.android.vndk.current",
+			key: "com.android.vndk.current.key",
 			file_contexts: ":myapex-file_contexts",
 			native_bridge_supported: true,
 		}
 
 		apex_key {
-			name: "myapex.key",
+			name: "com.android.vndk.current.key",
 			public_key: "testkey.avbpubkey",
 			private_key: "testkey.pem",
 		}
@@ -3457,12 +3548,13 @@ func TestVndkApexDoesntSupportNativeBridgeSupported(t *testing.T) {
 }
 
 func TestVndkApexWithBinder32(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex_vndk {
-			name: "myapex_v27",
+			name: "com.android.vndk.v27",
 			key: "myapex.key",
 			file_contexts: ":myapex-file_contexts",
 			vndk_version: "27",
+			updatable: false,
 		}
 
 		apex_key {
@@ -3502,7 +3594,7 @@ func TestVndkApexWithBinder32(t *testing.T) {
 					srcs: ["libvndk27binder32.so"],
 				}
 			},
-			apex_available: [ "myapex_v27" ],
+			apex_available: [ "com.android.vndk.v27" ],
 		}
 		`+vndkLibrariesTxtFiles("27"),
 		withFiles(map[string][]byte{
@@ -3518,22 +3610,23 @@ func TestVndkApexWithBinder32(t *testing.T) {
 		}),
 	)
 
-	ensureExactContents(t, ctx, "myapex_v27", "android_common_image", []string{
+	ensureExactContents(t, ctx, "com.android.vndk.v27", "android_common_image", []string{
 		"lib/libvndk27binder32.so",
 		"etc/*",
 	})
 }
 
 func TestVndkApexShouldNotProvideNativeLibs(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex_vndk {
-			name: "myapex",
-			key: "myapex.key",
+			name: "com.android.vndk.current",
+			key: "com.android.vndk.current.key",
 			file_contexts: ":myapex-file_contexts",
+			updatable: false,
 		}
 
 		apex_key {
-			name: "myapex.key",
+			name: "com.android.vndk.current.key",
 			public_key: "testkey.avbpubkey",
 			private_key: "testkey.pem",
 		}
@@ -3554,19 +3647,20 @@ func TestVndkApexShouldNotProvideNativeLibs(t *testing.T) {
 		"libz.map.txt": nil,
 	}))
 
-	apexManifestRule := ctx.ModuleForTests("myapex", "android_common_image").Rule("apexManifestRule")
+	apexManifestRule := ctx.ModuleForTests("com.android.vndk.current", "android_common_image").Rule("apexManifestRule")
 	provideNativeLibs := names(apexManifestRule.Args["provideNativeLibs"])
 	ensureListEmpty(t, provideNativeLibs)
 }
 
 func TestDependenciesInApexManifest(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex_nodep",
 			key: "myapex.key",
 			native_shared_libs: ["lib_nodep"],
 			compile_multilib: "both",
 			file_contexts: ":myapex-file_contexts",
+			updatable: false,
 		}
 
 		apex {
@@ -3575,6 +3669,7 @@ func TestDependenciesInApexManifest(t *testing.T) {
 			native_shared_libs: ["lib_dep"],
 			compile_multilib: "both",
 			file_contexts: ":myapex-file_contexts",
+			updatable: false,
 		}
 
 		apex {
@@ -3583,6 +3678,7 @@ func TestDependenciesInApexManifest(t *testing.T) {
 			native_shared_libs: ["libfoo"],
 			compile_multilib: "both",
 			file_contexts: ":myapex-file_contexts",
+			updatable: false,
 		}
 
 		apex {
@@ -3591,6 +3687,7 @@ func TestDependenciesInApexManifest(t *testing.T) {
 			native_shared_libs: ["lib_dep", "libfoo"],
 			compile_multilib: "both",
 			file_contexts: ":myapex-file_contexts",
+			updatable: false,
 		}
 
 		apex_key {
@@ -3664,12 +3761,13 @@ func TestDependenciesInApexManifest(t *testing.T) {
 }
 
 func TestApexName(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			apex_name: "com.android.myapex",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -3697,7 +3795,7 @@ func TestApexName(t *testing.T) {
 	ensureContains(t, apexRule.Args["opt_flags"], "--do_not_check_keyname")
 
 	apexBundle := ctx.ModuleForTests("myapex", "android_common_myapex_image").Module().(*apexBundle)
-	data := android.AndroidMkDataForTest(t, config, "", apexBundle)
+	data := android.AndroidMkDataForTest(t, ctx, apexBundle)
 	name := apexBundle.BaseModuleName()
 	prefix := "TARGET_"
 	var builder strings.Builder
@@ -3708,11 +3806,12 @@ func TestApexName(t *testing.T) {
 }
 
 func TestNonTestApex(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib_common"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -3760,11 +3859,12 @@ func TestNonTestApex(t *testing.T) {
 }
 
 func TestTestApex(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex_test {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib_common_test"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -3808,10 +3908,11 @@ func TestTestApex(t *testing.T) {
 }
 
 func TestApexWithTarget(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
+			updatable: false,
 			multilib: {
 				first: {
 					native_shared_libs: ["mylib_common"],
@@ -3898,10 +3999,11 @@ func TestApexWithTarget(t *testing.T) {
 }
 
 func TestApexWithArch(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
+			updatable: false,
 			arch: {
 				arm64: {
 					native_shared_libs: ["mylib.arm64"],
@@ -3956,11 +4058,12 @@ func TestApexWithArch(t *testing.T) {
 }
 
 func TestApexWithShBinary(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			binaries: ["myscript"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -3996,10 +4099,11 @@ func TestApexInVariousPartition(t *testing.T) {
 	}
 	for _, tc := range testcases {
 		t.Run(tc.propName+":"+tc.parition, func(t *testing.T) {
-			ctx, _ := testApex(t, `
+			ctx := testApex(t, `
 				apex {
 					name: "myapex",
 					key: "myapex.key",
+					updatable: false,
 					`+tc.propName+`
 				}
 
@@ -4028,10 +4132,11 @@ func TestApexInVariousPartition(t *testing.T) {
 }
 
 func TestFileContexts_FindInDefaultLocationIfNotSet(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
+			updatable: false,
 		}
 
 		apex_key {
@@ -4051,6 +4156,7 @@ func TestFileContexts_ShouldBeUnderSystemSepolicyForSystemApexes(t *testing.T) {
 			name: "myapex",
 			key: "myapex.key",
 			file_contexts: "my_own_file_contexts",
+			updatable: false,
 		}
 
 		apex_key {
@@ -4070,6 +4176,7 @@ func TestFileContexts_ProductSpecificApexes(t *testing.T) {
 			key: "myapex.key",
 			product_specific: true,
 			file_contexts: "product_specific_file_contexts",
+			updatable: false,
 		}
 
 		apex_key {
@@ -4079,12 +4186,13 @@ func TestFileContexts_ProductSpecificApexes(t *testing.T) {
 		}
 	`)
 
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			product_specific: true,
 			file_contexts: "product_specific_file_contexts",
+			updatable: false,
 		}
 
 		apex_key {
@@ -4101,12 +4209,13 @@ func TestFileContexts_ProductSpecificApexes(t *testing.T) {
 }
 
 func TestFileContexts_SetViaFileGroup(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			product_specific: true,
 			file_contexts: ":my-file-contexts",
+			updatable: false,
 		}
 
 		apex_key {
@@ -4128,7 +4237,7 @@ func TestFileContexts_SetViaFileGroup(t *testing.T) {
 }
 
 func TestApexKeyFromOtherModule(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex_key {
 			name: "myapex.key",
 			public_key: ":my.avbpubkey",
@@ -4161,7 +4270,7 @@ func TestApexKeyFromOtherModule(t *testing.T) {
 }
 
 func TestPrebuilt(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		prebuilt_apex {
 			name: "myapex",
 			arch: {
@@ -4184,7 +4293,7 @@ func TestPrebuilt(t *testing.T) {
 }
 
 func TestPrebuiltFilenameOverride(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		prebuilt_apex {
 			name: "myapex",
 			src: "myapex-arm.apex",
@@ -4201,7 +4310,7 @@ func TestPrebuiltFilenameOverride(t *testing.T) {
 }
 
 func TestPrebuiltOverrides(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		prebuilt_apex {
 			name: "myapex.prebuilt",
 			src: "myapex-arm.apex",
@@ -4214,29 +4323,32 @@ func TestPrebuiltOverrides(t *testing.T) {
 	p := ctx.ModuleForTests("myapex.prebuilt", "android_common").Module().(*Prebuilt)
 
 	expected := []string{"myapex"}
-	actual := android.AndroidMkEntriesForTest(t, config, "", p)[0].EntryMap["LOCAL_OVERRIDES_MODULES"]
+	actual := android.AndroidMkEntriesForTest(t, ctx, p)[0].EntryMap["LOCAL_OVERRIDES_MODULES"]
 	if !reflect.DeepEqual(actual, expected) {
 		t.Errorf("Incorrect LOCAL_OVERRIDES_MODULES value '%s', expected '%s'", actual, expected)
 	}
 }
 
+// These tests verify that the prebuilt_apex/deapexer to java_import wiring allows for the
+// propagation of paths to dex implementation jars from the former to the latter.
 func TestPrebuiltExportDexImplementationJars(t *testing.T) {
 	transform := func(config *dexpreopt.GlobalConfig) {
-		config.BootJars = android.CreateTestConfiguredJarList([]string{"myapex:libfoo"})
+		// Empty transformation.
 	}
 
-	checkDexJarBuildPath := func(ctx *android.TestContext, name string) {
+	checkDexJarBuildPath := func(t *testing.T, ctx *android.TestContext, name string) {
 		// Make sure the import has been given the correct path to the dex jar.
-		p := ctx.ModuleForTests(name, "android_common_myapex").Module().(java.Dependency)
+		p := ctx.ModuleForTests(name, "android_common_myapex").Module().(java.UsesLibraryDependency)
 		dexJarBuildPath := p.DexJarBuildPath()
-		if expected, actual := ".intermediates/myapex.deapexer/android_common/deapexer/javalib/libfoo.jar", android.NormalizePathForTesting(dexJarBuildPath); actual != expected {
+		stem := android.RemoveOptionalPrebuiltPrefix(name)
+		if expected, actual := ".intermediates/myapex.deapexer/android_common/deapexer/javalib/"+stem+".jar", android.NormalizePathForTesting(dexJarBuildPath); actual != expected {
 			t.Errorf("Incorrect DexJarBuildPath value '%s', expected '%s'", actual, expected)
 		}
 	}
 
-	ensureNoSourceVariant := func(ctx *android.TestContext) {
+	ensureNoSourceVariant := func(t *testing.T, ctx *android.TestContext, name string) {
 		// Make sure that an apex variant is not created for the source module.
-		if expected, actual := []string{"android_common"}, ctx.ModuleVariantsForTests("libfoo"); !reflect.DeepEqual(expected, actual) {
+		if expected, actual := []string{"android_common"}, ctx.ModuleVariantsForTests(name); !reflect.DeepEqual(expected, actual) {
 			t.Errorf("invalid set of variants for %q: expected %q, found %q", "libfoo", expected, actual)
 		}
 	}
@@ -4253,19 +4365,42 @@ func TestPrebuiltExportDexImplementationJars(t *testing.T) {
 					src: "myapex-arm.apex",
 				},
 			},
-			exported_java_libs: ["libfoo"],
+			exported_java_libs: ["libfoo", "libbar"],
 		}
 
 		java_import {
 			name: "libfoo",
 			jars: ["libfoo.jar"],
 		}
+
+		java_sdk_library_import {
+			name: "libbar",
+			public: {
+				jars: ["libbar.jar"],
+			},
+		}
 	`
 
 		// Make sure that dexpreopt can access dex implementation files from the prebuilt.
 		ctx := testDexpreoptWithApexes(t, bp, "", transform)
 
-		checkDexJarBuildPath(ctx, "libfoo")
+		// Make sure that the deapexer has the correct input APEX.
+		deapexer := ctx.ModuleForTests("myapex.deapexer", "android_common")
+		rule := deapexer.Rule("deapexer")
+		if expected, actual := []string{"myapex-arm64.apex"}, android.NormalizePathsForTesting(rule.Implicits); !reflect.DeepEqual(expected, actual) {
+			t.Errorf("expected: %q, found: %q", expected, actual)
+		}
+
+		// Make sure that the prebuilt_apex has the correct input APEX.
+		prebuiltApex := ctx.ModuleForTests("myapex", "android_common")
+		rule = prebuiltApex.Rule("android/soong/android.Cp")
+		if expected, actual := "myapex-arm64.apex", android.NormalizePathForTesting(rule.Input); !reflect.DeepEqual(expected, actual) {
+			t.Errorf("expected: %q, found: %q", expected, actual)
+		}
+
+		checkDexJarBuildPath(t, ctx, "libfoo")
+
+		checkDexJarBuildPath(t, ctx, "libbar")
 	})
 
 	t.Run("prebuilt with source preferred", func(t *testing.T) {
@@ -4281,7 +4416,7 @@ func TestPrebuiltExportDexImplementationJars(t *testing.T) {
 					src: "myapex-arm.apex",
 				},
 			},
-			exported_java_libs: ["libfoo"],
+			exported_java_libs: ["libfoo", "libbar"],
 		}
 
 		java_import {
@@ -4292,20 +4427,35 @@ func TestPrebuiltExportDexImplementationJars(t *testing.T) {
 		java_library {
 			name: "libfoo",
 		}
+
+		java_sdk_library_import {
+			name: "libbar",
+			public: {
+				jars: ["libbar.jar"],
+			},
+		}
+
+		java_sdk_library {
+			name: "libbar",
+			srcs: ["foo/bar/MyClass.java"],
+			unsafe_ignore_missing_latest_api: true,
+		}
 	`
 
 		// Make sure that dexpreopt can access dex implementation files from the prebuilt.
 		ctx := testDexpreoptWithApexes(t, bp, "", transform)
 
-		checkDexJarBuildPath(ctx, "prebuilt_libfoo")
-		ensureNoSourceVariant(ctx)
+		checkDexJarBuildPath(t, ctx, "prebuilt_libfoo")
+		ensureNoSourceVariant(t, ctx, "libfoo")
+
+		checkDexJarBuildPath(t, ctx, "prebuilt_libbar")
+		ensureNoSourceVariant(t, ctx, "libbar")
 	})
 
 	t.Run("prebuilt preferred with source", func(t *testing.T) {
 		bp := `
 		prebuilt_apex {
 			name: "myapex",
-			prefer: true,
 			arch: {
 				arm64: {
 					src: "myapex-arm64.apex",
@@ -4314,32 +4464,368 @@ func TestPrebuiltExportDexImplementationJars(t *testing.T) {
 					src: "myapex-arm.apex",
 				},
 			},
-			exported_java_libs: ["libfoo"],
+			exported_java_libs: ["libfoo", "libbar"],
 		}
 
 		java_import {
 			name: "libfoo",
+			prefer: true,
 			jars: ["libfoo.jar"],
 		}
 
 		java_library {
 			name: "libfoo",
 		}
+
+		java_sdk_library_import {
+			name: "libbar",
+			prefer: true,
+			public: {
+				jars: ["libbar.jar"],
+			},
+		}
+
+		java_sdk_library {
+			name: "libbar",
+			srcs: ["foo/bar/MyClass.java"],
+			unsafe_ignore_missing_latest_api: true,
+		}
 	`
 
 		// Make sure that dexpreopt can access dex implementation files from the prebuilt.
 		ctx := testDexpreoptWithApexes(t, bp, "", transform)
 
-		checkDexJarBuildPath(ctx, "prebuilt_libfoo")
-		ensureNoSourceVariant(ctx)
+		checkDexJarBuildPath(t, ctx, "prebuilt_libfoo")
+		ensureNoSourceVariant(t, ctx, "libfoo")
+
+		checkDexJarBuildPath(t, ctx, "prebuilt_libbar")
+		ensureNoSourceVariant(t, ctx, "libbar")
+	})
+}
+
+func TestBootDexJarsFromSourcesAndPrebuilts(t *testing.T) {
+	transform := func(config *dexpreopt.GlobalConfig) {
+		config.BootJars = android.CreateTestConfiguredJarList([]string{"myapex:libfoo", "myapex:libbar"})
+	}
+
+	checkBootDexJarPath := func(t *testing.T, ctx *android.TestContext, stem string, bootDexJarPath string) {
+		t.Helper()
+		s := ctx.SingletonForTests("dex_bootjars")
+		foundLibfooJar := false
+		base := stem + ".jar"
+		for _, output := range s.AllOutputs() {
+			if filepath.Base(output) == base {
+				foundLibfooJar = true
+				buildRule := s.Output(output)
+				actual := android.NormalizePathForTesting(buildRule.Input)
+				if actual != bootDexJarPath {
+					t.Errorf("Incorrect boot dex jar path '%s', expected '%s'", actual, bootDexJarPath)
+				}
+			}
+		}
+		if !foundLibfooJar {
+			t.Errorf("Rule for libfoo.jar missing in dex_bootjars singleton outputs")
+		}
+	}
+
+	checkHiddenAPIIndexInputs := func(t *testing.T, ctx *android.TestContext, expectedInputs string) {
+		t.Helper()
+		hiddenAPIIndex := ctx.SingletonForTests("hiddenapi_index")
+		indexRule := hiddenAPIIndex.Rule("singleton-merged-hiddenapi-index")
+		java.CheckHiddenAPIRuleInputs(t, expectedInputs, indexRule)
+	}
+
+	t.Run("prebuilt only", func(t *testing.T) {
+		bp := `
+		prebuilt_apex {
+			name: "myapex",
+			arch: {
+				arm64: {
+					src: "myapex-arm64.apex",
+				},
+				arm: {
+					src: "myapex-arm.apex",
+				},
+			},
+			exported_java_libs: ["libfoo", "libbar"],
+		}
+
+		java_import {
+			name: "libfoo",
+			jars: ["libfoo.jar"],
+			apex_available: ["myapex"],
+		}
+
+		java_sdk_library_import {
+			name: "libbar",
+			public: {
+				jars: ["libbar.jar"],
+			},
+			apex_available: ["myapex"],
+		}
+	`
+
+		ctx := testDexpreoptWithApexes(t, bp, "", transform)
+		checkBootDexJarPath(t, ctx, "libfoo", ".intermediates/myapex.deapexer/android_common/deapexer/javalib/libfoo.jar")
+		checkBootDexJarPath(t, ctx, "libbar", ".intermediates/myapex.deapexer/android_common/deapexer/javalib/libbar.jar")
+
+		// Make sure that the dex file from the prebuilt_apex contributes to the hiddenapi index file.
+		checkHiddenAPIIndexInputs(t, ctx, `
+.intermediates/libbar/android_common_myapex/hiddenapi/index.csv
+.intermediates/libfoo/android_common_myapex/hiddenapi/index.csv
+`)
+	})
+
+	t.Run("prebuilt with source library preferred", func(t *testing.T) {
+		bp := `
+		prebuilt_apex {
+			name: "myapex",
+			arch: {
+				arm64: {
+					src: "myapex-arm64.apex",
+				},
+				arm: {
+					src: "myapex-arm.apex",
+				},
+			},
+			exported_java_libs: ["libfoo", "libbar"],
+		}
+
+		java_import {
+			name: "libfoo",
+			jars: ["libfoo.jar"],
+			apex_available: ["myapex"],
+		}
+
+		java_library {
+			name: "libfoo",
+			srcs: ["foo/bar/MyClass.java"],
+			apex_available: ["myapex"],
+		}
+
+		java_sdk_library_import {
+			name: "libbar",
+			public: {
+				jars: ["libbar.jar"],
+			},
+			apex_available: ["myapex"],
+		}
+
+		java_sdk_library {
+			name: "libbar",
+			srcs: ["foo/bar/MyClass.java"],
+			unsafe_ignore_missing_latest_api: true,
+			apex_available: ["myapex"],
+		}
+	`
+
+		// In this test the source (java_library) libfoo is active since the
+		// prebuilt (java_import) defaults to prefer:false. However the
+		// prebuilt_apex module always depends on the prebuilt, and so it doesn't
+		// find the dex boot jar in it. We either need to disable the source libfoo
+		// or make the prebuilt libfoo preferred.
+		testDexpreoptWithApexes(t, bp, "failed to find a dex jar path for module 'libfoo'", transform)
+	})
+
+	t.Run("prebuilt library preferred with source", func(t *testing.T) {
+		bp := `
+		prebuilt_apex {
+			name: "myapex",
+			arch: {
+				arm64: {
+					src: "myapex-arm64.apex",
+				},
+				arm: {
+					src: "myapex-arm.apex",
+				},
+			},
+			exported_java_libs: ["libfoo", "libbar"],
+		}
+
+		java_import {
+			name: "libfoo",
+			prefer: true,
+			jars: ["libfoo.jar"],
+			apex_available: ["myapex"],
+		}
+
+		java_library {
+			name: "libfoo",
+			srcs: ["foo/bar/MyClass.java"],
+			apex_available: ["myapex"],
+		}
+
+		java_sdk_library_import {
+			name: "libbar",
+			prefer: true,
+			public: {
+				jars: ["libbar.jar"],
+			},
+			apex_available: ["myapex"],
+		}
+
+		java_sdk_library {
+			name: "libbar",
+			srcs: ["foo/bar/MyClass.java"],
+			unsafe_ignore_missing_latest_api: true,
+			apex_available: ["myapex"],
+		}
+	`
+
+		ctx := testDexpreoptWithApexes(t, bp, "", transform)
+		checkBootDexJarPath(t, ctx, "libfoo", ".intermediates/myapex.deapexer/android_common/deapexer/javalib/libfoo.jar")
+		checkBootDexJarPath(t, ctx, "libbar", ".intermediates/myapex.deapexer/android_common/deapexer/javalib/libbar.jar")
+
+		// Make sure that the dex file from the prebuilt_apex contributes to the hiddenapi index file.
+		checkHiddenAPIIndexInputs(t, ctx, `
+.intermediates/prebuilt_libbar/android_common_myapex/hiddenapi/index.csv
+.intermediates/prebuilt_libfoo/android_common_myapex/hiddenapi/index.csv
+`)
+	})
+
+	t.Run("prebuilt with source apex preferred", func(t *testing.T) {
+		bp := `
+		apex {
+			name: "myapex",
+			key: "myapex.key",
+			java_libs: ["libfoo", "libbar"],
+			updatable: false,
+		}
+
+		apex_key {
+			name: "myapex.key",
+			public_key: "testkey.avbpubkey",
+			private_key: "testkey.pem",
+		}
+
+		prebuilt_apex {
+			name: "myapex",
+			arch: {
+				arm64: {
+					src: "myapex-arm64.apex",
+				},
+				arm: {
+					src: "myapex-arm.apex",
+				},
+			},
+			exported_java_libs: ["libfoo", "libbar"],
+		}
+
+		java_import {
+			name: "libfoo",
+			jars: ["libfoo.jar"],
+			apex_available: ["myapex"],
+		}
+
+		java_library {
+			name: "libfoo",
+			srcs: ["foo/bar/MyClass.java"],
+			apex_available: ["myapex"],
+		}
+
+		java_sdk_library_import {
+			name: "libbar",
+			public: {
+				jars: ["libbar.jar"],
+			},
+			apex_available: ["myapex"],
+		}
+
+		java_sdk_library {
+			name: "libbar",
+			srcs: ["foo/bar/MyClass.java"],
+			unsafe_ignore_missing_latest_api: true,
+			apex_available: ["myapex"],
+		}
+	`
+
+		ctx := testDexpreoptWithApexes(t, bp, "", transform)
+		checkBootDexJarPath(t, ctx, "libfoo", ".intermediates/libfoo/android_common_apex10000/hiddenapi/libfoo.jar")
+		checkBootDexJarPath(t, ctx, "libbar", ".intermediates/libbar/android_common_myapex/hiddenapi/libbar.jar")
+
+		// Make sure that the dex file from the prebuilt_apex contributes to the hiddenapi index file.
+		checkHiddenAPIIndexInputs(t, ctx, `
+.intermediates/libbar/android_common_myapex/hiddenapi/index.csv
+.intermediates/libfoo/android_common_apex10000/hiddenapi/index.csv
+`)
+	})
+
+	t.Run("prebuilt preferred with source apex disabled", func(t *testing.T) {
+		bp := `
+		apex {
+			name: "myapex",
+			enabled: false,
+			key: "myapex.key",
+			java_libs: ["libfoo"],
+		}
+
+		apex_key {
+			name: "myapex.key",
+			public_key: "testkey.avbpubkey",
+			private_key: "testkey.pem",
+		}
+
+		prebuilt_apex {
+			name: "myapex",
+			arch: {
+				arm64: {
+					src: "myapex-arm64.apex",
+				},
+				arm: {
+					src: "myapex-arm.apex",
+				},
+			},
+			exported_java_libs: ["libfoo", "libbar"],
+		}
+
+		java_import {
+			name: "libfoo",
+			prefer: true,
+			jars: ["libfoo.jar"],
+			apex_available: ["myapex"],
+		}
+
+		java_library {
+			name: "libfoo",
+			srcs: ["foo/bar/MyClass.java"],
+			apex_available: ["myapex"],
+		}
+
+		java_sdk_library_import {
+			name: "libbar",
+			prefer: true,
+			public: {
+				jars: ["libbar.jar"],
+			},
+			apex_available: ["myapex"],
+		}
+
+		java_sdk_library {
+			name: "libbar",
+			srcs: ["foo/bar/MyClass.java"],
+			unsafe_ignore_missing_latest_api: true,
+			apex_available: ["myapex"],
+		}
+	`
+
+		ctx := testDexpreoptWithApexes(t, bp, "", transform)
+		checkBootDexJarPath(t, ctx, "libfoo", ".intermediates/myapex.deapexer/android_common/deapexer/javalib/libfoo.jar")
+		checkBootDexJarPath(t, ctx, "libbar", ".intermediates/myapex.deapexer/android_common/deapexer/javalib/libbar.jar")
+
+		// Make sure that the dex file from the prebuilt_apex contributes to the hiddenapi index file.
+		checkHiddenAPIIndexInputs(t, ctx, `
+.intermediates/prebuilt_libbar/android_common_prebuilt_myapex/hiddenapi/index.csv
+.intermediates/prebuilt_libfoo/android_common_prebuilt_myapex/hiddenapi/index.csv
+`)
 	})
 }
 
 func TestApexWithTests(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex_test {
 			name: "myapex",
 			key: "myapex.key",
+			updatable: false,
 			tests: [
 				"mytest",
 				"mytests",
@@ -4424,7 +4910,7 @@ func TestApexWithTests(t *testing.T) {
 
 	// Ensure the module is correctly translated.
 	bundle := ctx.ModuleForTests("myapex", "android_common_myapex_image").Module().(*apexBundle)
-	data := android.AndroidMkDataForTest(t, config, "", bundle)
+	data := android.AndroidMkDataForTest(t, ctx, bundle)
 	name := bundle.BaseModuleName()
 	prefix := "TARGET_"
 	var builder strings.Builder
@@ -4439,7 +4925,7 @@ func TestApexWithTests(t *testing.T) {
 	ensureContains(t, androidMk, "LOCAL_MODULE := myapex\n")
 
 	flatBundle := ctx.ModuleForTests("myapex", "android_common_myapex_flattened").Module().(*apexBundle)
-	data = android.AndroidMkDataForTest(t, config, "", flatBundle)
+	data = android.AndroidMkDataForTest(t, ctx, flatBundle)
 	data.Custom(&builder, name, prefix, "", data)
 	flatAndroidMk := builder.String()
 	ensureContainsOnce(t, flatAndroidMk, "LOCAL_TEST_DATA := :baz :bar/baz\n")
@@ -4447,10 +4933,11 @@ func TestApexWithTests(t *testing.T) {
 }
 
 func TestInstallExtraFlattenedApexes(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
+			updatable: false,
 		}
 		apex_key {
 			name: "myapex.key",
@@ -4462,7 +4949,7 @@ func TestInstallExtraFlattenedApexes(t *testing.T) {
 	})
 	ab := ctx.ModuleForTests("myapex", "android_common_myapex_image").Module().(*apexBundle)
 	ensureListContains(t, ab.requiredDeps, "myapex.flattened")
-	mk := android.AndroidMkDataForTest(t, config, "", ab)
+	mk := android.AndroidMkDataForTest(t, ctx, ab)
 	var builder strings.Builder
 	mk.Custom(&builder, ab.Name(), "TARGET_", "", mk)
 	androidMk := builder.String()
@@ -4515,8 +5002,37 @@ func TestErrorsIfDepsAreNotEnabled(t *testing.T) {
 	`)
 }
 
+func TestApexWithJavaImport(t *testing.T) {
+	ctx := testApex(t, `
+		apex {
+			name: "myapex",
+			key: "myapex.key",
+			java_libs: ["myjavaimport"],
+			updatable: false,
+		}
+
+		apex_key {
+			name: "myapex.key",
+			public_key: "testkey.avbpubkey",
+			private_key: "testkey.pem",
+		}
+
+		java_import {
+			name: "myjavaimport",
+			apex_available: ["myapex"],
+			jars: ["my.jar"],
+			compile_dex: true,
+		}
+	`)
+
+	module := ctx.ModuleForTests("myapex", "android_common_myapex_image")
+	apexRule := module.Rule("apexRule")
+	copyCmds := apexRule.Args["copy_commands"]
+	ensureContains(t, copyCmds, "image.apex/javalib/myjavaimport.jar")
+}
+
 func TestApexWithApps(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
@@ -4524,6 +5040,7 @@ func TestApexWithApps(t *testing.T) {
 				"AppFoo",
 				"AppFooPriv",
 			],
+			updatable: false,
 		}
 
 		apex_key {
@@ -4594,7 +5111,7 @@ func TestApexWithApps(t *testing.T) {
 }
 
 func TestApexWithAppImports(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
@@ -4602,6 +5119,7 @@ func TestApexWithAppImports(t *testing.T) {
 				"AppFooPrebuilt",
 				"AppFooPrivPrebuilt",
 			],
+			updatable: false,
 		}
 
 		apex_key {
@@ -4642,13 +5160,14 @@ func TestApexWithAppImports(t *testing.T) {
 }
 
 func TestApexWithAppImportsPrefer(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			apps: [
 				"AppFoo",
 			],
+			updatable: false,
 		}
 
 		apex_key {
@@ -4683,13 +5202,14 @@ func TestApexWithAppImportsPrefer(t *testing.T) {
 }
 
 func TestApexWithTestHelperApp(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			apps: [
 				"TesterHelpAppFoo",
 			],
+			updatable: false,
 		}
 
 		apex_key {
@@ -4720,6 +5240,7 @@ func TestApexPropertiesShouldBeDefaultable(t *testing.T) {
 		name: "myapex",
 		key: "myapex.key",
 		native_shared_libs: ["libfoo"],
+		updatable: false,
 	}
 
 	apex_key {
@@ -4732,6 +5253,7 @@ func TestApexPropertiesShouldBeDefaultable(t *testing.T) {
 		name: "otherapex",
 		key: "myapex.key",
 		native_shared_libs: ["libfoo"],
+		updatable: false,
 	}
 
 	cc_defaults {
@@ -4754,6 +5276,7 @@ func TestApexAvailable_DirectDep(t *testing.T) {
 		name: "myapex",
 		key: "myapex.key",
 		native_shared_libs: ["libfoo"],
+		updatable: false,
 	}
 
 	apex_key {
@@ -4766,6 +5289,7 @@ func TestApexAvailable_DirectDep(t *testing.T) {
 		name: "otherapex",
 		key: "otherapex.key",
 		native_shared_libs: ["libfoo"],
+		updatable: false,
 	}
 
 	apex_key {
@@ -4784,7 +5308,7 @@ func TestApexAvailable_DirectDep(t *testing.T) {
 
 func TestApexAvailable_IndirectDep(t *testing.T) {
 	// libbbaz is an indirect dep
-	testApexError(t, `requires "libbaz" that doesn't list the APEX under 'apex_available'. Dependency path:
+	testApexError(t, `requires "libbaz" that doesn't list the APEX under 'apex_available'.\n\nDependency path:
 .*via tag apex\.dependencyTag.*name:sharedLib.*
 .*-> libfoo.*link:shared.*
 .*via tag cc\.libraryDependencyTag.*Kind:sharedLibraryDependency.*
@@ -4795,6 +5319,7 @@ func TestApexAvailable_IndirectDep(t *testing.T) {
 		name: "myapex",
 		key: "myapex.key",
 		native_shared_libs: ["libfoo"],
+		updatable: false,
 	}
 
 	apex_key {
@@ -4832,6 +5357,7 @@ func TestApexAvailable_InvalidApexName(t *testing.T) {
 		name: "myapex",
 		key: "myapex.key",
 		native_shared_libs: ["libfoo"],
+		updatable: false,
 	}
 
 	apex_key {
@@ -4852,6 +5378,7 @@ func TestApexAvailable_InvalidApexName(t *testing.T) {
 		name: "myapex",
 		key: "myapex.key",
 		native_shared_libs: ["libfoo", "libbar"],
+		updatable: false,
 	}
 
 	apex_key {
@@ -4886,11 +5413,12 @@ func TestApexAvailable_InvalidApexName(t *testing.T) {
 }
 
 func TestApexAvailable_CheckForPlatform(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 	apex {
 		name: "myapex",
 		key: "myapex.key",
 		native_shared_libs: ["libbar", "libbaz"],
+		updatable: false,
 	}
 
 	apex_key {
@@ -4948,11 +5476,12 @@ func TestApexAvailable_CheckForPlatform(t *testing.T) {
 }
 
 func TestApexAvailable_CreatedForApex(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 	apex {
 		name: "myapex",
 		key: "myapex.key",
 		native_shared_libs: ["libfoo"],
+		updatable: false,
 	}
 
 	apex_key {
@@ -4982,12 +5511,13 @@ func TestApexAvailable_CreatedForApex(t *testing.T) {
 }
 
 func TestOverrideApex(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			apps: ["app"],
 			overrides: ["oldapex"],
+			updatable: false,
 		}
 
 		override_apex {
@@ -5050,7 +5580,7 @@ func TestOverrideApex(t *testing.T) {
 	optFlags := apexRule.Args["opt_flags"]
 	ensureContains(t, optFlags, "--override_apk_package_name test.overridden.package")
 
-	data := android.AndroidMkDataForTest(t, config, "", apexBundle)
+	data := android.AndroidMkDataForTest(t, ctx, apexBundle)
 	var builder strings.Builder
 	data.Custom(&builder, name, "TARGET_", "", data)
 	androidMk := builder.String()
@@ -5065,7 +5595,7 @@ func TestOverrideApex(t *testing.T) {
 }
 
 func TestLegacyAndroid10Support(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
@@ -5125,11 +5655,12 @@ var filesForSdkLibrary = map[string][]byte{
 }
 
 func TestJavaSDKLibrary(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			java_libs: ["foo"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5162,11 +5693,12 @@ func TestJavaSDKLibrary(t *testing.T) {
 }
 
 func TestJavaSDKLibrary_WithinApex(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			java_libs: ["foo", "bar"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5214,11 +5746,12 @@ func TestJavaSDKLibrary_WithinApex(t *testing.T) {
 }
 
 func TestJavaSDKLibrary_CrossBoundary(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			java_libs: ["foo"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5264,7 +5797,7 @@ func TestJavaSDKLibrary_CrossBoundary(t *testing.T) {
 }
 
 func TestJavaSDKLibrary_ImportPreferred(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		prebuilt_apis {
 			name: "sdk",
 			api_dirs: ["100"],
@@ -5281,6 +5814,7 @@ func TestJavaSDKLibrary_ImportPreferred(t *testing.T) {
 			name: "myapex",
 			key: "myapex.key",
 			java_libs: ["foo", "bar"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5358,6 +5892,7 @@ func TestJavaSDKLibrary_ImportOnly(t *testing.T) {
 			name: "myapex",
 			key: "myapex.key",
 			java_libs: ["foo"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5379,12 +5914,13 @@ func TestJavaSDKLibrary_ImportOnly(t *testing.T) {
 }
 
 func TestCompatConfig(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			prebuilts: ["myjar-platform-compat-config"],
 			java_libs: ["myjar"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5418,6 +5954,7 @@ func TestRejectNonInstallableJavaLibrary(t *testing.T) {
 			name: "myapex",
 			key: "myapex.key",
 			java_libs: ["myjar"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5438,11 +5975,12 @@ func TestRejectNonInstallableJavaLibrary(t *testing.T) {
 }
 
 func TestCarryRequiredModuleNames(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5464,7 +6002,7 @@ func TestCarryRequiredModuleNames(t *testing.T) {
 	`)
 
 	apexBundle := ctx.ModuleForTests("myapex", "android_common_myapex_image").Module().(*apexBundle)
-	data := android.AndroidMkDataForTest(t, config, "", apexBundle)
+	data := android.AndroidMkDataForTest(t, ctx, apexBundle)
 	name := apexBundle.BaseModuleName()
 	prefix := "TARGET_"
 	var builder strings.Builder
@@ -5482,6 +6020,7 @@ func TestSymlinksFromApexToSystem(t *testing.T) {
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
 			java_libs: ["myjar"],
+			updatable: false,
 		}
 
 		apex {
@@ -5580,7 +6119,7 @@ func TestSymlinksFromApexToSystem(t *testing.T) {
 
 	// For unbundled build, symlink shouldn't exist regardless of whether an APEX
 	// is updatable or not
-	ctx, _ := testApex(t, bp, withUnbundledBuild)
+	ctx := testApex(t, bp, withUnbundledBuild)
 	files := getFiles(t, ctx, "myapex", "android_common_myapex_image")
 	ensureRealfileExists(t, files, "javalib/myjar.jar")
 	ensureRealfileExists(t, files, "lib64/mylib.so")
@@ -5592,7 +6131,7 @@ func TestSymlinksFromApexToSystem(t *testing.T) {
 	ensureRealfileExists(t, files, "lib64/myotherlib.so")
 
 	// For bundled build, symlink to the system for the non-updatable APEXes only
-	ctx, _ = testApex(t, bp)
+	ctx = testApex(t, bp)
 	files = getFiles(t, ctx, "myapex", "android_common_myapex_image")
 	ensureRealfileExists(t, files, "javalib/myjar.jar")
 	ensureRealfileExists(t, files, "lib64/mylib.so")
@@ -5605,11 +6144,12 @@ func TestSymlinksFromApexToSystem(t *testing.T) {
 }
 
 func TestSymlinksFromApexToSystemRequiredModuleNames(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5643,7 +6183,7 @@ func TestSymlinksFromApexToSystemRequiredModuleNames(t *testing.T) {
 	`)
 
 	apexBundle := ctx.ModuleForTests("myapex", "android_common_myapex_image").Module().(*apexBundle)
-	data := android.AndroidMkDataForTest(t, config, "", apexBundle)
+	data := android.AndroidMkDataForTest(t, ctx, apexBundle)
 	var builder strings.Builder
 	data.Custom(&builder, apexBundle.BaseModuleName(), "TARGET_", "", data)
 	androidMk := builder.String()
@@ -5652,15 +6192,16 @@ func TestSymlinksFromApexToSystemRequiredModuleNames(t *testing.T) {
 	ensureNotContains(t, androidMk, "LOCAL_MODULE := prebuilt_myotherlib.myapex\n")
 	ensureNotContains(t, androidMk, "LOCAL_MODULE := myotherlib.myapex\n")
 	// `myapex` should have `myotherlib` in its required line, not `prebuilt_myotherlib`
-	ensureContains(t, androidMk, "LOCAL_REQUIRED_MODULES += mylib.myapex myotherlib apex_manifest.pb.myapex apex_pubkey.myapex\n")
+	ensureContains(t, androidMk, "LOCAL_REQUIRED_MODULES += mylib.myapex:64 myotherlib:64 apex_manifest.pb.myapex apex_pubkey.myapex\n")
 }
 
 func TestApexWithJniLibs(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			jni_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5697,10 +6238,11 @@ func TestApexWithJniLibs(t *testing.T) {
 }
 
 func TestApexMutatorsDontRunIfDisabled(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
+			updatable: false,
 		}
 		apex_key {
 			name: "myapex.key",
@@ -5718,11 +6260,12 @@ func TestApexMutatorsDontRunIfDisabled(t *testing.T) {
 }
 
 func TestAppBundle(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			apps: ["AppFoo"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5748,11 +6291,12 @@ func TestAppBundle(t *testing.T) {
 }
 
 func TestAppSetBundle(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			apps: ["AppSet"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5780,7 +6324,7 @@ func TestAppSetBundle(t *testing.T) {
 }
 
 func TestAppSetBundlePrebuilt(t *testing.T) {
-	ctx, _ := testApex(t, "", func(fs map[string][]byte, config android.Config) {
+	ctx := testApex(t, "", func(fs map[string][]byte, config android.Config) {
 		bp := `
 		apex_set {
 			name: "myapex",
@@ -5842,7 +6386,7 @@ func testNoUpdatableJarsInBootImage(t *testing.T, errmsg string, transformDexpre
 			srcs: ["a.java"],
 			sdk_version: "current",
 			apex_available: [
-				"com.android.art.something",
+				"com.android.art.debug",
 			],
 			hostdex: true,
 		}
@@ -5859,6 +6403,7 @@ func testNoUpdatableJarsInBootImage(t *testing.T, errmsg string, transformDexpre
 			name: "some-non-updatable-apex",
 			key: "some-non-updatable-apex.key",
 			java_libs: ["some-non-updatable-apex-lib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -5870,15 +6415,15 @@ func testNoUpdatableJarsInBootImage(t *testing.T, errmsg string, transformDexpre
 		}
 
 		apex {
-			name: "com.android.art.something",
-			key: "com.android.art.something.key",
+			name: "com.android.art.debug",
+			key: "com.android.art.debug.key",
 			java_libs: ["some-art-lib"],
 			updatable: true,
 			min_sdk_version: "current",
 		}
 
 		apex_key {
-			name: "com.android.art.something.key",
+			name: "com.android.art.debug.key",
 		}
 
 		filegroup {
@@ -5904,7 +6449,6 @@ func testDexpreoptWithApexes(t *testing.T, bp, errmsg string, transformDexpreopt
 
 	bp += cc.GatherRequiredDepsForTest(android.Android)
 	bp += java.GatherRequiredDepsForTest()
-	bp += dexpreopt.BpToolModulesForTest()
 
 	fs := map[string][]byte{
 		"a.java":                             nil,
@@ -5912,13 +6456,17 @@ func testDexpreoptWithApexes(t *testing.T, bp, errmsg string, transformDexpreopt
 		"build/make/target/product/security": nil,
 		"apex_manifest.json":                 nil,
 		"AndroidManifest.xml":                nil,
-		"system/sepolicy/apex/some-updatable-apex-file_contexts":       nil,
-		"system/sepolicy/apex/some-non-updatable-apex-file_contexts":   nil,
-		"system/sepolicy/apex/com.android.art.something-file_contexts": nil,
-		"framework/aidl/a.aidl": nil,
+		"system/sepolicy/apex/myapex-file_contexts":                  nil,
+		"system/sepolicy/apex/some-updatable-apex-file_contexts":     nil,
+		"system/sepolicy/apex/some-non-updatable-apex-file_contexts": nil,
+		"system/sepolicy/apex/com.android.art.debug-file_contexts":   nil,
+		"framework/aidl/a.aidl":                                      nil,
 	}
 	cc.GatherRequiredFilesForTest(fs)
 
+	for k, v := range filesForSdkLibrary {
+		fs[k] = v
+	}
 	config := android.TestArchConfig(buildDir, nil, bp, fs)
 
 	ctx := android.NewTestArchContext(config)
@@ -5927,24 +6475,26 @@ func testDexpreoptWithApexes(t *testing.T, bp, errmsg string, transformDexpreopt
 	ctx.RegisterModuleType("prebuilt_apex", PrebuiltFactory)
 	ctx.RegisterModuleType("filegroup", android.FileGroupFactory)
 	ctx.PreArchMutators(android.RegisterDefaultsPreArchMutators)
+	ctx.PreArchMutators(android.RegisterComponentsMutator)
 	android.RegisterPrebuiltMutators(ctx)
 	cc.RegisterRequiredBuildComponentsForTest(ctx)
-	java.RegisterJavaBuildComponents(ctx)
-	java.RegisterSystemModulesBuildComponents(ctx)
-	java.RegisterAppBuildComponents(ctx)
-	java.RegisterDexpreoptBootJarsComponents(ctx)
+	java.RegisterRequiredBuildComponentsForTest(ctx)
+	java.RegisterHiddenApiSingletonComponents(ctx)
 	ctx.PostDepsMutators(android.RegisterOverridePostDepsMutators)
 	ctx.PreDepsMutators(RegisterPreDepsMutators)
 	ctx.PostDepsMutators(RegisterPostDepsMutators)
 
 	ctx.Register()
 
-	_ = dexpreopt.GlobalSoongConfigForTests(config)
-	dexpreopt.RegisterToolModulesForTest(ctx)
 	pathCtx := android.PathContextForTesting(config)
 	dexpreoptConfig := dexpreopt.GlobalConfigForTests(pathCtx)
 	transformDexpreoptConfig(dexpreoptConfig)
 	dexpreopt.SetTestGlobalConfig(config, dexpreoptConfig)
+
+	// Make sure that any changes to these dexpreopt properties are mirrored in the corresponding
+	// product variables.
+	config.TestProductVariables.BootJars = dexpreoptConfig.BootJars
+	config.TestProductVariables.UpdatableBootJars = dexpreoptConfig.UpdatableBootJars
 
 	_, errs := ctx.ParseBlueprintsFiles("Android.bp")
 	android.FailIfErrored(t, errs)
@@ -5977,21 +6527,36 @@ func TestUpdatable_should_set_min_sdk_version(t *testing.T) {
 	`)
 }
 
+func TestUpdatableDefault_should_set_min_sdk_version(t *testing.T) {
+	testApexError(t, `"myapex" .*: updatable: updatable APEXes should set min_sdk_version`, `
+		apex {
+			name: "myapex",
+			key: "myapex.key",
+		}
+
+		apex_key {
+			name: "myapex.key",
+			public_key: "testkey.avbpubkey",
+			private_key: "testkey.pem",
+		}
+	`)
+}
+
 func TestNoUpdatableJarsInBootImage(t *testing.T) {
 	var err string
 	var transform func(*dexpreopt.GlobalConfig)
 
 	t.Run("updatable jar from ART apex in the ART boot image => ok", func(t *testing.T) {
 		transform = func(config *dexpreopt.GlobalConfig) {
-			config.ArtApexJars = android.CreateTestConfiguredJarList([]string{"com.android.art.something:some-art-lib"})
+			config.ArtApexJars = android.CreateTestConfiguredJarList([]string{"com.android.art.debug:some-art-lib"})
 		}
 		testNoUpdatableJarsInBootImage(t, "", transform)
 	})
 
 	t.Run("updatable jar from ART apex in the framework boot image => error", func(t *testing.T) {
-		err = `module "some-art-lib" from updatable apexes \["com.android.art.something"\] is not allowed in the framework boot image`
+		err = `module "some-art-lib" from updatable apexes \["com.android.art.debug"\] is not allowed in the framework boot image`
 		transform = func(config *dexpreopt.GlobalConfig) {
-			config.BootJars = android.CreateTestConfiguredJarList([]string{"com.android.art.something:some-art-lib"})
+			config.BootJars = android.CreateTestConfiguredJarList([]string{"com.android.art.debug:some-art-lib"})
 		}
 		testNoUpdatableJarsInBootImage(t, err, transform)
 	})
@@ -6136,9 +6701,7 @@ func testApexPermittedPackagesRules(t *testing.T, errmsg, bp string, apexBootJar
 	ctx.RegisterModuleType("apex_key", ApexKeyFactory)
 	ctx.PreArchMutators(android.RegisterDefaultsPreArchMutators)
 	cc.RegisterRequiredBuildComponentsForTest(ctx)
-	java.RegisterJavaBuildComponents(ctx)
-	java.RegisterSystemModulesBuildComponents(ctx)
-	java.RegisterDexpreoptBootJarsComponents(ctx)
+	java.RegisterRequiredBuildComponentsForTest(ctx)
 	ctx.PostDepsMutators(android.RegisterOverridePostDepsMutators)
 	ctx.PreDepsMutators(RegisterPreDepsMutators)
 	ctx.PostDepsMutators(RegisterPostDepsMutators)
@@ -6193,6 +6756,7 @@ func TestApexPermittedPackagesRules(t *testing.T) {
 					name: "myapex",
 					key: "myapex.key",
 					java_libs: ["bcp_lib1", "nonbcp_lib2"],
+					updatable: false,
 				}`,
 			bootJars: []string{"bcp_lib1"},
 			modulesPackages: map[string][]string{
@@ -6225,6 +6789,7 @@ func TestApexPermittedPackagesRules(t *testing.T) {
 					name: "myapex",
 					key: "myapex.key",
 					java_libs: ["bcp_lib1", "bcp_lib2"],
+					updatable: false,
 				}
 			`,
 			bootJars: []string{"bcp_lib1", "bcp_lib2"},
@@ -6244,11 +6809,12 @@ func TestApexPermittedPackagesRules(t *testing.T) {
 }
 
 func TestTestFor(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib", "myprivlib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -6329,7 +6895,7 @@ func intPtr(i int) *int {
 }
 
 func TestApexSet(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex_set {
 			name: "myapex",
 			set: "myapex.apks",
@@ -6361,7 +6927,7 @@ func TestApexSet(t *testing.T) {
 
 	a := m.Module().(*ApexSet)
 	expectedOverrides := []string{"foo"}
-	actualOverrides := android.AndroidMkEntriesForTest(t, config, "", a)[0].EntryMap["LOCAL_OVERRIDES_MODULES"]
+	actualOverrides := android.AndroidMkEntriesForTest(t, ctx, a)[0].EntryMap["LOCAL_OVERRIDES_MODULES"]
 	if !reflect.DeepEqual(actualOverrides, expectedOverrides) {
 		t.Errorf("Incorrect LOCAL_OVERRIDES_MODULES - expected %q vs actual %q", expectedOverrides, actualOverrides)
 	}
@@ -6373,6 +6939,7 @@ func TestNoStaticLinkingToStubsLib(t *testing.T) {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -6404,10 +6971,11 @@ func TestNoStaticLinkingToStubsLib(t *testing.T) {
 }
 
 func TestApexKeysTxt(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
+			updatable: false,
 		}
 
 		apex_key {
@@ -6444,12 +7012,13 @@ func TestApexKeysTxt(t *testing.T) {
 }
 
 func TestAllowedFiles(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			apps: ["app"],
 			allowed_files: "allowed.txt",
+			updatable: false,
 		}
 
 		apex_key {
@@ -6499,11 +7068,12 @@ func TestAllowedFiles(t *testing.T) {
 }
 
 func TestNonPreferredPrebuiltDependency(t *testing.T) {
-	_, _ = testApex(t, `
+	testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -6534,11 +7104,12 @@ func TestNonPreferredPrebuiltDependency(t *testing.T) {
 }
 
 func TestCompressedApex(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			compressible: true,
+			updatable: false,
 		}
 		apex_key {
 			name: "myapex.key",
@@ -6560,7 +7131,7 @@ func TestCompressedApex(t *testing.T) {
 	ensureContains(t, ab.outputFile.String(), "myapex.capex")
 
 	// Verify android.mk rules
-	data := android.AndroidMkDataForTest(t, config, "", ab)
+	data := android.AndroidMkDataForTest(t, ctx, ab)
 	var builder strings.Builder
 	data.Custom(&builder, ab.BaseModuleName(), "TARGET_", "", data)
 	androidMk := builder.String()
@@ -6568,11 +7139,12 @@ func TestCompressedApex(t *testing.T) {
 }
 
 func TestPreferredPrebuiltSharedLibDep(t *testing.T) {
-	ctx, config := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -6608,7 +7180,7 @@ func TestPreferredPrebuiltSharedLibDep(t *testing.T) {
 	`)
 
 	ab := ctx.ModuleForTests("myapex", "android_common_myapex_image").Module().(*apexBundle)
-	data := android.AndroidMkDataForTest(t, config, "", ab)
+	data := android.AndroidMkDataForTest(t, ctx, ab)
 	var builder strings.Builder
 	data.Custom(&builder, ab.BaseModuleName(), "TARGET_", "", data)
 	androidMk := builder.String()
@@ -6619,11 +7191,12 @@ func TestPreferredPrebuiltSharedLibDep(t *testing.T) {
 }
 
 func TestExcludeDependency(t *testing.T) {
-	ctx, _ := testApex(t, `
+	ctx := testApex(t, `
 		apex {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 
 		apex_key {
@@ -6673,6 +7246,7 @@ func TestPrebuiltStubLibDep(t *testing.T) {
 			name: "myapex",
 			key: "myapex.key",
 			native_shared_libs: ["mylib"],
+			updatable: false,
 		}
 		apex_key {
 			name: "myapex.key",
@@ -6691,6 +7265,7 @@ func TestPrebuiltStubLibDep(t *testing.T) {
 			enabled: %s,
 			key: "myapex.key",
 			native_shared_libs: ["stublib"],
+			updatable: false,
 		}
 	`
 
@@ -6760,7 +7335,7 @@ func TestPrebuiltStubLibDep(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			for _, otherApexEnabled := range test.otherApexEnabled {
 				t.Run("otherapex_enabled_"+otherApexEnabled, func(t *testing.T) {
-					ctx, config := testApex(t, fmt.Sprintf(bpBase, otherApexEnabled)+test.stublibBp)
+					ctx := testApex(t, fmt.Sprintf(bpBase, otherApexEnabled)+test.stublibBp)
 
 					type modAndMkEntries struct {
 						mod       *cc.Module
@@ -6778,7 +7353,7 @@ func TestPrebuiltStubLibDep(t *testing.T) {
 							if !mod.Enabled() || mod.IsHideFromMake() {
 								continue
 							}
-							for _, ent := range android.AndroidMkEntriesForTest(t, config, "", mod) {
+							for _, ent := range android.AndroidMkEntriesForTest(t, ctx, mod) {
 								if ent.Disabled {
 									continue
 								}

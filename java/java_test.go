@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"android/soong/genrule"
 	"github.com/google/blueprint/proptools"
 
 	"android/soong/android"
@@ -59,49 +60,30 @@ func TestMain(m *testing.M) {
 }
 
 func testConfig(env map[string]string, bp string, fs map[string][]byte) android.Config {
-	bp += dexpreopt.BpToolModulesForTest()
-
-	config := TestConfig(buildDir, env, bp, fs)
-
-	// Set up the global Once cache used for dexpreopt.GlobalSoongConfig, so that
-	// it doesn't create a real one, which would fail.
-	_ = dexpreopt.GlobalSoongConfigForTests(config)
-
-	return config
+	return TestConfig(buildDir, env, bp, fs)
 }
 
 func testContext(config android.Config) *android.TestContext {
 
 	ctx := android.NewTestArchContext(config)
-	RegisterJavaBuildComponents(ctx)
-	RegisterAppBuildComponents(ctx)
-	RegisterAppImportBuildComponents(ctx)
-	RegisterAppSetBuildComponents(ctx)
-	RegisterAARBuildComponents(ctx)
-	RegisterGenRuleBuildComponents(ctx)
-	RegisterRuntimeResourceOverlayBuildComponents(ctx)
-	RegisterSystemModulesBuildComponents(ctx)
+	RegisterRequiredBuildComponentsForTest(ctx)
 	ctx.RegisterModuleType("java_plugin", PluginFactory)
 	ctx.RegisterModuleType("filegroup", android.FileGroupFactory)
 	ctx.RegisterModuleType("python_binary_host", python.PythonBinaryHostFactory)
-	RegisterDocsBuildComponents(ctx)
-	RegisterStubsBuildComponents(ctx)
-	RegisterPrebuiltApisBuildComponents(ctx)
-	RegisterSdkLibraryBuildComponents(ctx)
 	ctx.PreArchMutators(android.RegisterDefaultsPreArchMutators)
 	ctx.PreArchMutators(android.RegisterComponentsMutator)
 
 	ctx.PreDepsMutators(python.RegisterPythonPreDepsMutators)
 	ctx.PostDepsMutators(android.RegisterOverridePostDepsMutators)
-	ctx.RegisterPreSingletonType("overlay", android.SingletonFactoryAdaptor(ctx.Context, OverlaySingletonFactory))
-	ctx.RegisterPreSingletonType("sdk_versions", android.SingletonFactoryAdaptor(ctx.Context, sdkPreSingletonFactory))
+	ctx.RegisterPreSingletonType("overlay", OverlaySingletonFactory)
+	ctx.RegisterPreSingletonType("sdk_versions", sdkPreSingletonFactory)
 
 	android.RegisterPrebuiltMutators(ctx)
 
+	genrule.RegisterGenruleBuildComponents(ctx)
+
 	// Register module types and mutators from cc needed for JNI testing
 	cc.RegisterRequiredBuildComponentsForTest(ctx)
-
-	dexpreopt.RegisterToolModulesForTest(ctx)
 
 	ctx.PostDepsMutators(func(ctx android.RegisterMutatorsContext) {
 		ctx.TopDown("propagate_rro_enforcement", propagateRROEnforcementMutator).Parallel()
@@ -135,21 +117,26 @@ func testJavaErrorWithConfig(t *testing.T, pattern string, config android.Config
 	pathCtx := android.PathContextForTesting(config)
 	dexpreopt.SetTestGlobalConfig(config, dexpreopt.GlobalConfigForTests(pathCtx))
 
+	runWithErrors(t, ctx, config, pattern)
+
+	return ctx, config
+}
+
+func runWithErrors(t *testing.T, ctx *android.TestContext, config android.Config, pattern string) {
 	ctx.Register()
 	_, errs := ctx.ParseBlueprintsFiles("Android.bp")
 	if len(errs) > 0 {
 		android.FailIfNoMatchingErrors(t, pattern, errs)
-		return ctx, config
+		return
 	}
 	_, errs = ctx.PrepareBuildActions(config)
 	if len(errs) > 0 {
 		android.FailIfNoMatchingErrors(t, pattern, errs)
-		return ctx, config
+		return
 	}
 
 	t.Fatalf("missing expected error %q (0 errors are returned)", pattern)
-
-	return ctx, config
+	return
 }
 
 func testJavaWithFS(t *testing.T, bp string, fs map[string][]byte) (*android.TestContext, android.Config) {
@@ -867,83 +854,43 @@ func TestJavaSdkLibraryEnforce(t *testing.T) {
 		return config
 	}
 
-	isValidDependency := func(configInfo testConfigInfo) bool {
-		if configInfo.enforceVendorInterface == false {
-			return true
-		}
-
-		if configInfo.enforceJavaSdkLibraryCheck == false {
-			return true
-		}
-
-		if inList("bar", configInfo.allowList) {
-			return true
-		}
-
-		if configInfo.libraryType == "java_library" {
-			if configInfo.fromPartition != configInfo.toPartition {
-				if !configInfo.enforceProductInterface &&
-					((configInfo.fromPartition == "system" && configInfo.toPartition == "product") ||
-						(configInfo.fromPartition == "product" && configInfo.toPartition == "system")) {
-					return true
-				}
-				return false
-			}
-		}
-
-		return true
-	}
-
 	errorMessage := "is not allowed across the partitions"
 
-	allPartitionCombinations := func() [][2]string {
-		var result [][2]string
-		partitions := []string{"system", "vendor", "product"}
+	testJavaWithConfig(t, createTestConfig(testConfigInfo{
+		libraryType:                "java_library",
+		fromPartition:              "product",
+		toPartition:                "system",
+		enforceVendorInterface:     true,
+		enforceProductInterface:    true,
+		enforceJavaSdkLibraryCheck: false,
+	}))
 
-		for _, fromPartition := range partitions {
-			for _, toPartition := range partitions {
-				result = append(result, [2]string{fromPartition, toPartition})
-			}
-		}
+	testJavaWithConfig(t, createTestConfig(testConfigInfo{
+		libraryType:                "java_library",
+		fromPartition:              "product",
+		toPartition:                "system",
+		enforceVendorInterface:     true,
+		enforceProductInterface:    false,
+		enforceJavaSdkLibraryCheck: true,
+	}))
 
-		return result
-	}
+	testJavaErrorWithConfig(t, errorMessage, createTestConfig(testConfigInfo{
+		libraryType:                "java_library",
+		fromPartition:              "product",
+		toPartition:                "system",
+		enforceVendorInterface:     true,
+		enforceProductInterface:    true,
+		enforceJavaSdkLibraryCheck: true,
+	}))
 
-	allFlagCombinations := func() [][3]bool {
-		var result [][3]bool
-		flagValues := [2]bool{false, true}
-
-		for _, vendorInterface := range flagValues {
-			for _, productInterface := range flagValues {
-				for _, enableEnforce := range flagValues {
-					result = append(result, [3]bool{vendorInterface, productInterface, enableEnforce})
-				}
-			}
-		}
-
-		return result
-	}
-
-	for _, libraryType := range []string{"java_library", "java_sdk_library"} {
-		for _, partitionValues := range allPartitionCombinations() {
-			for _, flagValues := range allFlagCombinations() {
-				testInfo := testConfigInfo{
-					libraryType:                libraryType,
-					fromPartition:              partitionValues[0],
-					toPartition:                partitionValues[1],
-					enforceVendorInterface:     flagValues[0],
-					enforceProductInterface:    flagValues[1],
-					enforceJavaSdkLibraryCheck: flagValues[2],
-				}
-
-				if isValidDependency(testInfo) {
-					testJavaWithConfig(t, createTestConfig(testInfo))
-				} else {
-					testJavaErrorWithConfig(t, errorMessage, createTestConfig(testInfo))
-				}
-			}
-		}
-	}
+	testJavaErrorWithConfig(t, errorMessage, createTestConfig(testConfigInfo{
+		libraryType:                "java_library",
+		fromPartition:              "vendor",
+		toPartition:                "system",
+		enforceVendorInterface:     true,
+		enforceProductInterface:    true,
+		enforceJavaSdkLibraryCheck: true,
+	}))
 
 	testJavaWithConfig(t, createTestConfig(testConfigInfo{
 		libraryType:                "java_library",
@@ -958,11 +905,37 @@ func TestJavaSdkLibraryEnforce(t *testing.T) {
 	testJavaErrorWithConfig(t, errorMessage, createTestConfig(testConfigInfo{
 		libraryType:                "java_library",
 		fromPartition:              "vendor",
+		toPartition:                "product",
+		enforceVendorInterface:     true,
+		enforceProductInterface:    true,
+		enforceJavaSdkLibraryCheck: true,
+	}))
+
+	testJavaWithConfig(t, createTestConfig(testConfigInfo{
+		libraryType:                "java_sdk_library",
+		fromPartition:              "product",
 		toPartition:                "system",
 		enforceVendorInterface:     true,
 		enforceProductInterface:    true,
 		enforceJavaSdkLibraryCheck: true,
-		allowList:                  []string{"foo"},
+	}))
+
+	testJavaWithConfig(t, createTestConfig(testConfigInfo{
+		libraryType:                "java_sdk_library",
+		fromPartition:              "vendor",
+		toPartition:                "system",
+		enforceVendorInterface:     true,
+		enforceProductInterface:    true,
+		enforceJavaSdkLibraryCheck: true,
+	}))
+
+	testJavaWithConfig(t, createTestConfig(testConfigInfo{
+		libraryType:                "java_sdk_library",
+		fromPartition:              "vendor",
+		toPartition:                "product",
+		enforceVendorInterface:     true,
+		enforceProductInterface:    true,
+		enforceJavaSdkLibraryCheck: true,
 	}))
 }
 
@@ -1211,6 +1184,110 @@ func TestIncludeSrcs(t *testing.T) {
 
 	if g, w := barRes.Args["jarArgs"], "-C java-res -f java-res/a/a -f java-res/b/b"; g != w {
 		t.Errorf("bar resource jar args %q is not %q", w, g)
+	}
+}
+
+func TestJavaLint(t *testing.T) {
+	ctx, _ := testJavaWithFS(t, `
+		java_library {
+			name: "foo",
+			srcs: [
+				"a.java",
+				"b.java",
+				"c.java",
+			],
+			min_sdk_version: "29",
+			sdk_version: "system_current",
+		}
+       `, map[string][]byte{
+		"lint-baseline.xml": nil,
+	})
+
+	foo := ctx.ModuleForTests("foo", "android_common")
+	rule := foo.Rule("lint")
+
+	if !strings.Contains(rule.RuleParams.Command, "--baseline lint-baseline.xml") {
+		t.Error("did not pass --baseline flag")
+	}
+}
+
+func TestJavaLintWithoutBaseline(t *testing.T) {
+	ctx, _ := testJavaWithFS(t, `
+		java_library {
+			name: "foo",
+			srcs: [
+				"a.java",
+				"b.java",
+				"c.java",
+			],
+			min_sdk_version: "29",
+			sdk_version: "system_current",
+		}
+       `, map[string][]byte{})
+
+	foo := ctx.ModuleForTests("foo", "android_common")
+	rule := foo.Rule("lint")
+
+	if strings.Contains(rule.RuleParams.Command, "--baseline") {
+		t.Error("passed --baseline flag for non existent file")
+	}
+}
+
+func TestJavaLintRequiresCustomLintFileToExist(t *testing.T) {
+	config := testConfig(
+		nil,
+		`
+		java_library {
+			name: "foo",
+			srcs: [
+			],
+			min_sdk_version: "29",
+			sdk_version: "system_current",
+			lint: {
+				baseline_filename: "mybaseline.xml",
+			},
+		}
+     `, map[string][]byte{
+			"build/soong/java/lint_defaults.txt":                   nil,
+			"prebuilts/cmdline-tools/tools/bin/lint":               nil,
+			"prebuilts/cmdline-tools/tools/lib/lint-classpath.jar": nil,
+			"framework/aidl":                     nil,
+			"a.java":                             nil,
+			"AndroidManifest.xml":                nil,
+			"build/make/target/product/security": nil,
+		})
+	config.TestAllowNonExistentPaths = false
+	testJavaErrorWithConfig(t,
+		"source path \"mybaseline.xml\" does not exist",
+		config,
+	)
+}
+
+func TestJavaLintUsesCorrectBpConfig(t *testing.T) {
+	ctx, _ := testJavaWithFS(t, `
+		java_library {
+			name: "foo",
+			srcs: [
+				"a.java",
+				"b.java",
+				"c.java",
+			],
+			min_sdk_version: "29",
+			sdk_version: "system_current",
+			lint: {
+				error_checks: ["SomeCheck"],
+				baseline_filename: "mybaseline.xml",
+			},
+		}
+       `, map[string][]byte{
+		"mybaseline.xml": nil,
+	})
+
+	foo := ctx.ModuleForTests("foo", "android_common")
+	rule := foo.Rule("lint")
+
+	if !strings.Contains(rule.RuleParams.Command, "--baseline mybaseline.xml") {
+		t.Error("did not use the correct file for baseline")
 	}
 }
 
@@ -2441,7 +2518,7 @@ func TestAidlFlagsArePassedToTheAidlCompiler(t *testing.T) {
 }
 
 func TestDataNativeBinaries(t *testing.T) {
-	ctx, config := testJava(t, `
+	ctx, _ := testJava(t, `
 		java_test_host {
 			name: "foo",
 			srcs: ["a.java"],
@@ -2457,7 +2534,7 @@ func TestDataNativeBinaries(t *testing.T) {
 	buildOS := android.BuildOs.String()
 
 	test := ctx.ModuleForTests("foo", buildOS+"_common").Module().(*TestHost)
-	entries := android.AndroidMkEntriesForTest(t, config, "", test)[0]
+	entries := android.AndroidMkEntriesForTest(t, ctx, test)[0]
 	expected := []string{buildDir + "/.intermediates/bin/" + buildOS + "_x86_64_PY3/bin:bin"}
 	actual := entries.EntryMap["LOCAL_COMPATIBILITY_SUPPORT_FILES"]
 	if !reflect.DeepEqual(expected, actual) {

@@ -24,7 +24,7 @@ import (
 var _ android.ImageInterface = (*Module)(nil)
 
 func (mod *Module) VendorRamdiskVariantNeeded(ctx android.BaseModuleContext) bool {
-	return false
+	return mod.Properties.VendorRamdiskVariantNeeded
 }
 
 func (mod *Module) CoreVariantNeeded(ctx android.BaseModuleContext) bool {
@@ -52,6 +52,10 @@ func (mod *Module) InRecovery() bool {
 	return false
 }
 
+func (mod *Module) InVendorRamdisk() bool {
+	return mod.ModuleBase.InVendorRamdisk() || mod.ModuleBase.InstallInVendorRamdisk()
+}
+
 func (mod *Module) OnlyInRamdisk() bool {
 	// TODO(b/165791368)
 	return false
@@ -68,11 +72,16 @@ func (mod *Module) OnlyInVendorRamdisk() bool {
 
 // Returns true when this module is configured to have core and vendor variants.
 func (mod *Module) HasVendorVariant() bool {
-	return mod.IsVndk() || Bool(mod.VendorProperties.Vendor_available)
+	return Bool(mod.VendorProperties.Vendor_available) || Bool(mod.VendorProperties.Odm_available)
 }
 
-func (c *Module) VendorAvailable() bool {
-	return Bool(c.VendorProperties.Vendor_available)
+// Always returns false because rust modules do not support product variant.
+func (mod *Module) HasProductVariant() bool {
+	return Bool(mod.VendorProperties.Product_available)
+}
+
+func (mod *Module) HasNonSystemVariants() bool {
+	return mod.HasVendorVariant() || mod.HasProductVariant()
 }
 
 func (c *Module) InProduct() bool {
@@ -81,7 +90,9 @@ func (c *Module) InProduct() bool {
 
 func (mod *Module) SetImageVariation(ctx android.BaseModuleContext, variant string, module android.Module) {
 	m := module.(*Module)
-	if strings.HasPrefix(variant, cc.VendorVariationPrefix) {
+	if variant == android.VendorRamdiskVariation {
+		m.MakeAsPlatform()
+	} else if strings.HasPrefix(variant, cc.VendorVariationPrefix) {
 		m.Properties.ImageVariationPrefix = cc.VendorVariationPrefix
 		m.Properties.VndkVersion = strings.TrimPrefix(variant, cc.VendorVariationPrefix)
 
@@ -112,12 +123,19 @@ func (mod *Module) ImageMutatorBegin(mctx android.BaseModuleContext) {
 	}
 
 	coreVariantNeeded := true
+	vendorRamdiskVariantNeeded := false
+
 	var vendorVariants []string
 
-	if Bool(mod.VendorProperties.Vendor_available) {
+	if mod.HasVendorVariant() {
+		prop := "vendor_available"
+		if Bool(mod.VendorProperties.Odm_available) {
+			prop = "odm_available"
+		}
+
 		if vendorSpecific {
-			mctx.PropertyErrorf("vendor_available",
-				"doesn't make sense at the same time as `vendor: true`, `proprietary: true`, or `device_specific:true`")
+			mctx.PropertyErrorf(prop,
+				"doesn't make sense at the same time as `vendor: true`, `proprietary: true`, or `device_specific: true`")
 		}
 
 		if lib, ok := mod.compiler.(libraryInterface); ok {
@@ -128,16 +146,23 @@ func (mod *Module) ImageMutatorBegin(mctx android.BaseModuleContext) {
 			// We can't check shared() here because image mutator is called before the library mutator, so we need to
 			// check buildShared()
 			if lib.buildShared() {
-				mctx.PropertyErrorf("vendor_available",
-					"vendor_available can only be set for rust_ffi_static modules.")
-			} else if Bool(mod.VendorProperties.Vendor_available) == true {
+				mctx.PropertyErrorf(prop, "cannot be set for rust_ffi or rust_ffi_shared modules.")
+			} else {
 				vendorVariants = append(vendorVariants, platformVndkVersion)
 			}
 		}
 	}
 
+	if Bool(mod.Properties.Vendor_ramdisk_available) {
+		if lib, ok := mod.compiler.(libraryInterface); !ok || (ok && lib.buildShared()) {
+			mctx.PropertyErrorf("vendor_ramdisk_available", "cannot be set for rust_ffi or rust_ffi_shared modules.")
+		} else {
+			vendorRamdiskVariantNeeded = true
+		}
+	}
+
 	if vendorSpecific {
-		if lib, ok := mod.compiler.(libraryInterface); !ok || (ok && !lib.static()) {
+		if lib, ok := mod.compiler.(libraryInterface); !ok || (ok && (lib.buildShared() || lib.buildDylib() || lib.buildRlib())) {
 			mctx.ModuleErrorf("Rust vendor specific modules are currently only supported for rust_ffi_static modules.")
 		} else {
 			coreVariantNeeded = false
@@ -146,6 +171,8 @@ func (mod *Module) ImageMutatorBegin(mctx android.BaseModuleContext) {
 	}
 
 	mod.Properties.CoreVariantNeeded = coreVariantNeeded
+	mod.Properties.VendorRamdiskVariantNeeded = vendorRamdiskVariantNeeded
+
 	for _, variant := range android.FirstUniqueStrings(vendorVariants) {
 		mod.Properties.ExtraVariants = append(mod.Properties.ExtraVariants, cc.VendorVariationPrefix+variant)
 	}

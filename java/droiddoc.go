@@ -470,8 +470,9 @@ func (j *Javadoc) collectDeps(ctx android.ModuleContext) deps {
 
 		switch tag {
 		case bootClasspathTag:
-			if dep, ok := module.(Dependency); ok {
-				deps.bootClasspath = append(deps.bootClasspath, dep.ImplementationJars()...)
+			if ctx.OtherModuleHasProvider(module, JavaInfoProvider) {
+				dep := ctx.OtherModuleProvider(module, JavaInfoProvider).(JavaInfo)
+				deps.bootClasspath = append(deps.bootClasspath, dep.ImplementationJars...)
 			} else if sm, ok := module.(SystemModulesProvider); ok {
 				// A system modules dependency has been added to the bootclasspath
 				// so add its libs to the bootclasspath.
@@ -480,23 +481,23 @@ func (j *Javadoc) collectDeps(ctx android.ModuleContext) deps {
 				panic(fmt.Errorf("unknown dependency %q for %q", otherName, ctx.ModuleName()))
 			}
 		case libTag:
-			switch dep := module.(type) {
-			case SdkLibraryDependency:
+			if dep, ok := module.(SdkLibraryDependency); ok {
 				deps.classpath = append(deps.classpath, dep.SdkHeaderJars(ctx, j.sdkVersion())...)
-			case Dependency:
-				deps.classpath = append(deps.classpath, dep.HeaderJars()...)
-				deps.aidlIncludeDirs = append(deps.aidlIncludeDirs, dep.AidlIncludeDirs()...)
-			case android.SourceFileProducer:
+			} else if ctx.OtherModuleHasProvider(module, JavaInfoProvider) {
+				dep := ctx.OtherModuleProvider(module, JavaInfoProvider).(JavaInfo)
+				deps.classpath = append(deps.classpath, dep.HeaderJars...)
+				deps.aidlIncludeDirs = append(deps.aidlIncludeDirs, dep.AidlIncludeDirs...)
+			} else if dep, ok := module.(android.SourceFileProducer); ok {
 				checkProducesJars(ctx, dep)
 				deps.classpath = append(deps.classpath, dep.Srcs()...)
-			default:
+			} else {
 				ctx.ModuleErrorf("depends on non-java module %q", otherName)
 			}
 		case java9LibTag:
-			switch dep := module.(type) {
-			case Dependency:
-				deps.java9Classpath = append(deps.java9Classpath, dep.HeaderJars()...)
-			default:
+			if ctx.OtherModuleHasProvider(module, JavaInfoProvider) {
+				dep := ctx.OtherModuleProvider(module, JavaInfoProvider).(JavaInfo)
+				deps.java9Classpath = append(deps.java9Classpath, dep.HeaderJars...)
+			} else {
 				ctx.ModuleErrorf("depends on non-java module %q", otherName)
 			}
 		case systemModulesTag:
@@ -1202,8 +1203,14 @@ func (d *Droidstubs) apiLevelsAnnotationsFlags(ctx android.ModuleContext, cmd *a
 }
 
 func metalavaCmd(ctx android.ModuleContext, rule *android.RuleBuilder, javaVersion javaVersion, srcs android.Paths,
-	srcJarList android.Path, bootclasspath, classpath classpath, sourcepaths android.Paths, implicitsRsp android.WritablePath, sandbox bool) *android.RuleBuilderCommand {
+	srcJarList android.Path, bootclasspath, classpath classpath, sourcepaths android.Paths,
+	implicitsRsp, homeDir android.WritablePath, sandbox bool) *android.RuleBuilderCommand {
+	rule.Command().Text("rm -rf").Flag(homeDir.String())
+	rule.Command().Text("mkdir -p").Flag(homeDir.String())
+
 	cmd := rule.Command()
+	cmd.FlagWithArg("ANDROID_SDK_HOME=", homeDir.String())
+
 	if ctx.Config().UseRBE() && ctx.Config().IsEnvTrue("RBE_METALAVA") {
 		rule.Remoteable(android.RemoteRuleSupports{RBE: true})
 		pool := ctx.Config().GetenvWithDefault("RBE_METALAVA_POOL", "metalava")
@@ -1213,17 +1220,21 @@ func metalavaCmd(ctx android.ModuleContext, rule *android.RuleBuilder, javaVersi
 			execStrategy = remoteexec.LocalExecStrategy
 			labels["shallow"] = "true"
 		}
-		inputs := []string{android.PathForOutput(ctx, "host", ctx.Config().PrebuiltOS(), "framework", "metalava.jar").String()}
+		inputs := []string{
+			ctx.Config().HostJavaToolPath(ctx, "metalava").String(),
+			homeDir.String(),
+		}
 		if v := ctx.Config().Getenv("RBE_METALAVA_INPUTS"); v != "" {
 			inputs = append(inputs, strings.Split(v, ",")...)
 		}
 		cmd.Text((&remoteexec.REParams{
-			Labels:          labels,
-			ExecStrategy:    execStrategy,
-			Inputs:          inputs,
-			RSPFile:         implicitsRsp.String(),
-			ToolchainInputs: []string{config.JavaCmd(ctx).String()},
-			Platform:        map[string]string{remoteexec.PoolKey: pool},
+			Labels:               labels,
+			ExecStrategy:         execStrategy,
+			Inputs:               inputs,
+			RSPFile:              implicitsRsp.String(),
+			ToolchainInputs:      []string{config.JavaCmd(ctx).String()},
+			Platform:             map[string]string{remoteexec.PoolKey: pool},
+			EnvironmentVariables: []string{"ANDROID_SDK_HOME"},
 		}).NoVarTemplate(ctx.Config()))
 	}
 
@@ -1301,9 +1312,9 @@ func (d *Droidstubs) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	srcJarList := zipSyncCmd(ctx, rule, srcJarDir, d.Javadoc.srcJars)
 
 	implicitsRsp := android.PathForModuleOut(ctx, ctx.ModuleName()+"-"+"implicits.rsp")
-
+	homeDir := android.PathForModuleOut(ctx, "metalava-home")
 	cmd := metalavaCmd(ctx, rule, javaVersion, d.Javadoc.srcFiles, srcJarList,
-		deps.bootClasspath, deps.classpath, d.Javadoc.sourcepaths, implicitsRsp,
+		deps.bootClasspath, deps.classpath, d.Javadoc.sourcepaths, implicitsRsp, homeDir,
 		Bool(d.Javadoc.properties.Sandbox))
 	cmd.Implicits(d.Javadoc.implicits)
 

@@ -67,6 +67,9 @@ type AndroidAppImportProperties struct {
 	// module name in the form ":module". Should be empty if presigned or default_dev_cert is set.
 	Certificate *string
 
+	// Names of extra android_app_certificate modules to sign the apk with in the form ":module".
+	Additional_certificates []string
+
 	// Set this flag to true if the prebuilt apk is already signed. The certificate property must not
 	// be set for presigned modules.
 	Presigned *bool
@@ -92,6 +95,10 @@ type AndroidAppImportProperties struct {
 
 	// Optional name for the installed app. If unspecified, it is derived from the module name.
 	Filename *string
+
+	// If set, create package-export.apk, which other packages can
+	// use to get PRODUCT-agnostic resource data like IDs and type definitions.
+	Export_package_resources *bool
 }
 
 func (a *AndroidAppImport) IsInstallable() bool {
@@ -142,13 +149,27 @@ func MergePropertiesFromVariant(ctx android.EarlyModuleContext,
 	}
 }
 
+func (a *AndroidAppImport) isPrebuiltFrameworkRes() bool {
+	return a.Name() == "prebuilt_framework-res"
+}
+
 func (a *AndroidAppImport) DepsMutator(ctx android.BottomUpMutatorContext) {
 	cert := android.SrcIsModule(String(a.properties.Certificate))
 	if cert != "" {
 		ctx.AddDependency(ctx.Module(), certificateTag, cert)
 	}
 
-	a.usesLibrary.deps(ctx, true)
+	for _, cert := range a.properties.Additional_certificates {
+		cert = android.SrcIsModule(cert)
+		if cert != "" {
+			ctx.AddDependency(ctx.Module(), certificateTag, cert)
+		} else {
+			ctx.PropertyErrorf("additional_certificates",
+				`must be names of android_app_certificate modules in the form ":module"`)
+		}
+	}
+
+	a.usesLibrary.deps(ctx, !a.isPrebuiltFrameworkRes())
 }
 
 func (a *AndroidAppImport) uncompressEmbeddedJniLibs(
@@ -236,10 +257,6 @@ func (a *AndroidAppImport) generateAndroidBuildActions(ctx android.ModuleContext
 
 	srcApk := a.prebuilt.SingleSourcePath(ctx)
 
-	if a.usesLibrary.enforceUsesLibraries() {
-		srcApk = a.usesLibrary.verifyUsesLibrariesAPK(ctx, srcApk)
-	}
-
 	// TODO: Install or embed JNI libraries
 
 	// Uncompress JNI libraries in the apk
@@ -247,7 +264,12 @@ func (a *AndroidAppImport) generateAndroidBuildActions(ctx android.ModuleContext
 	a.uncompressEmbeddedJniLibs(ctx, srcApk, jnisUncompressed.OutputPath)
 
 	var installDir android.InstallPath
-	if Bool(a.properties.Privileged) {
+
+	if a.isPrebuiltFrameworkRes() {
+		// framework-res.apk is installed as system/framework/framework-res.apk
+		installDir = android.PathForModuleInstall(ctx, "framework")
+		a.preprocessed = true
+	} else if Bool(a.properties.Privileged) {
 		installDir = android.PathForModuleInstall(ctx, "priv-app", a.BaseModuleName())
 	} else if ctx.InstallInTestcases() {
 		installDir = android.PathForModuleInstall(ctx, a.BaseModuleName(), ctx.DeviceConfig().DeviceArch())
@@ -255,12 +277,17 @@ func (a *AndroidAppImport) generateAndroidBuildActions(ctx android.ModuleContext
 		installDir = android.PathForModuleInstall(ctx, "app", a.BaseModuleName())
 	}
 
+	a.dexpreopter.isApp = true
 	a.dexpreopter.installPath = installDir.Join(ctx, a.BaseModuleName()+".apk")
 	a.dexpreopter.isPresignedPrebuilt = Bool(a.properties.Presigned)
 	a.dexpreopter.uncompressedDex = a.shouldUncompressDex(ctx)
 
 	a.dexpreopter.enforceUsesLibs = a.usesLibrary.enforceUsesLibraries()
 	a.dexpreopter.classLoaderContexts = a.usesLibrary.classLoaderContextForUsesLibDeps(ctx)
+
+	if a.usesLibrary.enforceUsesLibraries() {
+		srcApk = a.usesLibrary.verifyUsesLibrariesAPK(ctx, srcApk)
+	}
 
 	a.dexpreopter.dexpreopt(ctx, jnisUncompressed)
 	if a.dexpreopter.uncompressedDex {
@@ -274,16 +301,21 @@ func (a *AndroidAppImport) generateAndroidBuildActions(ctx android.ModuleContext
 	// TODO: Handle EXTERNAL
 
 	// Sign or align the package if package has not been preprocessed
-	if a.preprocessed {
+
+	if a.isPrebuiltFrameworkRes() {
+		a.outputFile = srcApk
+		certificates = processMainCert(a.ModuleBase, String(a.properties.Certificate), certificates, ctx)
+		if len(certificates) != 1 {
+			ctx.ModuleErrorf("Unexpected number of certificates were extracted: %q", certificates)
+		}
+		a.certificate = certificates[0]
+	} else if a.preprocessed {
 		a.outputFile = srcApk
 		a.certificate = PresignedCertificate
 	} else if !Bool(a.properties.Presigned) {
 		// If the certificate property is empty at this point, default_dev_cert must be set to true.
 		// Which makes processMainCert's behavior for the empty cert string WAI.
 		certificates = processMainCert(a.ModuleBase, String(a.properties.Certificate), certificates, ctx)
-		if len(certificates) != 1 {
-			ctx.ModuleErrorf("Unexpected number of certificates were extracted: %q", certificates)
-		}
 		a.certificate = certificates[0]
 		signed := android.PathForModuleOut(ctx, "signed", apkFilename)
 		var lineageFile android.Path
@@ -429,6 +461,8 @@ func AndroidAppImportFactory() android.Module {
 	android.InitAndroidMultiTargetsArchModule(module, android.DeviceSupported, android.MultilibCommon)
 	android.InitDefaultableModule(module)
 	android.InitSingleSourcePrebuiltModule(module, &module.properties, "Apk")
+
+	module.usesLibrary.enforce = true
 
 	return module
 }

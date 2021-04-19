@@ -17,6 +17,7 @@ package rust
 import (
 	"android/soong/android"
 	"android/soong/cc"
+	"android/soong/genrule"
 )
 
 func GatherRequiredDepsForTest() string {
@@ -35,6 +36,30 @@ func GatherRequiredDepsForTest() string {
 		}
 		rust_prebuilt_library {
 				name: "libtest_x86_64-unknown-linux-gnu",
+                                crate_name: "test",
+                                rlib: {
+                                    srcs: ["libtest.rlib"],
+                                },
+                                dylib: {
+                                    srcs: ["libtest.so"],
+                                },
+				host_supported: true,
+				sysroot: true,
+		}
+		rust_prebuilt_library {
+				name: "libstd_i686-unknown-linux-gnu",
+                                crate_name: "std",
+                                rlib: {
+                                    srcs: ["libstd.rlib"],
+                                },
+                                dylib: {
+                                    srcs: ["libstd.so"],
+                                },
+				host_supported: true,
+				sysroot: true,
+		}
+		rust_prebuilt_library {
+				name: "libtest_i686-unknown-linux-gnu",
                                 crate_name: "test",
                                 rlib: {
                                     srcs: ["libtest.rlib"],
@@ -87,6 +112,13 @@ func GatherRequiredDepsForTest() string {
 			system_shared_libs: [],
 			export_include_dirs: ["libprotobuf-cpp-full-includes"],
 		}
+		cc_library {
+			name: "libclang_rt.asan-aarch64-android",
+			no_libcrt: true,
+			nocrt: true,
+			system_shared_libs: [],
+			export_include_dirs: ["libprotobuf-cpp-full-includes"],
+		}
 		rust_library {
 			name: "libstd",
 			crate_name: "std",
@@ -94,6 +126,7 @@ func GatherRequiredDepsForTest() string {
 			no_stdlibs: true,
 			host_supported: true,
 			vendor_available: true,
+			vendor_ramdisk_available: true,
                         native_coverage: false,
 			sysroot: true,
 			apex_available: ["//apex_available:platform", "//apex_available:anyapex"],
@@ -106,6 +139,7 @@ func GatherRequiredDepsForTest() string {
 			no_stdlibs: true,
 			host_supported: true,
 			vendor_available: true,
+			vendor_ramdisk_available: true,
                         native_coverage: false,
 			sysroot: true,
 			apex_available: ["//apex_available:platform", "//apex_available:anyapex"],
@@ -129,7 +163,12 @@ func GatherRequiredDepsForTest() string {
 			srcs: ["foo.rs"],
 			host_supported: true,
 		}
-
+		rust_library {
+			name: "liblibfuzzer_sys",
+			crate_name: "libfuzzer_sys",
+			srcs:["foo.rs"],
+			host_supported: true,
+		}
 `
 	return bp
 }
@@ -147,6 +186,7 @@ func RegisterRequiredBuildComponentsForTest(ctx android.RegistrationContext) {
 	ctx.RegisterModuleType("rust_library_host", RustLibraryHostFactory)
 	ctx.RegisterModuleType("rust_library_host_dylib", RustLibraryDylibHostFactory)
 	ctx.RegisterModuleType("rust_library_host_rlib", RustLibraryRlibHostFactory)
+	ctx.RegisterModuleType("rust_fuzz", RustFuzzFactory)
 	ctx.RegisterModuleType("rust_ffi", RustFFIFactory)
 	ctx.RegisterModuleType("rust_ffi_shared", RustFFISharedFactory)
 	ctx.RegisterModuleType("rust_ffi_static", RustFFIStaticFactory)
@@ -172,6 +212,7 @@ func CreateTestContext(config android.Config) *android.TestContext {
 	ctx := android.NewTestArchContext(config)
 	android.RegisterPrebuiltMutators(ctx)
 	ctx.PreArchMutators(android.RegisterDefaultsPreArchMutators)
+	genrule.RegisterGenruleBuildComponents(ctx)
 	cc.RegisterRequiredBuildComponentsForTest(ctx)
 	RegisterRequiredBuildComponentsForTest(ctx)
 
