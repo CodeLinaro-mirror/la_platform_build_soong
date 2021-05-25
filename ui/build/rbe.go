@@ -87,14 +87,8 @@ func startRBE(ctx Context, config Config) {
 
 func stopRBE(ctx Context, config Config) {
 	cmd := Command(ctx, config, "stopRBE bootstrap", rbeCommand(ctx, config, bootstrapCmd), "-shutdown")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
+	if output, err := cmd.CombinedOutput(); err != nil {
 		ctx.Fatalf("rbe bootstrap with shutdown failed with: %v\n%s\n", err, output)
-	}
-
-	if len(output) > 0 {
-		fmt.Fprintln(ctx.Writer, "")
-		fmt.Fprintln(ctx.Writer, fmt.Sprintf("%s", output))
 	}
 }
 
