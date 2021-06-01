@@ -43,6 +43,52 @@ func RegisterLibraryHeadersBuildComponents(ctx android.RegistrationContext) {
 	ctx.RegisterModuleType("cc_prebuilt_library_headers", prebuiltLibraryHeaderFactory)
 }
 
+type libraryHeaderBazelHander struct {
+	bazelHandler
+
+	module  *Module
+	library *libraryDecorator
+}
+
+func (h *libraryHeaderBazelHander) generateBazelBuildActions(ctx android.ModuleContext, label string) bool {
+	bazelCtx := ctx.Config().BazelContext
+	ccInfo, ok, err := bazelCtx.GetCcInfo(label, ctx.Arch().ArchType)
+	if err != nil {
+		ctx.ModuleErrorf("Error getting Bazel CcInfo: %s", err)
+		return false
+	}
+	if !ok {
+		return false
+	}
+
+	outputPaths := ccInfo.OutputFiles
+	if len(outputPaths) != 1 {
+		ctx.ModuleErrorf("expected exactly one output file for %q, but got %q", label, outputPaths)
+		return false
+	}
+
+	outputPath := android.PathForBazelOut(ctx, outputPaths[0])
+	h.module.outputFile = android.OptionalPathForPath(outputPath)
+
+	// HeaderLibraryInfo is an empty struct to indicate to dependencies that this is a header library
+	ctx.SetProvider(HeaderLibraryInfoProvider, HeaderLibraryInfo{})
+
+	flagExporterInfo := flagExporterInfoFromCcInfo(ctx, ccInfo)
+	// Store flag info to be passed along to androimk
+	// TODO(b/184387147): Androidmk should be done in Bazel, not Soong.
+	h.library.flagExporterInfo = &flagExporterInfo
+	// flag exporters consolidates properties like includes, flags, dependencies that should be
+	// exported from this module to other modules
+	ctx.SetProvider(FlagExporterInfoProvider, flagExporterInfo)
+
+	// Dependencies on this library will expect collectedSnapshotHeaders to be set, otherwise
+	// validation will fail. For now, set this to an empty list.
+	// TODO(cparsons): More closely mirror the collectHeadersForSnapshot implementation.
+	h.library.collectedSnapshotHeaders = android.Paths{}
+
+	return true
+}
+
 // cc_library_headers contains a set of c/c++ headers which are imported by
 // other soong cc modules using the header_libs property. For best practices,
 // use export_include_dirs property or LOCAL_EXPORT_C_INCLUDE_DIRS for
@@ -51,6 +97,7 @@ func LibraryHeaderFactory() android.Module {
 	module, library := NewLibrary(android.HostAndDeviceSupported)
 	library.HeaderOnly()
 	module.sdkMemberTypes = []android.SdkMemberType{headersLibrarySdkMemberType}
+	module.bazelHandler = &libraryHeaderBazelHander{module: module, library: library}
 	return module.Init()
 }
 
@@ -62,9 +109,10 @@ func prebuiltLibraryHeaderFactory() android.Module {
 }
 
 type bazelCcLibraryHeadersAttributes struct {
-	Hdrs     bazel.LabelList
-	Includes bazel.LabelList
-	Deps     bazel.LabelList
+	Copts    bazel.StringListAttribute
+	Hdrs     bazel.LabelListAttribute
+	Includes bazel.StringListAttribute
+	Deps     bazel.LabelListAttribute
 }
 
 type bazelCcLibraryHeaders struct {
@@ -86,47 +134,22 @@ func CcLibraryHeadersBp2Build(ctx android.TopDownMutatorContext) {
 		return
 	}
 
-	if !module.ConvertWithBp2build() {
+	if !module.ConvertWithBp2build(ctx) {
 		return
 	}
 
-	lib, ok := module.linker.(*libraryDecorator)
-	if !ok {
-		// Not a cc_library module
-		return
-	}
-	if !lib.header() {
-		// Not a cc_library_headers module
+	if ctx.ModuleType() != "cc_library_headers" {
 		return
 	}
 
-	// list of directories that will be added to the include path (using -I) for this
-	// module and any module that links against this module.
-	includeDirs := lib.flagExporter.Properties.Export_system_include_dirs
-	includeDirs = append(includeDirs, lib.flagExporter.Properties.Export_include_dirs...)
-	includeDirLabels := android.BazelLabelForModuleSrc(ctx, includeDirs)
-
-	var includeDirGlobs []string
-	for _, includeDir := range includeDirs {
-		includeDirGlobs = append(includeDirGlobs, includeDir+"/**/*.h")
-	}
-
-	headerLabels := android.BazelLabelForModuleSrc(ctx, includeDirGlobs)
-
-	// list of modules that should only provide headers for this module.
-	var headerLibs []string
-	for _, linkerProps := range lib.linkerProps() {
-		if baseLinkerProps, ok := linkerProps.(*BaseLinkerProperties); ok {
-			headerLibs = baseLinkerProps.Export_header_lib_headers
-			break
-		}
-	}
-	headerLibLabels := android.BazelLabelForModuleDeps(ctx, headerLibs)
+	exportedIncludes := bp2BuildParseExportedIncludes(ctx, module)
+	compilerAttrs := bp2BuildParseCompilerProps(ctx, module)
+	linkerAttrs := bp2BuildParseLinkerProps(ctx, module)
 
 	attrs := &bazelCcLibraryHeadersAttributes{
-		Includes: includeDirLabels,
-		Hdrs:     headerLabels,
-		Deps:     headerLibLabels,
+		Copts:    compilerAttrs.copts,
+		Includes: exportedIncludes,
+		Deps:     linkerAttrs.deps,
 	}
 
 	props := bazel.BazelTargetModuleProperties{

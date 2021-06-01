@@ -29,7 +29,7 @@ var (
 	defaultBindgenFlags = []string{""}
 
 	// bindgen should specify its own Clang revision so updating Clang isn't potentially blocked on bindgen failures.
-	bindgenClangVersion = "clang-r399163b"
+	bindgenClangVersion = "clang-r416183b"
 
 	_ = pctx.VariableFunc("bindgenClangVersion", func(ctx android.PackageVarContext) string {
 		if override := ctx.Config().Getenv("LLVM_BINDGEN_PREBUILTS_VERSION"); override != "" {
@@ -79,7 +79,7 @@ type BindgenProperties struct {
 	// binary must expect arguments in a similar fashion to bindgen, e.g.
 	//
 	// "my_bindgen [flags] wrapper_header.h -o [output_path] -- [clang flags]"
-	Custom_bindgen string `android:"path"`
+	Custom_bindgen string
 }
 
 type bindgenDecorator struct {
@@ -144,6 +144,7 @@ func (b *bindgenDecorator) GenerateSource(ctx ModuleContext, deps PathDeps) andr
 
 	// Toolchain clang flags
 	cflags = append(cflags, "-target "+ccToolchain.ClangTriple())
+	cflags = append(cflags, strings.ReplaceAll(ccToolchain.ClangCflags(), "${config.", "${cc_config."))
 	cflags = append(cflags, strings.ReplaceAll(ccToolchain.ToolchainClangCflags(), "${config.", "${cc_config."))
 
 	// Dependency clang flags and include paths
@@ -260,7 +261,7 @@ func NewRustBindgen(hod android.HostOrDeviceSupported) (*Module, *bindgenDecorat
 func (b *bindgenDecorator) SourceProviderDeps(ctx DepsContext, deps Deps) Deps {
 	deps = b.BaseSourceProvider.SourceProviderDeps(ctx, deps)
 	if ctx.toolchain().Bionic() {
-		deps = bionicDeps(deps, false)
+		deps = bionicDeps(ctx, deps, false)
 	}
 
 	deps.SharedLibs = append(deps.SharedLibs, b.ClangProperties.Shared_libs...)

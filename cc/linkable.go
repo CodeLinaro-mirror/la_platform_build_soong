@@ -2,6 +2,7 @@ package cc
 
 import (
 	"android/soong/android"
+	"android/soong/bazel/cquery"
 
 	"github.com/google/blueprint"
 )
@@ -98,10 +99,21 @@ type LinkableInterface interface {
 	InVendor() bool
 
 	UseSdk() bool
+
+	// IsLlndk returns true for both LLNDK (public) and LLNDK-private libs.
+	IsLlndk() bool
+
+	// IsLlndkPublic returns true only for LLNDK (public) libs.
+	IsLlndkPublic() bool
+
+	// NeedsLlndkVariants returns true if this module has LLNDK stubs or provides LLNDK headers.
+	NeedsLlndkVariants() bool
+
+	// NeedsVendorPublicLibraryVariants returns true if this module has vendor public library stubs.
+	NeedsVendorPublicLibraryVariants() bool
+
 	UseVndk() bool
 	MustUseVendorVariant() bool
-	IsLlndk() bool
-	IsLlndkPublic() bool
 	IsVndk() bool
 	IsVndkExt() bool
 	IsVndkPrivate() bool
@@ -110,7 +122,11 @@ type LinkableInterface interface {
 	HasNonSystemVariants() bool
 	InProduct() bool
 
+	// SubName returns the modules SubName, used for image and NDK/SDK variations.
+	SubName() string
+
 	SdkVersion() string
+	MinSdkVersion() string
 	AlwaysSdk() bool
 	IsSdkVariant() bool
 
@@ -120,6 +136,10 @@ type LinkableInterface interface {
 	SetPreventInstall()
 	// SetHideFromMake sets the HideFromMake property to 'true' for this module.
 	SetHideFromMake()
+
+	// KernelHeadersDecorator returns true if this is a kernel headers decorator module.
+	// This is specific to cc and should always return false for all other packages.
+	KernelHeadersDecorator() bool
 }
 
 var (
@@ -151,14 +171,31 @@ func GetImageVariantType(c LinkableInterface) ImageVariantType {
 	}
 }
 
+// DepTagMakeSuffix returns the makeSuffix value of a particular library dependency tag.
+// Returns an empty string if not a library dependency tag.
+func DepTagMakeSuffix(depTag blueprint.DependencyTag) string {
+	if libDepTag, ok := depTag.(libraryDependencyTag); ok {
+		return libDepTag.makeSuffix
+	}
+	return ""
+}
+
 // SharedDepTag returns the dependency tag for any C++ shared libraries.
 func SharedDepTag() blueprint.DependencyTag {
 	return libraryDependencyTag{Kind: sharedLibraryDependency}
 }
 
 // StaticDepTag returns the dependency tag for any C++ static libraries.
-func StaticDepTag() blueprint.DependencyTag {
-	return libraryDependencyTag{Kind: staticLibraryDependency}
+func StaticDepTag(wholeStatic bool) blueprint.DependencyTag {
+	return libraryDependencyTag{Kind: staticLibraryDependency, wholeStatic: wholeStatic}
+}
+
+// IsWholeStaticLib whether a dependency tag is a whole static library dependency.
+func IsWholeStaticLib(depTag blueprint.DependencyTag) bool {
+	if tag, ok := depTag.(libraryDependencyTag); ok {
+		return tag.wholeStatic
+	}
+	return false
 }
 
 // HeaderDepTag returns the dependency tag for any C++ "header-only" libraries.
@@ -170,6 +207,7 @@ func HeaderDepTag() blueprint.DependencyTag {
 type SharedLibraryInfo struct {
 	SharedLibrary           android.Path
 	UnstrippedSharedLibrary android.Path
+	Target                  android.Target
 
 	TableOfContents       android.OptionalPath
 	CoverageSharedLibrary android.OptionalPath
@@ -234,3 +272,15 @@ type FlagExporterInfo struct {
 }
 
 var FlagExporterInfoProvider = blueprint.NewProvider(FlagExporterInfo{})
+
+// flagExporterInfoFromCcInfo populates FlagExporterInfo provider with information from Bazel.
+func flagExporterInfoFromCcInfo(ctx android.ModuleContext, ccInfo cquery.CcInfo) FlagExporterInfo {
+
+	includes := android.PathsForBazelOut(ctx, ccInfo.Includes)
+	systemIncludes := android.PathsForBazelOut(ctx, ccInfo.SystemIncludes)
+
+	return FlagExporterInfo{
+		IncludeDirs:       android.FirstUniquePaths(includes),
+		SystemIncludeDirs: android.FirstUniquePaths(systemIncludes),
+	}
+}

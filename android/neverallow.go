@@ -42,7 +42,7 @@ import (
 //     counts as a match
 // - it has none of the "Without" properties matched (same rules as above)
 
-func RegisterNeverallowMutator(ctx RegisterMutatorsContext) {
+func registerNeverallowMutator(ctx RegisterMutatorsContext) {
 	ctx.BottomUp("neverallow", neverallowMutator).Parallel()
 }
 
@@ -63,8 +63,7 @@ func AddNeverAllowRules(rules ...Rule) {
 }
 
 func createIncludeDirsRules() []Rule {
-	// The list of paths that cannot be referenced using include_dirs
-	paths := []string{
+	notInIncludeDir := []string{
 		"art",
 		"art/libnativebridge",
 		"art/libnativeloader",
@@ -80,18 +79,35 @@ func createIncludeDirsRules() []Rule {
 		"external/vixl",
 		"external/wycheproof",
 	}
+	noUseIncludeDir := []string{
+		"frameworks/av/apex",
+		"frameworks/av/tools",
+		"frameworks/native/cmds",
+		"system/apex",
+		"system/bpf",
+		"system/gatekeeper",
+		"system/hwservicemanager",
+		"system/libbase",
+		"system/libfmq",
+		"system/libvintf",
+	}
 
-	// Create a composite matcher that will match if the value starts with any of the restricted
-	// paths. A / is appended to the prefix to ensure that restricting path X does not affect paths
-	// XY.
-	rules := make([]Rule, 0, len(paths))
-	for _, path := range paths {
+	rules := make([]Rule, 0, len(notInIncludeDir)+len(noUseIncludeDir))
+
+	for _, path := range notInIncludeDir {
 		rule :=
 			NeverAllow().
 				WithMatcher("include_dirs", StartsWith(path+"/")).
 				Because("include_dirs is deprecated, all usages of '" + path + "' have been migrated" +
 					" to use alternate mechanisms and so can no longer be used.")
 
+		rules = append(rules, rule)
+	}
+
+	for _, path := range noUseIncludeDir {
+		rule := NeverAllow().In(path+"/").WithMatcher("include_dirs", isSetMatcherInstance).
+			Because("include_dirs is deprecated, all usages of them in '" + path + "' have been migrated" +
+				" to use alternate mechanisms and so can no longer be used.")
 		rules = append(rules, rule)
 	}
 
@@ -661,6 +677,22 @@ func neverallowRules(config Config) []Rule {
 // Overrides the default neverallow rules for the supplied config.
 //
 // For testing only.
-func SetTestNeverallowRules(config Config, testRules []Rule) {
+func setTestNeverallowRules(config Config, testRules []Rule) {
 	config.Once(neverallowRulesKey, func() interface{} { return testRules })
+}
+
+// Prepares for a test by setting neverallow rules and enabling the mutator.
+//
+// If the supplied rules are nil then the default rules are used.
+func PrepareForTestWithNeverallowRules(testRules []Rule) FixturePreparer {
+	return GroupFixturePreparers(
+		FixtureModifyConfig(func(config Config) {
+			if testRules != nil {
+				setTestNeverallowRules(config, testRules)
+			}
+		}),
+		FixtureRegisterWithContext(func(ctx RegistrationContext) {
+			ctx.PostDepsMutators(registerNeverallowMutator)
+		}),
+	)
 }

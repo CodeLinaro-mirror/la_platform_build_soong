@@ -54,7 +54,7 @@ type objectBazelHandler struct {
 
 func (handler *objectBazelHandler) generateBazelBuildActions(ctx android.ModuleContext, label string) bool {
 	bazelCtx := ctx.Config().BazelContext
-	objPaths, ok := bazelCtx.GetCcObjectFiles(label, ctx.Arch().ArchType)
+	objPaths, ok := bazelCtx.GetOutputFiles(label, ctx.Arch().ArchType)
 	if ok {
 		if len(objPaths) != 1 {
 			ctx.ModuleErrorf("expected exactly one object file for '%s', but got %s", label, objPaths)
@@ -112,10 +112,11 @@ func ObjectFactory() android.Module {
 
 // For bp2build conversion.
 type bazelObjectAttributes struct {
-	Srcs               bazel.LabelList
-	Deps               bazel.LabelList
-	Copts              bazel.StringListAttribute
-	Local_include_dirs []string
+	Srcs    bazel.LabelListAttribute
+	Hdrs    bazel.LabelListAttribute
+	Deps    bazel.LabelListAttribute
+	Copts   bazel.StringListAttribute
+	Asflags []string
 }
 
 type bazelObject struct {
@@ -140,7 +141,7 @@ func BazelObjectFactory() android.Module {
 // Bazel equivalent target, plus any necessary include deps for the cc_object.
 func ObjectBp2Build(ctx android.TopDownMutatorContext) {
 	m, ok := ctx.Module().(*Module)
-	if !ok || !m.ConvertWithBp2build() {
+	if !ok || !m.ConvertWithBp2build(ctx) {
 		return
 	}
 
@@ -155,39 +156,39 @@ func ObjectBp2Build(ctx android.TopDownMutatorContext) {
 	}
 
 	// Set arch-specific configurable attributes
-	var copts bazel.StringListAttribute
-	var srcs []string
-	var excludeSrcs []string
-	var localIncludeDirs []string
-	for _, props := range m.compiler.compilerProps() {
-		if baseCompilerProps, ok := props.(*BaseCompilerProperties); ok {
-			copts.Value = baseCompilerProps.Cflags
-			srcs = baseCompilerProps.Srcs
-			excludeSrcs = baseCompilerProps.Exclude_srcs
-			localIncludeDirs = baseCompilerProps.Local_include_dirs
-			break
-		}
-	}
+	compilerAttrs := bp2BuildParseCompilerProps(ctx, m)
+	var asFlags []string
 
-	var deps bazel.LabelList
+	var deps bazel.LabelListAttribute
 	for _, props := range m.linker.linkerProps() {
 		if objectLinkerProps, ok := props.(*ObjectLinkerProperties); ok {
-			deps = android.BazelLabelForModuleDeps(ctx, objectLinkerProps.Objs)
+			deps = bazel.MakeLabelListAttribute(
+				android.BazelLabelForModuleDeps(ctx, objectLinkerProps.Objs))
 		}
 	}
 
-	for arch, p := range m.GetArchProperties(&BaseCompilerProperties{}) {
-		if cProps, ok := p.(*BaseCompilerProperties); ok {
-			copts.SetValueForArch(arch.Name, cProps.Cflags)
+	productVariableProps := android.ProductVariableProperties(ctx)
+	if props, exists := productVariableProps["Asflags"]; exists {
+		// TODO(b/183595873): consider deduplicating handling of product variable properties
+		for _, prop := range props {
+			flags, ok := prop.Property.([]string)
+			if !ok {
+				ctx.ModuleErrorf("Could not convert product variable asflag property")
+				return
+			}
+			// TODO(b/183595873) handle other product variable usages -- as selects?
+			if newFlags, subbed := bazel.TryVariableSubstitutions(flags, prop.ProductConfigVariable); subbed {
+				asFlags = append(asFlags, newFlags...)
+			}
 		}
 	}
-	copts.SetValueForArch("default", []string{})
+	// TODO(b/183595872) warn/error if we're not handling product variables
 
 	attrs := &bazelObjectAttributes{
-		Srcs:               android.BazelLabelForModuleSrcExcludes(ctx, srcs, excludeSrcs),
-		Deps:               deps,
-		Copts:              copts,
-		Local_include_dirs: localIncludeDirs,
+		Srcs:    compilerAttrs.srcs,
+		Deps:    deps,
+		Copts:   compilerAttrs.copts,
+		Asflags: asFlags,
 	}
 
 	props := bazel.BazelTargetModuleProperties{

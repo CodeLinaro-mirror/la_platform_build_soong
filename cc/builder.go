@@ -59,7 +59,7 @@ var (
 
 	// Rules to invoke ld to link binaries. Uses a .rsp file to list dependencies, as there may
 	// be many.
-	ld, ldRE = remoteexec.StaticRules(pctx, "ld",
+	ld, ldRE = pctx.RemoteStaticRules("ld",
 		blueprint.RuleParams{
 			Command: "$reTemplate$ldCmd ${crtBegin} @${out}.rsp " +
 				"${libFlags} ${crtEnd} -o ${out} ${ldFlags} ${extraLibFlags}",
@@ -73,14 +73,14 @@ var (
 			Labels:          map[string]string{"type": "link", "tool": "clang"},
 			ExecStrategy:    "${config.RECXXLinksExecStrategy}",
 			Inputs:          []string{"${out}.rsp", "$implicitInputs"},
-			RSPFile:         "${out}.rsp",
+			RSPFiles:        []string{"${out}.rsp"},
 			OutputFiles:     []string{"${out}", "$implicitOutputs"},
 			ToolchainInputs: []string{"$ldCmd"},
 			Platform:        map[string]string{remoteexec.PoolKey: "${config.RECXXLinksPool}"},
 		}, []string{"ldCmd", "crtBegin", "libFlags", "crtEnd", "ldFlags", "extraLibFlags"}, []string{"implicitInputs", "implicitOutputs"})
 
 	// Rules for .o files to combine to other .o files, using ld partial linking.
-	partialLd, partialLdRE = remoteexec.StaticRules(pctx, "partialLd",
+	partialLd, partialLdRE = pctx.RemoteStaticRules("partialLd",
 		blueprint.RuleParams{
 			// Without -no-pie, clang 7.0 adds -pie to link Android files,
 			// but -r and -pie cannot be used together.
@@ -126,17 +126,24 @@ var (
 
 	_ = pctx.SourcePathVariable("stripPath", "build/soong/scripts/strip.sh")
 	_ = pctx.SourcePathVariable("xzCmd", "prebuilts/build-tools/${config.HostPrebuiltTag}/bin/xz")
+	_ = pctx.SourcePathVariable("createMiniDebugInfo", "prebuilts/build-tools/${config.HostPrebuiltTag}/bin/create_minidebuginfo")
 
 	// Rule to invoke `strip` (to discard symbols and data from object files).
 	strip = pctx.AndroidStaticRule("strip",
 		blueprint.RuleParams{
-			Depfile:     "${out}.d",
-			Deps:        blueprint.DepsGCC,
-			Command:     "CROSS_COMPILE=$crossCompile XZ=$xzCmd CLANG_BIN=${config.ClangBin} $stripPath ${args} -i ${in} -o ${out} -d ${out}.d",
-			CommandDeps: []string{"$stripPath", "$xzCmd"},
-			Pool:        darwinStripPool,
+			Depfile: "${out}.d",
+			Deps:    blueprint.DepsGCC,
+			Command: "XZ=$xzCmd CREATE_MINIDEBUGINFO=$createMiniDebugInfo CLANG_BIN=${config.ClangBin} $stripPath ${args} -i ${in} -o ${out} -d ${out}.d",
+			CommandDeps: func() []string {
+				if runtime.GOOS != "darwin" {
+					return []string{"$stripPath", "$xzCmd", "$createMiniDebugInfo"}
+				} else {
+					return []string{"$stripPath", "$xzCmd"}
+				}
+			}(),
+			Pool: darwinStripPool,
 		},
-		"args", "crossCompile")
+		"args")
 
 	// Rule to invoke `strip` (to discard symbols and data from object files) on darwin architecture.
 	darwinStrip = pctx.AndroidStaticRule("darwinStrip",
@@ -182,14 +189,14 @@ var (
 		blueprint.RuleParams{
 			Depfile:     "${out}.d",
 			Deps:        blueprint.DepsGCC,
-			Command:     "CROSS_COMPILE=$crossCompile $tocPath $format -i ${in} -o ${out} -d ${out}.d",
+			Command:     "CLANG_BIN=$clangBin $tocPath $format -i ${in} -o ${out} -d ${out}.d",
 			CommandDeps: []string{"$tocPath"},
 			Restat:      true,
 		},
-		"crossCompile", "format")
+		"clangBin", "format")
 
 	// Rule for invoking clang-tidy (a clang-based linter).
-	clangTidy, clangTidyRE = remoteexec.StaticRules(pctx, "clangTidy",
+	clangTidy, clangTidyRE = pctx.RemoteStaticRules("clangTidy",
 		blueprint.RuleParams{
 			Command:     "rm -f $out && $reTemplate${config.ClangBin}/clang-tidy $tidyFlags $in -- $cFlags && touch $out",
 			CommandDeps: []string{"${config.ClangBin}/clang-tidy"},
@@ -228,7 +235,7 @@ var (
 	_ = pctx.SourcePathVariable("sAbiDumper", "prebuilts/clang-tools/${config.HostPrebuiltTag}/bin/header-abi-dumper")
 
 	// -w has been added since header-abi-dumper does not need to produce any sort of diagnostic information.
-	sAbiDump, sAbiDumpRE = remoteexec.StaticRules(pctx, "sAbiDump",
+	sAbiDump, sAbiDumpRE = pctx.RemoteStaticRules("sAbiDump",
 		blueprint.RuleParams{
 			Command:     "rm -f $out && $reTemplate$sAbiDumper -o ${out} $in $exportDirs -- $cFlags -w -isystem prebuilts/clang-tools/${config.HostPrebuiltTag}/clang-headers",
 			CommandDeps: []string{"$sAbiDumper"},
@@ -246,7 +253,7 @@ var (
 
 	// Rule to combine .dump sAbi dump files from multiple source files into a single .ldump
 	// sAbi dump file.
-	sAbiLink, sAbiLinkRE = remoteexec.StaticRules(pctx, "sAbiLink",
+	sAbiLink, sAbiLinkRE = pctx.RemoteStaticRules("sAbiLink",
 		blueprint.RuleParams{
 			Command:        "$reTemplate$sAbiLinker -o ${out} $symbolFilter -arch $arch  $exportedHeaderFlags @${out}.rsp ",
 			CommandDeps:    []string{"$sAbiLinker"},
@@ -256,7 +263,7 @@ var (
 			Labels:          map[string]string{"type": "tool", "name": "abi-linker"},
 			ExecStrategy:    "${config.REAbiLinkerExecStrategy}",
 			Inputs:          []string{"$sAbiLinkerLibs", "${out}.rsp", "$implicitInputs"},
-			RSPFile:         "${out}.rsp",
+			RSPFiles:        []string{"${out}.rsp"},
 			OutputFiles:     []string{"$out"},
 			ToolchainInputs: []string{"$sAbiLinker"},
 			Platform:        map[string]string{remoteexec.PoolKey: "${config.RECXXPool}"},
@@ -331,7 +338,6 @@ func init() {
 	pctx.StaticVariable("relPwd", PwdPrefix())
 
 	pctx.HostBinToolVariable("SoongZipCmd", "soong_zip")
-	pctx.Import("android/soong/remoteexec")
 }
 
 // builderFlags contains various types of command line flags (and settings) for use in building
@@ -935,16 +941,12 @@ func transformSharedObjectToToc(ctx android.ModuleContext, inputFile android.Pat
 	outputFile android.WritablePath, flags builderFlags) {
 
 	var format string
-	var crossCompile string
 	if ctx.Darwin() {
 		format = "--macho"
-		crossCompile = "${config.MacToolPath}"
 	} else if ctx.Windows() {
 		format = "--pe"
-		crossCompile = gccCmd(flags.toolchain, "")
 	} else {
 		format = "--elf"
-		crossCompile = gccCmd(flags.toolchain, "")
 	}
 
 	ctx.Build(pctx, android.BuildParams{
@@ -953,8 +955,8 @@ func transformSharedObjectToToc(ctx android.ModuleContext, inputFile android.Pat
 		Output:      outputFile,
 		Input:       inputFile,
 		Args: map[string]string{
-			"crossCompile": crossCompile,
-			"format":       format,
+			"clangBin": "${config.ClangBin}",
+			"format":   format,
 		},
 	})
 }
@@ -996,7 +998,7 @@ func transformObjsToObj(ctx android.ModuleContext, objFiles android.Paths,
 func transformBinaryPrefixSymbols(ctx android.ModuleContext, prefix string, inputFile android.Path,
 	flags builderFlags, outputFile android.WritablePath) {
 
-	objcopyCmd := gccCmd(flags.toolchain, "objcopy")
+	objcopyCmd := "${config.ClangBin}/llvm-objcopy"
 
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        prefixSymbols,
@@ -1014,7 +1016,6 @@ func transformBinaryPrefixSymbols(ctx android.ModuleContext, prefix string, inpu
 func transformStrip(ctx android.ModuleContext, inputFile android.Path,
 	outputFile android.WritablePath, flags StripFlags) {
 
-	crossCompile := gccCmd(flags.Toolchain, "")
 	args := ""
 	if flags.StripAddGnuDebuglink {
 		args += " --add-gnu-debuglink"
@@ -1031,9 +1032,6 @@ func transformStrip(ctx android.ModuleContext, inputFile android.Path,
 	if flags.StripKeepSymbolsAndDebugFrame {
 		args += " --keep-symbols-and-debug-frame"
 	}
-	if flags.StripUseGnuStrip {
-		args += " --use-gnu-strip"
-	}
 
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        strip,
@@ -1041,8 +1039,7 @@ func transformStrip(ctx android.ModuleContext, inputFile android.Path,
 		Output:      outputFile,
 		Input:       inputFile,
 		Args: map[string]string{
-			"crossCompile": crossCompile,
-			"args":         args,
+			"args": args,
 		},
 	})
 }
