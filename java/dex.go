@@ -15,6 +15,7 @@
 package java
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/google/blueprint"
@@ -83,7 +84,12 @@ func (d *dexer) effectiveOptimizeEnabled() bool {
 	return BoolDefault(d.dexProperties.Optimize.Enabled, d.dexProperties.Optimize.EnabledByDefault)
 }
 
-var d8, d8RE = remoteexec.MultiCommandStaticRules(pctx, "d8",
+func init() {
+	pctx.HostBinToolVariable("runWithTimeoutCmd", "run_with_timeout")
+	pctx.SourcePathVariable("jstackCmd", "${config.JavaToolchain}/jstack")
+}
+
+var d8, d8RE = pctx.MultiCommandRemoteStaticRules("d8",
 	blueprint.RuleParams{
 		Command: `rm -rf "$outDir" && mkdir -p "$outDir" && ` +
 			`$d8Template${config.D8Cmd} ${config.DexFlags} --output $outDir $d8Flags $in && ` +
@@ -111,12 +117,15 @@ var d8, d8RE = remoteexec.MultiCommandStaticRules(pctx, "d8",
 		},
 	}, []string{"outDir", "d8Flags", "zipFlags"}, nil)
 
-var r8, r8RE = remoteexec.MultiCommandStaticRules(pctx, "r8",
+var r8, r8RE = pctx.MultiCommandRemoteStaticRules("r8",
 	blueprint.RuleParams{
 		Command: `rm -rf "$outDir" && mkdir -p "$outDir" && ` +
 			`rm -f "$outDict" && rm -rf "${outUsageDir}" && ` +
 			`mkdir -p $$(dirname ${outUsage}) && ` +
-			`$r8Template${config.R8Cmd} ${config.DexFlags} -injars $in --output $outDir ` +
+			// TODO(b/181095653): remove R8 timeout and go back to config.R8Cmd.
+			`${runWithTimeoutCmd} -timeout 30m -on_timeout '${jstackCmd} $$PID' -- ` +
+			`$r8Template${config.JavaCmd} ${config.DexJavaFlags} -cp ${config.R8Jar} ` +
+			`com.android.tools.r8.compatproguard.CompatProguard -injars $in --output $outDir ` +
 			`--no-data-resources ` +
 			`-printmapping ${outDict} ` +
 			`-printusage ${outUsage} ` +
@@ -127,9 +136,10 @@ var r8, r8RE = remoteexec.MultiCommandStaticRules(pctx, "r8",
 			`$zipTemplate${config.SoongZipCmd} $zipFlags -o $outDir/classes.dex.jar -C $outDir -f "$outDir/classes*.dex" && ` +
 			`${config.MergeZipsCmd} -D -stripFile "**/*.class" $out $outDir/classes.dex.jar $in`,
 		CommandDeps: []string{
-			"${config.R8Cmd}",
+			"${config.R8Jar}",
 			"${config.SoongZipCmd}",
 			"${config.MergeZipsCmd}",
+			"${runWithTimeoutCmd}",
 		},
 	}, map[string]*remoteexec.REParams{
 		"$r8Template": &remoteexec.REParams{
@@ -157,7 +167,7 @@ var r8, r8RE = remoteexec.MultiCommandStaticRules(pctx, "r8",
 	}, []string{"outDir", "outDict", "outUsage", "outUsageZip", "outUsageDir",
 		"r8Flags", "zipFlags"}, []string{"implicits"})
 
-func (d *dexer) dexCommonFlags(ctx android.ModuleContext, minSdkVersion sdkSpec) []string {
+func (d *dexer) dexCommonFlags(ctx android.ModuleContext, minSdkVersion android.SdkSpec) []string {
 	flags := d.dexProperties.Dxflags
 	// Translate all the DX flags to D8 ones until all the build files have been migrated
 	// to D8 flags. See: b/69377755
@@ -174,12 +184,12 @@ func (d *dexer) dexCommonFlags(ctx android.ModuleContext, minSdkVersion sdkSpec)
 			"--verbose")
 	}
 
-	effectiveVersion, err := minSdkVersion.effectiveVersion(ctx)
+	effectiveVersion, err := minSdkVersion.EffectiveVersion(ctx)
 	if err != nil {
 		ctx.PropertyErrorf("min_sdk_version", "%s", err)
 	}
 
-	flags = append(flags, "--min-api "+effectiveVersion.asNumberString())
+	flags = append(flags, "--min-api "+strconv.Itoa(effectiveVersion.FinalOrFutureInt()))
 	return flags
 }
 
@@ -266,7 +276,7 @@ func (d *dexer) r8Flags(ctx android.ModuleContext, flags javaBuilderFlags) (r8Fl
 	return r8Flags, r8Deps
 }
 
-func (d *dexer) compileDex(ctx android.ModuleContext, flags javaBuilderFlags, minSdkVersion sdkSpec,
+func (d *dexer) compileDex(ctx android.ModuleContext, flags javaBuilderFlags, minSdkVersion android.SdkSpec,
 	classesJar android.Path, jarName string) android.OutputPath {
 
 	// Compile classes.jar into classes.dex and then javalib.jar

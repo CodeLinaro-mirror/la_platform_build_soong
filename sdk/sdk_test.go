@@ -31,7 +31,7 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 
-	runTestWithBuildDir(m)
+	os.Exit(m.Run())
 }
 
 func TestDepNotInRequiredSdks(t *testing.T) {
@@ -169,7 +169,7 @@ func TestSnapshotVisibility(t *testing.T) {
 			"package/Android.bp": []byte(packageBp),
 		})
 
-	result.CheckSnapshot("mysdk", "package",
+	CheckSnapshot(t, result, "mysdk", "package",
 		checkAndroidBpContents(`
 // This is auto-generated. DO NOT EDIT.
 
@@ -317,9 +317,8 @@ func TestSdkInstall(t *testing.T) {
 	`
 	result := testSdkWithFs(t, sdk, nil)
 
-	result.CheckSnapshot("mysdk", "",
-		checkAllOtherCopyRules(`.intermediates/mysdk/common_os/mysdk-current.zip -> mysdk-current.zip`),
-	)
+	CheckSnapshot(t, result, "mysdk", "",
+		checkAllOtherCopyRules(`.intermediates/mysdk/common_os/mysdk-current.zip -> mysdk-current.zip`))
 }
 
 type EmbeddedPropertiesStruct struct {
@@ -387,12 +386,10 @@ func TestCommonValueOptimization(t *testing.T) {
 
 	extractor := newCommonValueExtractor(common)
 
-	h := android.TestHelper{t}
-
 	err := extractor.extractCommonProperties(common, structs)
-	h.AssertDeepEquals("unexpected error", nil, err)
+	android.AssertDeepEquals(t, "unexpected error", nil, err)
 
-	h.AssertDeepEquals("common properties not correct",
+	android.AssertDeepEquals(t, "common properties not correct",
 		&testPropertiesStruct{
 			name:        "common",
 			private:     "",
@@ -410,7 +407,7 @@ func TestCommonValueOptimization(t *testing.T) {
 		},
 		common)
 
-	h.AssertDeepEquals("updated properties[0] not correct",
+	android.AssertDeepEquals(t, "updated properties[0] not correct",
 		&testPropertiesStruct{
 			name:        "struct-0",
 			private:     "common",
@@ -428,7 +425,7 @@ func TestCommonValueOptimization(t *testing.T) {
 		},
 		structs[0])
 
-	h.AssertDeepEquals("updated properties[1] not correct",
+	android.AssertDeepEquals(t, "updated properties[1] not correct",
 		&testPropertiesStruct{
 			name:        "struct-1",
 			private:     "common",
@@ -462,10 +459,70 @@ func TestCommonValueOptimization_InvalidArchSpecificVariants(t *testing.T) {
 
 	extractor := newCommonValueExtractor(common)
 
-	h := android.TestHelper{t}
-
 	err := extractor.extractCommonProperties(common, structs)
-	h.AssertErrorMessageEquals("unexpected error", `field "S_Common" is not tagged as "arch_variant" but has arch specific properties:
+	android.AssertErrorMessageEquals(t, "unexpected error", `field "S_Common" is not tagged as "arch_variant" but has arch specific properties:
     "struct-0" has value "should-be-but-is-not-common0"
     "struct-1" has value "should-be-but-is-not-common1"`, err)
+}
+
+// Ensure that sdk snapshot related environment variables work correctly.
+func TestSnapshot_EnvConfiguration(t *testing.T) {
+	bp := `
+		sdk {
+			name: "mysdk",
+			java_header_libs: ["myjavalib"],
+		}
+
+		java_library {
+			name: "myjavalib",
+			srcs: ["Test.java"],
+			system_modules: "none",
+			sdk_version: "none",
+			compile_dex: true,
+			host_supported: true,
+		}
+	`
+	preparer := android.GroupFixturePreparers(
+		prepareForSdkTestWithJava,
+		android.FixtureWithRootAndroidBp(bp),
+	)
+
+	checkZipFile := func(t *testing.T, result *android.TestResult, expected string) {
+		zipRule := result.ModuleForTests("mysdk", "common_os").Rule("SnapshotZipFiles")
+		android.AssertStringEquals(t, "snapshot zip file", expected, zipRule.Output.String())
+	}
+
+	t.Run("no env variables", func(t *testing.T) {
+		result := preparer.RunTest(t)
+
+		checkZipFile(t, result, "out/soong/.intermediates/mysdk/common_os/mysdk-current.zip")
+
+		CheckSnapshot(t, result, "mysdk", "",
+			checkAndroidBpContents(`
+// This is auto-generated. DO NOT EDIT.
+
+java_import {
+    name: "mysdk_myjavalib@current",
+    sdk_member_name: "myjavalib",
+    visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
+    jars: ["java/myjavalib.jar"],
+}
+
+java_import {
+    name: "myjavalib",
+    prefer: false,
+    visibility: ["//visibility:public"],
+    apex_available: ["//apex_available:platform"],
+    jars: ["java/myjavalib.jar"],
+}
+
+sdk_snapshot {
+    name: "mysdk@current",
+    visibility: ["//visibility:public"],
+    java_header_libs: ["mysdk_myjavalib@current"],
+}
+			`),
+		)
+	})
 }

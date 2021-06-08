@@ -48,6 +48,7 @@ type configImpl struct {
 	dist           bool
 	skipConfig     bool
 	skipKati       bool
+	skipNinja      bool
 	skipSoongTests bool
 
 	// From the product config
@@ -56,7 +57,6 @@ type configImpl struct {
 	katiSuffix      string
 	targetDevice    string
 	targetDeviceDir string
-	fullBuild       bool
 
 	// Autodetected
 	totalRAM uint64
@@ -91,6 +91,21 @@ const (
 
 	// Build a list of specified modules. If none was specified, simply build the whole source tree.
 	BUILD_MODULES
+)
+
+type bazelBuildMode int
+
+// Bazel-related build modes.
+const (
+	// Don't use bazel at all.
+	noBazel bazelBuildMode = iota
+
+	// Only generate build files (in a subdirectory of the out directory) and exit.
+	generateBuildFiles
+
+	// Generate synthetic build files and incorporate these files into a build which
+	// partially uses Bazel. Build metadata may come from Android.bp or BUILD files.
+	mixedBuild
 )
 
 // checkTopDir validates that the current directory is at the root directory of the source tree.
@@ -553,6 +568,8 @@ func (c *configImpl) parseArgs(ctx Context, args []string) {
 		if arg == "--make-mode" {
 		} else if arg == "showcommands" {
 			c.verbose = true
+		} else if arg == "--skip-ninja" {
+			c.skipNinja = true
 		} else if arg == "--skip-make" {
 			c.skipConfig = true
 			c.skipKati = true
@@ -773,6 +790,10 @@ func (c *configImpl) SkipKati() bool {
 	return c.skipKati
 }
 
+func (c *configImpl) SkipNinja() bool {
+	return c.skipNinja
+}
+
 func (c *configImpl) SkipConfig() bool {
 	return c.skipConfig
 }
@@ -790,14 +811,6 @@ func (c *configImpl) TargetDevice() string {
 
 func (c *configImpl) SetTargetDevice(device string) {
 	c.targetDevice = device
-}
-
-func (c *configImpl) FullBuild() bool {
-	return c.fullBuild
-}
-
-func (c *configImpl) SetFullBuild(fullBuild bool) {
-	c.fullBuild = fullBuild
 }
 
 func (c *configImpl) TargetBuildVariant() string {
@@ -897,6 +910,16 @@ func (c *configImpl) UseRBE() bool {
 
 func (c *configImpl) UseBazel() bool {
 	return c.useBazel
+}
+
+func (c *configImpl) bazelBuildMode() bazelBuildMode {
+	if c.Environment().IsEnvTrue("USE_BAZEL_ANALYSIS") {
+		return mixedBuild
+	} else if c.Environment().IsEnvTrue("GENERATE_BAZEL_FILES") {
+		return generateBuildFiles
+	} else {
+		return noBazel
+	}
 }
 
 func (c *configImpl) StartRBE() bool {

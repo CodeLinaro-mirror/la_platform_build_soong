@@ -218,6 +218,11 @@ func Build(ctx Context, config Config, what int) {
 		what = what &^ BuildKati
 	}
 
+	if config.SkipNinja() {
+		ctx.Verboseln("Skipping Ninja as requested")
+		what = what &^ BuildNinja
+	}
+
 	if config.StartGoma() {
 		// Ensure start Goma compiler_proxy
 		startGoma(ctx, config)
@@ -253,8 +258,8 @@ func Build(ctx Context, config Config, what int) {
 		// Run Soong
 		runSoong(ctx, config)
 
-		if config.Environment().IsEnvTrue("GENERATE_BAZEL_FILES") {
-			// Return early, if we're using Soong as the bp2build converter.
+		if config.bazelBuildMode() == generateBuildFiles {
+			// Return early, if we're using Soong as solely the generator of BUILD files.
 			return
 		}
 	}
@@ -290,7 +295,7 @@ func Build(ctx Context, config Config, what int) {
 		}
 
 		// Run ninja
-		runNinja(ctx, config)
+		runNinjaForBuild(ctx, config)
 	}
 
 	// Currently, using Bazel requires Kati and Soong to run first, so check whether to run Bazel last.

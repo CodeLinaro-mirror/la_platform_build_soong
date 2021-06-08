@@ -22,12 +22,12 @@ import (
 	"path/filepath"
 )
 
-func createBazelQueryView(ctx bp2build.CodegenContext, bazelQueryViewDir string) error {
+func createBazelQueryView(ctx *bp2build.CodegenContext, bazelQueryViewDir string) error {
 	ruleShims := bp2build.CreateRuleShims(android.ModuleTypeFactories())
 
 	// Ignore metrics reporting for queryview, since queryview is already a full-repo
 	// conversion and can use data from bazel query directly.
-	buildToTargets, _ := bp2build.GenerateBazelTargets(ctx)
+	buildToTargets, _ := bp2build.GenerateBazelTargets(ctx, true)
 
 	filesToWrite := bp2build.CreateBazelFiles(ruleShims, buildToTargets, bp2build.QueryView)
 	for _, f := range filesToWrite {

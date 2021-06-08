@@ -55,6 +55,7 @@ func RegisterMutatorsForBazelConversion(ctx *Context, preArchMutators, depsMutat
 	bp2buildDepsMutators = append([]RegisterMutatorFunc{
 		registerDepsMutatorBp2Build,
 		registerPathDepsMutator,
+		registerBp2buildArchPathDepsMutator,
 	}, depsMutators...)
 
 	for _, f := range bp2buildDepsMutators {
@@ -202,7 +203,7 @@ var postDeps = []RegisterMutatorFunc{
 	RegisterPrebuiltsPostDepsMutators,
 	RegisterVisibilityRuleEnforcer,
 	RegisterLicensesDependencyChecker,
-	RegisterNeverallowMutator,
+	registerNeverallowMutator,
 	RegisterOverridePostDepsMutators,
 }
 
@@ -226,7 +227,7 @@ func FinalDepsMutators(f RegisterMutatorFunc) {
 
 var bp2buildPreArchMutators = []RegisterMutatorFunc{}
 var bp2buildDepsMutators = []RegisterMutatorFunc{}
-var bp2buildMutators = []RegisterMutatorFunc{}
+var bp2buildMutators = map[string]RegisterMutatorFunc{}
 
 // RegisterBp2BuildMutator registers specially crafted mutators for
 // converting Blueprint/Android modules into special modules that can
@@ -237,7 +238,7 @@ func RegisterBp2BuildMutator(moduleType string, m func(TopDownMutatorContext)) {
 	f := func(ctx RegisterMutatorsContext) {
 		ctx.TopDown(moduleType, m)
 	}
-	bp2buildMutators = append(bp2buildMutators, f)
+	bp2buildMutators[moduleType] = f
 }
 
 // PreArchBp2BuildMutators adds mutators to be register for converting Android Blueprint modules
@@ -539,7 +540,7 @@ func (t *topDownMutatorContext) CreateBazelTargetModule(
 		Name: &name,
 	}
 
-	b := t.CreateModule(factory, &nameProp, attrs).(BazelTargetModule)
+	b := t.createModuleWithoutInheritance(factory, &nameProp, attrs).(BazelTargetModule)
 	b.SetBazelTargetModuleProperties(bazelProps)
 	return b
 }
@@ -605,6 +606,11 @@ func (t *topDownMutatorContext) CreateModule(factory ModuleFactory, props ...int
 		}
 	}
 
+	return module
+}
+
+func (t *topDownMutatorContext) createModuleWithoutInheritance(factory ModuleFactory, props ...interface{}) Module {
+	module := t.bp.CreateModule(ModuleFactoryAdaptor(factory), props...).(Module)
 	return module
 }
 
