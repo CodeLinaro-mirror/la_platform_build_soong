@@ -1564,6 +1564,15 @@ func (l *ConfiguredJarList) containsApexJarPair(apex, jar string) bool {
 	return false
 }
 
+// ApexOfJar returns the apex component of the first pair with the given jar name on the list, or
+// an empty string if not found.
+func (l *ConfiguredJarList) ApexOfJar(jar string) string {
+	if idx := IndexList(jar, l.jars); idx != -1 {
+		return l.Apex(IndexList(jar, l.jars))
+	}
+	return ""
+}
+
 // IndexOfJar returns the first pair with the given jar name on the list, or -1
 // if not found.
 func (l *ConfiguredJarList) IndexOfJar(jar string) int {
@@ -1602,6 +1611,21 @@ func (l *ConfiguredJarList) RemoveList(list ConfiguredJarList) ConfiguredJarList
 		apex := l.apexes[i]
 		if !list.containsApexJarPair(apex, jar) {
 			apexes = append(apexes, apex)
+			jars = append(jars, jar)
+		}
+	}
+
+	return ConfiguredJarList{apexes, jars}
+}
+
+// Filter keeps the entries if a jar appears in the given list of jars to keep; returns a new list.
+func (l *ConfiguredJarList) Filter(jarsToKeep []string) ConfiguredJarList {
+	var apexes []string
+	var jars []string
+
+	for i, jar := range l.jars {
+		if InList(jar, jarsToKeep) {
+			apexes = append(apexes, l.apexes[i])
 			jars = append(jars, jar)
 		}
 	}

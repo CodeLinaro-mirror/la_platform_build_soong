@@ -820,6 +820,7 @@ func transformObjToDynamicBinary(ctx android.ModuleContext,
 		ImplicitOutputs: implicitOutputs,
 		Inputs:          objFiles,
 		Implicits:       deps,
+		OrderOnly:       sharedLibs,
 		Args:            args,
 	})
 }
