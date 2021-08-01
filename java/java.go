@@ -581,6 +581,10 @@ type librarySdkMemberProperties struct {
 
 	JarToExport     android.Path `android:"arch_variant"`
 	AidlIncludeDirs android.Paths
+
+	// The list of permitted packages that need to be passed to the prebuilts as they are used to
+	// create the updatable-bcp-packages.txt file.
+	PermittedPackages []string
 }
 
 func (p *librarySdkMemberProperties) PopulateFromVariant(ctx android.SdkMemberContext, variant android.Module) {
@@ -589,6 +593,8 @@ func (p *librarySdkMemberProperties) PopulateFromVariant(ctx android.SdkMemberCo
 	p.JarToExport = ctx.MemberType().(*librarySdkMemberType).jarToExportGetter(ctx, j)
 
 	p.AidlIncludeDirs = j.AidlIncludeDirs()
+
+	p.PermittedPackages = j.PermittedPackagesForUpdatableBootJars()
 }
 
 func (p *librarySdkMemberProperties) AddToPropertySet(ctx android.SdkMemberContext, propertySet android.BpPropertySet) {
@@ -605,6 +611,10 @@ func (p *librarySdkMemberProperties) AddToPropertySet(ctx android.SdkMemberConte
 		builder.CopyToSnapshot(exportedJar, snapshotRelativeJavaLibPath)
 
 		propertySet.AddProperty("jars", []string{snapshotRelativeJavaLibPath})
+	}
+
+	if len(p.PermittedPackages) > 0 {
+		propertySet.AddProperty("permitted_packages", p.PermittedPackages)
 	}
 
 	// Do not copy anything else to the snapshot.
@@ -643,7 +653,7 @@ func LibraryFactory() android.Module {
 
 	module.addHostAndDeviceProperties()
 
-	module.initModuleAndImport(&module.ModuleBase)
+	module.initModuleAndImport(module)
 
 	android.InitApexModule(module)
 	android.InitSdkAwareModule(module)
@@ -1127,6 +1137,10 @@ type ImportProperties struct {
 
 	Installable *bool
 
+	// If not empty, classes are restricted to the specified packages and their sub-packages.
+	// This information is used to generate the updatable-bcp-packages.txt file.
+	Permitted_packages []string
+
 	// List of shared java libs that this module has dependencies to
 	Libs []string
 
@@ -1283,6 +1297,10 @@ func (j *Import) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 
 		// Save away the `deapexer` module on which this depends, if any.
 		if tag == android.DeapexerTag {
+			if deapexerModule != nil {
+				ctx.ModuleErrorf("Ambiguous duplicate deapexer module dependencies %q and %q",
+					deapexerModule.Name(), module.Name())
+			}
 			deapexerModule = module
 		}
 	})
@@ -1309,7 +1327,7 @@ func (j *Import) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 
 			// Get the path of the dex implementation jar from the `deapexer` module.
 			di := ctx.OtherModuleProvider(deapexerModule, android.DeapexerProvider).(android.DeapexerInfo)
-			if dexOutputPath := di.PrebuiltExportPath(j.BaseModuleName(), ".dexjar"); dexOutputPath != nil {
+			if dexOutputPath := di.PrebuiltExportPath(apexRootRelativePathToJavaLib(j.BaseModuleName())); dexOutputPath != nil {
 				j.dexJarFile = dexOutputPath
 
 				// Initialize the hiddenapi structure.
@@ -1426,6 +1444,29 @@ func (j *Import) ShouldSupportSdkVersion(ctx android.BaseModuleContext,
 	return nil
 }
 
+// requiredFilesFromPrebuiltApexForImport returns information about the files that a java_import or
+// java_sdk_library_import with the specified base module name requires to be exported from a
+// prebuilt_apex/apex_set.
+func requiredFilesFromPrebuiltApexForImport(name string) []string {
+	// Add the dex implementation jar to the set of exported files.
+	return []string{
+		apexRootRelativePathToJavaLib(name),
+	}
+}
+
+// apexRootRelativePathToJavaLib returns the path, relative to the root of the apex's contents, for
+// the java library with the specified name.
+func apexRootRelativePathToJavaLib(name string) string {
+	return filepath.Join("javalib", name+".jar")
+}
+
+var _ android.RequiredFilesFromPrebuiltApex = (*Import)(nil)
+
+func (j *Import) RequiredFilesFromPrebuiltApex(_ android.BaseModuleContext) []string {
+	name := j.BaseModuleName()
+	return requiredFilesFromPrebuiltApexForImport(name)
+}
+
 // Add compile time check for interface implementation
 var _ android.IDEInfo = (*Import)(nil)
 var _ android.IDECustomizedModuleName = (*Import)(nil)
@@ -1473,7 +1514,7 @@ func ImportFactory() android.Module {
 		&module.dexer.dexProperties,
 	)
 
-	module.initModuleAndImport(&module.ModuleBase)
+	module.initModuleAndImport(module)
 
 	module.dexProperties.Optimize.EnabledByDefault = false
 
