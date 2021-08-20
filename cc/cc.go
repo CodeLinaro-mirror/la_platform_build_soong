@@ -1980,9 +1980,13 @@ func GetCrtVariations(ctx android.BottomUpMutatorContext,
 		if minSdkVersion == "" || minSdkVersion == "apex_inherit" {
 			minSdkVersion = m.SdkVersion()
 		}
+		apiLevel, err := android.ApiLevelFromUser(ctx, minSdkVersion)
+		if err != nil {
+			ctx.PropertyErrorf("min_sdk_version", err.Error())
+		}
 		return []blueprint.Variation{
 			{Mutator: "sdk", Variation: "sdk"},
-			{Mutator: "version", Variation: minSdkVersion},
+			{Mutator: "version", Variation: apiLevel.String()},
 		}
 	}
 	return []blueprint.Variation{
@@ -3405,6 +3409,7 @@ func DefaultsFactory(props ...interface{}) android.Module {
 		&android.ProtoProperties{},
 		// RustBindgenProperties is included here so that cc_defaults can be used for rust_bindgen modules.
 		&RustBindgenClangProperties{},
+		&prebuiltLinkerProperties{},
 	)
 
 	// Bazel module must be initialized _before_ Defaults to be included in cc_defaults module.

@@ -110,7 +110,7 @@ func TestJavaSdkLibrary(t *testing.T) {
 		`)
 
 	// check the existence of the internal modules
-	result.ModuleForTests("foo", "android_common")
+	foo := result.ModuleForTests("foo", "android_common")
 	result.ModuleForTests(apiScopePublic.stubsLibraryModuleName("foo"), "android_common")
 	result.ModuleForTests(apiScopeSystem.stubsLibraryModuleName("foo"), "android_common")
 	result.ModuleForTests(apiScopeTest.stubsLibraryModuleName("foo"), "android_common")
@@ -121,6 +121,17 @@ func TestJavaSdkLibrary(t *testing.T) {
 	result.ModuleForTests("foo.api.public.28", "")
 	result.ModuleForTests("foo.api.system.28", "")
 	result.ModuleForTests("foo.api.test.28", "")
+
+	exportedComponentsInfo := result.ModuleProvider(foo.Module(), ExportedComponentsInfoProvider).(ExportedComponentsInfo)
+	expectedFooExportedComponents := []string{
+		"foo.stubs",
+		"foo.stubs.source",
+		"foo.stubs.source.system",
+		"foo.stubs.source.test",
+		"foo.stubs.system",
+		"foo.stubs.test",
+	}
+	android.AssertArrayString(t, "foo exported components", expectedFooExportedComponents, exportedComponentsInfo.Components)
 
 	bazJavac := result.ModuleForTests("baz", "android_common").Rule("javac")
 	// tests if baz is actually linked to the stubs lib
@@ -844,39 +855,33 @@ func TestJavaSdkLibraryDist(t *testing.T) {
 		PrepareForTestWithJavaBuildComponents,
 		PrepareForTestWithJavaDefaultModules,
 		PrepareForTestWithJavaSdkLibraryFiles,
+		FixtureWithLastReleaseApis(
+			"sdklib_no_group",
+			"sdklib_group_foo",
+			"sdklib_owner_foo",
+			"foo"),
 	).RunTestWithBp(t, `
 		java_sdk_library {
-			name: "sdklib_no_owner",
-			unsafe_ignore_missing_latest_api: true,
+			name: "sdklib_no_group",
 			srcs: ["foo.java"],
 		}
 
 		java_sdk_library {
 			name: "sdklib_group_foo",
-			unsafe_ignore_missing_latest_api: true,
 			srcs: ["foo.java"],
 			dist_group: "foo",
 		}
 
 		java_sdk_library {
 			name: "sdklib_owner_foo",
-			unsafe_ignore_missing_latest_api: true,
 			srcs: ["foo.java"],
 			owner: "foo",
 		}
 
 		java_sdk_library {
 			name: "sdklib_stem_foo",
-			unsafe_ignore_missing_latest_api: true,
 			srcs: ["foo.java"],
 			dist_stem: "foo",
-		}
-
-		java_sdk_library {
-			name: "sdklib_core_lib",
-			unsafe_ignore_missing_latest_api: true,
-			srcs: ["foo.java"],
-			core_lib: true,
 		}
 	`)
 
@@ -887,9 +892,9 @@ func TestJavaSdkLibraryDist(t *testing.T) {
 	}
 	testCases := []testCase{
 		{
-			module:   "sdklib_no_owner",
-			distDir:  "apistubs/android/public",
-			distStem: "sdklib_no_owner.jar",
+			module:   "sdklib_no_group",
+			distDir:  "apistubs/unknown/public",
+			distStem: "sdklib_no_group.jar",
 		},
 		{
 			module:   "sdklib_group_foo",
@@ -897,19 +902,15 @@ func TestJavaSdkLibraryDist(t *testing.T) {
 			distStem: "sdklib_group_foo.jar",
 		},
 		{
+			// Owner doesn't affect distDir after b/186723288.
 			module:   "sdklib_owner_foo",
-			distDir:  "apistubs/foo/public",
+			distDir:  "apistubs/unknown/public",
 			distStem: "sdklib_owner_foo.jar",
 		},
 		{
 			module:   "sdklib_stem_foo",
-			distDir:  "apistubs/android/public",
+			distDir:  "apistubs/unknown/public",
 			distStem: "foo.jar",
-		},
-		{
-			module:   "sdklib_core_lib",
-			distDir:  "apistubs/core/public",
-			distStem: "sdklib_core_lib.jar",
 		},
 	}
 
