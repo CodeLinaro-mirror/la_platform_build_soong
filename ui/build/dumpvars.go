@@ -163,6 +163,7 @@ var BannerVars = []string{
 	"TARGET_BUILD_PDK",
 	"PDK_FUSION_PLATFORM_ZIP",
 	"PRODUCT_SOONG_NAMESPACES",
+	"BOARD_SUPPORTS_EARLY_INIT",
 }
 
 func Banner(make_vars map[string]string) string {
@@ -219,6 +220,7 @@ func runMakeProductConfig(ctx Context, config Config) {
 
 		// Whether to enable the network during the build
 		"BUILD_BROKEN_USES_NETWORK",
+		"BOARD_SUPPORTS_EARLY_INIT",
 
 		// Extra environment variables to be exported to ninja
 		"BUILD_BROKEN_NINJA_USES_ENV_VARS",
@@ -282,6 +284,8 @@ func runMakeProductConfig(ctx Context, config Config) {
 			env.Set(name, make_vars[name])
 		}
 	}
+
+	env.Set("BOARD_SUPPORTS_EARLY_INIT", make_vars["BOARD_SUPPORTS_EARLY_INIT"])
 
 	config.SetKatiArgs(strings.Fields(make_vars["KATI_GOALS"]))
 	config.SetNinjaArgs(strings.Fields(make_vars["NINJA_GOALS"]))
