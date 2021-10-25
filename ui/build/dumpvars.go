@@ -191,6 +191,7 @@ var BannerVars = []string{
 	"BUILD_ID",
 	"OUT_DIR",
 	"SOONG_SDK_SNAPSHOT_TARGET_BUILD_RELEASE",
+	"BOARD_SUPPORTS_RAMDISK_EARLY_INIT",
 }
 
 func Banner(config Config, make_vars map[string]string) string {
@@ -286,6 +287,7 @@ func runMakeProductConfig(ctx Context, config Config) {
 
 		// Whether to enable the network during the build
 		"BUILD_BROKEN_USES_NETWORK",
+		"BOARD_SUPPORTS_RAMDISK_EARLY_INIT",
 
 		// Extra environment variables to be exported to ninja
 		"BUILD_BROKEN_NINJA_USES_ENV_VARS",
@@ -365,6 +367,7 @@ func runMakeProductConfig(ctx Context, config Config) {
 			env.Set(name, makeVars[name])
 		}
 	}
+	env.Set("BOARD_SUPPORTS_RAMDISK_EARLY_INIT", makeVars["BOARD_SUPPORTS_RAMDISK_EARLY_INIT"])
 
 	config.useJdk25 = makeVars["RELEASE_BUILD_WITH_JDK_25"] == "true"
 	if config.useJdk25 {
