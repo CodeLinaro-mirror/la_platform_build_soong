@@ -80,6 +80,8 @@ var Configuration = map[string]PathConfig{
 	"aarch64-linux-android-nm":      Log,
 	"aarch64-linux-android-objcopy": Log,
 	"aarch64-linux-android-objdump": Log,
+        "arm-linux-androideabi-as": Allowed,
+        "arm-linux-androideabi-ld": Allowed,
 	"bash":    Allowed,
 	"dd":      Allowed,
 	"diff":    Allowed,
