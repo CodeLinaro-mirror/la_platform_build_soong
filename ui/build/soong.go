@@ -375,6 +375,17 @@ func runSoong(ctx Context, config Config) {
 		// This is currently how the command line to invoke soong_build finds the
 		// root of the source tree and the output root
 		ninjaEnv.Set("TOP", os.Getenv("TOP"))
+		
+			qcEnvVars := []string{
+				"TARGET_PRODUCT",
+				"SDCLANG_AE_CONFIG",
+				"SDCLANG_CONFIG",
+				"SDCLANG_SA_ENABLED",
+				"QIIFA_BUILD_CONFIG",
+			}
+			for _, qcVar := range qcEnvVars {
+				ninjaEnv.Set(qcVar, os.Getenv(qcVar))
+			}
 
 		cmd.Environment = &ninjaEnv
 		cmd.Sandbox = soongSandbox
