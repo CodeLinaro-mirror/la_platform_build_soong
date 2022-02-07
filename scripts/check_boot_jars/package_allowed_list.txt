@@ -250,7 +250,7 @@ com\.google\.i18n\.phonenumbers
 org\.chromium\.arc
 org\.chromium\.arc\..*
 
-# QC adds
+# QTI adds
 com.qualcomm.qti
 com.quicinc.tcmiface
 com.qualcomm.wfd
