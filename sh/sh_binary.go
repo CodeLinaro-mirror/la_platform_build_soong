@@ -42,8 +42,6 @@ func init() {
 	pctx.Import("android/soong/android")
 
 	registerShBuildComponents(android.InitRegistrationContext)
-
-	android.RegisterBp2BuildMutator("sh_binary", ShBinaryBp2Build)
 }
 
 func registerShBuildComponents(ctx android.RegistrationContext) {
@@ -270,18 +268,25 @@ func (s *ShBinary) generateAndroidBuildActions(ctx android.ModuleContext) {
 func (s *ShBinary) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	s.generateAndroidBuildActions(ctx)
 	installDir := android.PathForModuleInstall(ctx, "bin", proptools.String(s.properties.Sub_dir))
+	if !s.Installable() {
+		s.SkipInstall()
+	}
 	s.installedFile = ctx.InstallExecutable(installDir, s.outputFilePath.Base(), s.outputFilePath)
+	for _, symlink := range s.Symlinks() {
+		ctx.InstallSymlink(installDir, symlink, s.installedFile)
+	}
 }
 
 func (s *ShBinary) AndroidMkEntries() []android.AndroidMkEntries {
 	return []android.AndroidMkEntries{android.AndroidMkEntries{
 		Class:      "EXECUTABLES",
 		OutputFile: android.OptionalPathForPath(s.outputFilePath),
-		Include:    "$(BUILD_SYSTEM)/soong_cc_prebuilt.mk",
+		Include:    "$(BUILD_SYSTEM)/soong_cc_rust_prebuilt.mk",
 		ExtraEntries: []android.AndroidMkExtraEntriesFunc{
 			func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
 				s.customAndroidMkEntries(entries)
 				entries.SetString("LOCAL_MODULE_RELATIVE_PATH", proptools.String(s.properties.Sub_dir))
+				entries.SetBoolIfTrue("LOCAL_UNINSTALLABLE_MODULE", !s.Installable())
 			},
 		},
 	}}
@@ -426,11 +431,11 @@ func (s *ShTest) AndroidMkEntries() []android.AndroidMkEntries {
 	return []android.AndroidMkEntries{android.AndroidMkEntries{
 		Class:      "NATIVE_TESTS",
 		OutputFile: android.OptionalPathForPath(s.outputFilePath),
-		Include:    "$(BUILD_SYSTEM)/soong_cc_prebuilt.mk",
+		Include:    "$(BUILD_SYSTEM)/soong_cc_rust_prebuilt.mk",
 		ExtraEntries: []android.AndroidMkExtraEntriesFunc{
 			func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
 				s.customAndroidMkEntries(entries)
-				entries.SetPath("LOCAL_MODULE_PATH", s.installDir.ToMakePath())
+				entries.SetPath("LOCAL_MODULE_PATH", s.installDir)
 				entries.AddCompatibilityTestSuites(s.testProperties.Test_suites...)
 				if s.testConfig != nil {
 					entries.SetPath("LOCAL_FULL_TEST_CONFIG", s.testConfig)
@@ -509,7 +514,9 @@ func ShTestHostFactory() android.Module {
 }
 
 type bazelShBinaryAttributes struct {
-	Srcs bazel.LabelListAttribute
+	Srcs     bazel.LabelListAttribute
+	Filename *string
+	Sub_dir  *string
 	// Bazel also supports the attributes below, but (so far) these are not required for Bionic
 	// deps
 	// data
@@ -531,21 +538,29 @@ type bazelShBinaryAttributes struct {
 	// visibility
 }
 
-func ShBinaryBp2Build(ctx android.TopDownMutatorContext) {
-	m, ok := ctx.Module().(*ShBinary)
-	if !ok || !m.ConvertWithBp2build(ctx) {
-		return
-	}
-
+func (m *ShBinary) ConvertWithBp2build(ctx android.TopDownMutatorContext) {
 	srcs := bazel.MakeLabelListAttribute(
 		android.BazelLabelForModuleSrc(ctx, []string{*m.properties.Src}))
 
+	var filename *string
+	if m.properties.Filename != nil {
+		filename = m.properties.Filename
+	}
+
+	var subDir *string
+	if m.properties.Sub_dir != nil {
+		subDir = m.properties.Sub_dir
+	}
+
 	attrs := &bazelShBinaryAttributes{
-		Srcs: srcs,
+		Srcs:     srcs,
+		Filename: filename,
+		Sub_dir:  subDir,
 	}
 
 	props := bazel.BazelTargetModuleProperties{
-		Rule_class: "sh_binary",
+		Rule_class:        "sh_binary",
+		Bzl_load_location: "//build/bazel/rules:sh_binary.bzl",
 	}
 
 	ctx.CreateBazelTargetModule(props, android.CommonAttributes{Name: m.Name()}, attrs)

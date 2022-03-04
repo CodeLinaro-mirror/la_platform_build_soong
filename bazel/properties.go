@@ -107,6 +107,14 @@ func (ll *LabelList) uniqueParentDirectories() []string {
 	return dirs
 }
 
+// Add inserts the label Label at the end of the LabelList.
+func (ll *LabelList) Add(label *Label) {
+	if label == nil {
+		return
+	}
+	ll.Includes = append(ll.Includes, *label)
+}
+
 // Append appends the fields of other labelList to the corresponding fields of ll.
 func (ll *LabelList) Append(other LabelList) {
 	if len(ll.Includes) > 0 || len(other.Includes) > 0 {
@@ -164,23 +172,17 @@ func UniqueSortedBazelLabelList(originalLabelList LabelList) LabelList {
 // Subtract needle from haystack
 func SubtractStrings(haystack []string, needle []string) []string {
 	// This is really a set
-	remainder := make(map[string]bool)
-
-	for _, s := range haystack {
-		remainder[s] = true
-	}
+	needleMap := make(map[string]bool)
 	for _, s := range needle {
-		delete(remainder, s)
+		needleMap[s] = true
 	}
 
 	var strings []string
-	for s, _ := range remainder {
-		strings = append(strings, s)
+	for _, s := range haystack {
+		if exclude := needleMap[s]; !exclude {
+			strings = append(strings, s)
+		}
 	}
-
-	sort.SliceStable(strings, func(i, j int) bool {
-		return strings[i] < strings[j]
-	})
 
 	return strings
 }
@@ -188,23 +190,17 @@ func SubtractStrings(haystack []string, needle []string) []string {
 // Subtract needle from haystack
 func SubtractBazelLabels(haystack []Label, needle []Label) []Label {
 	// This is really a set
-	remainder := make(map[Label]bool)
-
-	for _, label := range haystack {
-		remainder[label] = true
-	}
-	for _, label := range needle {
-		delete(remainder, label)
+	needleMap := make(map[Label]bool)
+	for _, s := range needle {
+		needleMap[s] = true
 	}
 
 	var labels []Label
-	for label, _ := range remainder {
-		labels = append(labels, label)
+	for _, label := range haystack {
+		if exclude := needleMap[label]; !exclude {
+			labels = append(labels, label)
+		}
 	}
-
-	sort.SliceStable(labels, func(i, j int) bool {
-		return labels[i].Label < labels[j].Label
-	})
 
 	return labels
 }
@@ -248,9 +244,69 @@ type LabelAttribute struct {
 	ConfigurableValues configurableLabels
 }
 
+func (la *LabelAttribute) axisTypes() map[configurationType]bool {
+	types := map[configurationType]bool{}
+	for k := range la.ConfigurableValues {
+		if len(la.ConfigurableValues[k]) > 0 {
+			types[k.configurationType] = true
+		}
+	}
+	return types
+}
+
+// Collapse reduces the configurable axes of the label attribute to a single axis.
+// This is necessary for final writing to bp2build, as a configurable label
+// attribute can only be comprised by a single select.
+func (la *LabelAttribute) Collapse() error {
+	axisTypes := la.axisTypes()
+	_, containsOs := axisTypes[os]
+	_, containsArch := axisTypes[arch]
+	_, containsOsArch := axisTypes[osArch]
+	_, containsProductVariables := axisTypes[productVariables]
+	if containsProductVariables {
+		if containsOs || containsArch || containsOsArch {
+			return fmt.Errorf("label attribute could not be collapsed as it has two or more unrelated axes")
+		}
+	}
+	if (containsOs && containsArch) || (containsOsArch && (containsOs || containsArch)) {
+		// If a bool attribute has both os and arch configuration axes, the only
+		// way to successfully union their values is to increase the granularity
+		// of the configuration criteria to os_arch.
+		for osType, supportedArchs := range osToArchMap {
+			for _, supportedArch := range supportedArchs {
+				osArch := osArchString(osType, supportedArch)
+				if archOsVal := la.SelectValue(OsArchConfigurationAxis, osArch); archOsVal != nil {
+					// Do nothing, as the arch_os is explicitly defined already.
+				} else {
+					archVal := la.SelectValue(ArchConfigurationAxis, supportedArch)
+					osVal := la.SelectValue(OsConfigurationAxis, osType)
+					if osVal != nil && archVal != nil {
+						// In this case, arch takes precedence. (This fits legacy Soong behavior, as arch mutator
+						// runs after os mutator.
+						la.SetSelectValue(OsArchConfigurationAxis, osArch, *archVal)
+					} else if osVal != nil && archVal == nil {
+						la.SetSelectValue(OsArchConfigurationAxis, osArch, *osVal)
+					} else if osVal == nil && archVal != nil {
+						la.SetSelectValue(OsArchConfigurationAxis, osArch, *archVal)
+					}
+				}
+			}
+		}
+		// All os_arch values are now set. Clear os and arch axes.
+		delete(la.ConfigurableValues, ArchConfigurationAxis)
+		delete(la.ConfigurableValues, OsConfigurationAxis)
+	}
+	return nil
+}
+
 // HasConfigurableValues returns whether there are configurable values set for this label.
 func (la LabelAttribute) HasConfigurableValues() bool {
-	return len(la.ConfigurableValues) > 0
+	for _, selectValues := range la.ConfigurableValues {
+		if len(selectValues) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // SetValue sets the base, non-configured value for the Label
@@ -275,13 +331,13 @@ func (la *LabelAttribute) SetSelectValue(axis ConfigurationAxis, config string, 
 }
 
 // SelectValue gets a value for a bazel select for the given axis and config.
-func (la *LabelAttribute) SelectValue(axis ConfigurationAxis, config string) Label {
+func (la *LabelAttribute) SelectValue(axis ConfigurationAxis, config string) *Label {
 	axis.validateConfig(config)
 	switch axis.configurationType {
 	case noConfig:
-		return *la.Value
+		return la.Value
 	case arch, os, osArch, productVariables:
-		return *la.ConfigurableValues[axis][config]
+		return la.ConfigurableValues[axis][config]
 	default:
 		panic(fmt.Errorf("Unrecognized ConfigurationAxis %s", axis))
 	}
@@ -328,7 +384,12 @@ type BoolAttribute struct {
 
 // HasConfigurableValues returns whether there are configurable values for this attribute.
 func (ba BoolAttribute) HasConfigurableValues() bool {
-	return len(ba.ConfigurableValues) > 0
+	for _, cfgToBools := range ba.ConfigurableValues {
+		if len(cfgToBools) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // SetSelectValue sets value for the given axis/config.
@@ -345,6 +406,106 @@ func (ba *BoolAttribute) SetSelectValue(axis ConfigurationAxis, config string, v
 	default:
 		panic(fmt.Errorf("Unrecognized ConfigurationAxis %s", axis))
 	}
+}
+
+// ToLabelListAttribute creates and returns a LabelListAttribute from this
+// bool attribute, where each bool in this attribute corresponds to a
+// label list value in the resultant attribute.
+func (ba *BoolAttribute) ToLabelListAttribute(falseVal LabelList, trueVal LabelList) (LabelListAttribute, error) {
+	getLabelList := func(boolPtr *bool) LabelList {
+		if boolPtr == nil {
+			return LabelList{nil, nil}
+		} else if *boolPtr {
+			return trueVal
+		} else {
+			return falseVal
+		}
+	}
+
+	mainVal := getLabelList(ba.Value)
+	if !ba.HasConfigurableValues() {
+		return MakeLabelListAttribute(mainVal), nil
+	}
+
+	result := LabelListAttribute{}
+	if err := ba.Collapse(); err != nil {
+		return result, err
+	}
+
+	for axis, configToBools := range ba.ConfigurableValues {
+		if len(configToBools) < 1 {
+			continue
+		}
+		for config, boolPtr := range configToBools {
+			val := getLabelList(&boolPtr)
+			if !val.Equals(mainVal) {
+				result.SetSelectValue(axis, config, val)
+			}
+		}
+		result.SetSelectValue(axis, ConditionsDefaultConfigKey, mainVal)
+	}
+
+	return result, nil
+}
+
+// Collapse reduces the configurable axes of the boolean attribute to a single axis.
+// This is necessary for final writing to bp2build, as a configurable boolean
+// attribute can only be comprised by a single select.
+func (ba *BoolAttribute) Collapse() error {
+	axisTypes := ba.axisTypes()
+	_, containsOs := axisTypes[os]
+	_, containsArch := axisTypes[arch]
+	_, containsOsArch := axisTypes[osArch]
+	_, containsProductVariables := axisTypes[productVariables]
+	if containsProductVariables {
+		if containsOs || containsArch || containsOsArch {
+			return fmt.Errorf("boolean attribute could not be collapsed as it has two or more unrelated axes")
+		}
+	}
+	if (containsOs && containsArch) || (containsOsArch && (containsOs || containsArch)) {
+		// If a bool attribute has both os and arch configuration axes, the only
+		// way to successfully union their values is to increase the granularity
+		// of the configuration criteria to os_arch.
+		for osType, supportedArchs := range osToArchMap {
+			for _, supportedArch := range supportedArchs {
+				osArch := osArchString(osType, supportedArch)
+				if archOsVal := ba.SelectValue(OsArchConfigurationAxis, osArch); archOsVal != nil {
+					// Do nothing, as the arch_os is explicitly defined already.
+				} else {
+					archVal := ba.SelectValue(ArchConfigurationAxis, supportedArch)
+					osVal := ba.SelectValue(OsConfigurationAxis, osType)
+					if osVal != nil && archVal != nil {
+						// In this case, arch takes precedence. (This fits legacy Soong behavior, as arch mutator
+						// runs after os mutator.
+						ba.SetSelectValue(OsArchConfigurationAxis, osArch, archVal)
+					} else if osVal != nil && archVal == nil {
+						ba.SetSelectValue(OsArchConfigurationAxis, osArch, osVal)
+					} else if osVal == nil && archVal != nil {
+						ba.SetSelectValue(OsArchConfigurationAxis, osArch, archVal)
+					}
+				}
+			}
+		}
+		// All os_arch values are now set. Clear os and arch axes.
+		delete(ba.ConfigurableValues, ArchConfigurationAxis)
+		delete(ba.ConfigurableValues, OsConfigurationAxis)
+		// Verify post-condition; this should never fail, provided no additional
+		// axes are introduced.
+		if len(ba.ConfigurableValues) > 1 {
+			panic(fmt.Errorf("error in collapsing attribute: %#v", ba))
+		}
+	}
+	return nil
+}
+
+func (ba *BoolAttribute) axisTypes() map[configurationType]bool {
+	types := map[configurationType]bool{}
+	for k := range ba.ConfigurableValues {
+		if len(ba.ConfigurableValues[k]) > 0 {
+			types[k.configurationType] = true
+		}
+	}
+	return types
 }
 
 // SelectValue gets the value for the given axis/config.
@@ -378,9 +539,23 @@ func (ba *BoolAttribute) SortedConfigurationAxes() []ConfigurationAxis {
 // labelListSelectValues supports config-specific label_list typed Bazel attribute values.
 type labelListSelectValues map[string]LabelList
 
-func (ll labelListSelectValues) appendSelects(other labelListSelectValues) {
+func (ll labelListSelectValues) addSelects(label labelSelectValues) {
+	for k, v := range label {
+		if label == nil {
+			continue
+		}
+		l := ll[k]
+		(&l).Add(v)
+		ll[k] = l
+	}
+}
+
+func (ll labelListSelectValues) appendSelects(other labelListSelectValues, forceSpecifyEmptyList bool) {
 	for k, v := range other {
 		l := ll[k]
+		if forceSpecifyEmptyList && l.IsNil() && !v.IsNil() {
+			l.Includes = []Label{}
+		}
 		(&l).Append(v)
 		ll[k] = l
 	}
@@ -412,6 +587,12 @@ type LabelListAttribute struct {
 	// This mode facilitates use of attribute defaults: an empty list should
 	// override the default.
 	ForceSpecifyEmptyList bool
+
+	// If true, signal the intent to the code generator to emit all select keys,
+	// even if the Includes list for that key is empty. This mode facilitates
+	// specific select statements where an empty list for a non-default select
+	// key has a meaning.
+	EmitEmptyList bool
 }
 
 type configurableLabelLists map[ConfigurationAxis]labelListSelectValues
@@ -430,15 +611,20 @@ func (cll configurableLabelLists) setValueForAxis(axis ConfigurationAxis, config
 	cll[axis][config] = list
 }
 
-func (cll configurableLabelLists) Append(other configurableLabelLists) {
+func (cll configurableLabelLists) Append(other configurableLabelLists, forceSpecifyEmptyList bool) {
 	for axis, otherSelects := range other {
 		selects := cll[axis]
 		if selects == nil {
 			selects = make(labelListSelectValues, len(otherSelects))
 		}
-		selects.appendSelects(otherSelects)
+		selects.appendSelects(otherSelects, forceSpecifyEmptyList)
 		cll[axis] = selects
 	}
+}
+
+func (lla *LabelListAttribute) Clone() *LabelListAttribute {
+	result := &LabelListAttribute{ForceSpecifyEmptyList: lla.ForceSpecifyEmptyList}
+	return result.Append(*lla)
 }
 
 // MakeLabelListAttribute initializes a LabelListAttribute with the non-arch specific value.
@@ -494,21 +680,47 @@ func (lla *LabelListAttribute) SortedConfigurationAxes() []ConfigurationAxis {
 }
 
 // Append all values, including os and arch specific ones, from another
-// LabelListAttribute to this LabelListAttribute.
-func (lla *LabelListAttribute) Append(other LabelListAttribute) {
-	if lla.ForceSpecifyEmptyList && !other.Value.IsNil() {
+// LabelListAttribute to this LabelListAttribute. Returns this LabelListAttribute.
+func (lla *LabelListAttribute) Append(other LabelListAttribute) *LabelListAttribute {
+	forceSpecifyEmptyList := lla.ForceSpecifyEmptyList || other.ForceSpecifyEmptyList
+	if forceSpecifyEmptyList && lla.Value.IsNil() && !other.Value.IsNil() {
 		lla.Value.Includes = []Label{}
 	}
 	lla.Value.Append(other.Value)
 	if lla.ConfigurableValues == nil {
 		lla.ConfigurableValues = make(configurableLabelLists)
 	}
-	lla.ConfigurableValues.Append(other.ConfigurableValues)
+	lla.ConfigurableValues.Append(other.ConfigurableValues, forceSpecifyEmptyList)
+	return lla
+}
+
+// Add inserts the labels for each axis of LabelAttribute at the end of corresponding axis's
+// LabelList within the LabelListAttribute
+func (lla *LabelListAttribute) Add(label *LabelAttribute) {
+	if label == nil {
+		return
+	}
+
+	lla.Value.Add(label.Value)
+	if lla.ConfigurableValues == nil && label.ConfigurableValues != nil {
+		lla.ConfigurableValues = make(configurableLabelLists)
+	}
+	for axis, _ := range label.ConfigurableValues {
+		if _, exists := lla.ConfigurableValues[axis]; !exists {
+			lla.ConfigurableValues[axis] = make(labelListSelectValues)
+		}
+		lla.ConfigurableValues[axis].addSelects(label.ConfigurableValues[axis])
+	}
 }
 
 // HasConfigurableValues returns true if the attribute contains axis-specific label list values.
 func (lla LabelListAttribute) HasConfigurableValues() bool {
-	return len(lla.ConfigurableValues) > 0
+	for _, selectValues := range lla.ConfigurableValues {
+		if len(selectValues) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // IsEmpty returns true if the attribute has no values under any configuration.
@@ -522,6 +734,24 @@ func (lla LabelListAttribute) IsEmpty() bool {
 		}
 	}
 	return true
+}
+
+// IsNil returns true if the attribute has not been set for any configuration.
+func (lla LabelListAttribute) IsNil() bool {
+	if lla.Value.Includes != nil {
+		return false
+	}
+	return !lla.HasConfigurableValues()
+}
+
+// Exclude for the given axis, config, removes Includes in labelList from Includes and appends them
+// to Excludes. This is to special case any excludes that are not specified in a bp file but need to
+// be removed, e.g. if they could cause duplicate element failures.
+func (lla *LabelListAttribute) Exclude(axis ConfigurationAxis, config string, labelList LabelList) {
+	val := lla.SelectValue(axis, config)
+	newList := SubtractBazelLabelList(val, labelList)
+	newList.Excludes = append(newList.Excludes, labelList.Includes...)
+	lla.SetSelectValue(axis, config, newList)
 }
 
 // ResolveExcludes handles excludes across the various axes, ensuring that items are removed from
@@ -546,9 +776,13 @@ func (lla *LabelListAttribute) ResolveExcludes() {
 			lla.ConfigurableValues[axis][config] = SubtractBazelLabelList(val, lla.Value)
 		}
 
-		// Now that the Value list is finalized for this axis, compare it with the original
-		// list, and put the difference into the default condition for the axis.
-		lla.ConfigurableValues[axis][ConditionsDefaultConfigKey] = SubtractBazelLabelList(baseLabels, lla.Value)
+		// Now that the Value list is finalized for this axis, compare it with
+		// the original list, and union the difference with the default
+		// condition for the axis.
+		difference := SubtractBazelLabelList(baseLabels, lla.Value)
+		existingDefaults := lla.ConfigurableValues[axis][ConditionsDefaultConfigKey]
+		existingDefaults.Append(difference)
+		lla.ConfigurableValues[axis][ConditionsDefaultConfigKey] = FirstUniqueBazelLabelList(existingDefaults)
 
 		// if everything ends up without includes, just delete the axis
 		if !lla.ConfigurableValues[axis].HasConfigurableValues() {
@@ -568,7 +802,7 @@ type OtherModuleContext interface {
 
 // LabelMapper is a function that takes a OtherModuleContext and returns a (potentially changed)
 // label and whether it was changed.
-type LabelMapper func(OtherModuleContext, string) (string, bool)
+type LabelMapper func(OtherModuleContext, Label) (string, bool)
 
 // LabelPartition contains descriptions of a partition for labels
 type LabelPartition struct {
@@ -590,7 +824,7 @@ type LabelPartitions map[string]LabelPartition
 // not.
 func (lf LabelPartition) filter(ctx OtherModuleContext, label Label) *Label {
 	if lf.LabelMapper != nil {
-		if newLabel, changed := lf.LabelMapper(ctx, label.Label); changed {
+		if newLabel, changed := lf.LabelMapper(ctx, label); changed {
 			return &Label{newLabel, label.OriginalModuleName}
 		}
 	}
@@ -754,17 +988,28 @@ func MakeStringListAttribute(value []string) StringListAttribute {
 
 // HasConfigurableValues returns true if the attribute contains axis-specific string_list values.
 func (sla StringListAttribute) HasConfigurableValues() bool {
-	return len(sla.ConfigurableValues) > 0
+	for _, selectValues := range sla.ConfigurableValues {
+		if len(selectValues) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Append appends all values, including os and arch specific ones, from another
 // StringListAttribute to this StringListAttribute
-func (sla *StringListAttribute) Append(other StringListAttribute) {
+func (sla *StringListAttribute) Append(other StringListAttribute) *StringListAttribute {
 	sla.Value = append(sla.Value, other.Value...)
 	if sla.ConfigurableValues == nil {
 		sla.ConfigurableValues = make(configurableStringLists)
 	}
 	sla.ConfigurableValues.Append(other.ConfigurableValues)
+	return sla
+}
+
+func (sla *StringListAttribute) Clone() *StringListAttribute {
+	result := &StringListAttribute{}
+	return result.Append(*sla)
 }
 
 // SetSelectValue set a value for a bazel select for the given axis, config and value.

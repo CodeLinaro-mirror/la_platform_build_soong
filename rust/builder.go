@@ -95,7 +95,7 @@ func init() {
 
 func TransformSrcToBinary(ctx ModuleContext, mainSrc android.Path, deps PathDeps, flags Flags,
 	outputFile android.WritablePath) buildOutput {
-	flags.GlobalRustFlags = append(flags.GlobalRustFlags, "-C lto")
+	flags.GlobalRustFlags = append(flags.GlobalRustFlags, "-C lto=thin")
 
 	return transformSrctoCrate(ctx, mainSrc, deps, flags, outputFile, "bin")
 }
@@ -112,13 +112,13 @@ func TransformSrctoDylib(ctx ModuleContext, mainSrc android.Path, deps PathDeps,
 
 func TransformSrctoStatic(ctx ModuleContext, mainSrc android.Path, deps PathDeps, flags Flags,
 	outputFile android.WritablePath) buildOutput {
-	flags.GlobalRustFlags = append(flags.GlobalRustFlags, "-C lto")
+	flags.GlobalRustFlags = append(flags.GlobalRustFlags, "-C lto=thin")
 	return transformSrctoCrate(ctx, mainSrc, deps, flags, outputFile, "staticlib")
 }
 
 func TransformSrctoShared(ctx ModuleContext, mainSrc android.Path, deps PathDeps, flags Flags,
 	outputFile android.WritablePath) buildOutput {
-	flags.GlobalRustFlags = append(flags.GlobalRustFlags, "-C lto")
+	flags.GlobalRustFlags = append(flags.GlobalRustFlags, "-C lto=thin")
 	return transformSrctoCrate(ctx, mainSrc, deps, flags, outputFile, "cdylib")
 }
 
@@ -185,7 +185,7 @@ func rustEnvVars(ctx ModuleContext, deps PathDeps) []string {
 }
 
 func transformSrctoCrate(ctx ModuleContext, main android.Path, deps PathDeps, flags Flags,
-	outputFile android.WritablePath, crate_type string) buildOutput {
+	outputFile android.WritablePath, crateType string) buildOutput {
 
 	var inputs android.Paths
 	var implicits android.Paths
@@ -204,7 +204,7 @@ func transformSrctoCrate(ctx ModuleContext, main android.Path, deps PathDeps, fl
 	// Collect rustc flags
 	rustcFlags = append(rustcFlags, flags.GlobalRustFlags...)
 	rustcFlags = append(rustcFlags, flags.RustFlags...)
-	rustcFlags = append(rustcFlags, "--crate-type="+crate_type)
+	rustcFlags = append(rustcFlags, "--crate-type="+crateType)
 	if crateName != "" {
 		rustcFlags = append(rustcFlags, "--crate-name="+crateName)
 	}
@@ -215,6 +215,13 @@ func transformSrctoCrate(ctx ModuleContext, main android.Path, deps PathDeps, fl
 
 	// Suppress an implicit sysroot
 	rustcFlags = append(rustcFlags, "--sysroot=/dev/null")
+
+	// Enable incremental compilation if requested by user
+	if ctx.Config().IsEnvTrue("SOONG_RUSTC_INCREMENTAL") {
+		incrementalPath := android.PathForOutput(ctx, "rustc").String()
+
+		rustcFlags = append(rustcFlags, "-C incremental="+incrementalPath)
+	}
 
 	// Collect linker flags
 	linkFlags = append(linkFlags, flags.GlobalLinkFlags...)
@@ -238,6 +245,7 @@ func transformSrctoCrate(ctx ModuleContext, main android.Path, deps PathDeps, fl
 	implicits = append(implicits, deps.StaticLibs...)
 	implicits = append(implicits, deps.SharedLibDeps...)
 	implicits = append(implicits, deps.srcProviderFiles...)
+	implicits = append(implicits, deps.AfdoProfiles...)
 
 	if deps.CrtBegin.Valid() {
 		implicits = append(implicits, deps.CrtBegin.Path(), deps.CrtEnd.Path())
@@ -361,7 +369,7 @@ func Rustdoc(ctx ModuleContext, main android.Path, deps PathDeps,
 		Description: "rustdoc " + main.Rel(),
 		Output:      docTimestampFile,
 		Input:       main,
-		Implicit:    ctx.RustModule().unstrippedOutputFile.Path(),
+		Implicit:    ctx.RustModule().UnstrippedOutputFile(),
 		Args: map[string]string{
 			"rustdocFlags": strings.Join(rustdocFlags, " "),
 			"outDir":       docDir.String(),

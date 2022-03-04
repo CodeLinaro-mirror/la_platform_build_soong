@@ -67,13 +67,6 @@ func RegisterGenruleBuildComponents(ctx android.RegistrationContext) {
 	ctx.FinalDepsMutators(func(ctx android.RegisterMutatorsContext) {
 		ctx.BottomUp("genrule_tool_deps", toolDepsMutator).Parallel()
 	})
-
-	android.RegisterBp2BuildMutator("genrule", GenruleBp2Build)
-	android.RegisterBp2BuildMutator("cc_genrule", CcGenruleBp2Build)
-}
-
-func RegisterGenruleBp2BuildDeps(ctx android.RegisterMutatorsContext) {
-	ctx.BottomUp("genrule_tool_deps", toolDepsMutator)
 }
 
 var (
@@ -110,8 +103,19 @@ type HostToolProvider interface {
 
 type hostToolDependencyTag struct {
 	blueprint.BaseDependencyTag
+	android.LicenseAnnotationToolchainDependencyTag
 	label string
 }
+
+func (t hostToolDependencyTag) AllowDisabledModuleDependency(target android.Module) bool {
+	// Allow depending on a disabled module if it's replaced by a prebuilt
+	// counterpart. We get the prebuilt through android.PrebuiltGetPreferred in
+	// GenerateAndroidBuildActions.
+	return target.IsReplacedByPrebuilt()
+}
+
+var _ android.AllowDisabledModuleDependency = (*hostToolDependencyTag)(nil)
+
 type generatorProperties struct {
 	// The command to run on one or more input files. Cmd supports substitution of a few variables.
 	//
@@ -248,7 +252,7 @@ func toolDepsMutator(ctx android.BottomUpMutatorContext) {
 // Returns true if information was available from Bazel, false if bazel invocation still needs to occur.
 func (c *Module) GenerateBazelBuildActions(ctx android.ModuleContext, label string) bool {
 	bazelCtx := ctx.Config().BazelContext
-	filePaths, ok := bazelCtx.GetOutputFiles(label, ctx.Arch().ArchType)
+	filePaths, ok := bazelCtx.GetOutputFiles(label, android.GetConfigKey(ctx))
 	if ok {
 		var bazelOutputFiles android.Paths
 		exportIncludeDirs := map[string]bool{}
@@ -304,6 +308,12 @@ func (g *Module) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 			switch tag := ctx.OtherModuleDependencyTag(module).(type) {
 			case hostToolDependencyTag:
 				tool := ctx.OtherModuleName(module)
+				if m, ok := module.(android.Module); ok {
+					// Necessary to retrieve any prebuilt replacement for the tool, since
+					// toolDepsMutator runs too late for the prebuilt mutators to have
+					// replaced the dependency.
+					module = android.PrebuiltGetPreferred(ctx, m)
+				}
 
 				switch t := module.(type) {
 				case android.HostToolProvider:
@@ -336,14 +346,9 @@ func (g *Module) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 					}
 				case bootstrap.GoBinaryTool:
 					// A GoBinaryTool provides the install path to a tool, which will be copied.
-					if s, err := filepath.Rel(android.PathForOutput(ctx).String(), t.InstallPath()); err == nil {
-						toolPath := android.PathForOutput(ctx, s)
-						tools = append(tools, toolPath)
-						addLocationLabel(tag.label, toolLocation{android.Paths{toolPath}})
-					} else {
-						ctx.ModuleErrorf("cannot find path for %q: %v", tool, err)
-						return
-					}
+					p := android.PathForGoBinary(ctx, t)
+					tools = append(tools, p)
+					addLocationLabel(tag.label, toolLocation{android.Paths{p}})
 				default:
 					ctx.ModuleErrorf("%q is not a host tool provider", tool)
 					return
@@ -837,38 +842,8 @@ type bazelGenruleAttributes struct {
 	Cmd   string
 }
 
-// CcGenruleBp2Build is for cc_genrule.
-func CcGenruleBp2Build(ctx android.TopDownMutatorContext) {
-	m, ok := ctx.Module().(*Module)
-	if !ok || !m.ConvertWithBp2build(ctx) {
-		return
-	}
-
-	if ctx.ModuleType() != "cc_genrule" {
-		// Not a cc_genrule.
-		return
-	}
-
-	genruleBp2Build(ctx)
-}
-
-// GenruleBp2Build is used for genrule.
-func GenruleBp2Build(ctx android.TopDownMutatorContext) {
-	m, ok := ctx.Module().(*Module)
-	if !ok || !m.ConvertWithBp2build(ctx) {
-		return
-	}
-
-	if ctx.ModuleType() != "genrule" {
-		// Not a regular genrule.
-		return
-	}
-
-	genruleBp2Build(ctx)
-}
-
-func genruleBp2Build(ctx android.TopDownMutatorContext) {
-	m, _ := ctx.Module().(*Module)
+// ConvertWithBp2build converts a Soong module -> Bazel target.
+func (m *Module) ConvertWithBp2build(ctx android.TopDownMutatorContext) {
 	// Bazel only has the "tools" attribute.
 	tools_prop := android.BazelLabelForModuleDeps(ctx, m.properties.Tools)
 	tool_files_prop := android.BazelLabelForModuleSrc(ctx, m.properties.Tool_files)
@@ -887,7 +862,7 @@ func genruleBp2Build(ctx android.TopDownMutatorContext) {
 		cmd = strings.Replace(*m.properties.Cmd, "$(in)", "$(SRCS)", -1)
 		cmd = strings.Replace(cmd, "$(out)", "$(OUTS)", -1)
 		genDir := "$(GENDIR)"
-		if ctx.ModuleType() == "cc_genrule" {
+		if t := ctx.ModuleType(); t == "cc_genrule" || t == "java_genrule" || t == "java_genrule_host" {
 			genDir = "$(RULEDIR)"
 		}
 		cmd = strings.Replace(cmd, "$(genDir)", genDir, -1)

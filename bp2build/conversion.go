@@ -1,6 +1,7 @@
 package bp2build
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -17,13 +18,22 @@ type BazelFile struct {
 	Contents string
 }
 
-func CreateSoongInjectionFiles(metrics CodegenMetrics) []BazelFile {
+func CreateSoongInjectionFiles(cfg android.Config, metrics CodegenMetrics) []BazelFile {
 	var files []BazelFile
 
 	files = append(files, newFile("cc_toolchain", GeneratedBuildFileName, "")) // Creates a //cc_toolchain package.
-	files = append(files, newFile("cc_toolchain", "constants.bzl", config.BazelCcToolchainVars()))
+	files = append(files, newFile("cc_toolchain", "constants.bzl", config.BazelCcToolchainVars(cfg)))
 
 	files = append(files, newFile("metrics", "converted_modules.txt", strings.Join(metrics.convertedModules, "\n")))
+
+	files = append(files, newFile("product_config", "soong_config_variables.bzl", cfg.Bp2buildSoongConfigDefinitions.String()))
+
+	apiLevelsContent, err := json.Marshal(android.GetApiLevelsMap(cfg))
+	if err != nil {
+		panic(err)
+	}
+	files = append(files, newFile("api_levels", GeneratedBuildFileName, `exports_files(["api_levels.json"])`))
+	files = append(files, newFile("api_levels", "api_levels.json", string(apiLevelsContent)))
 
 	return files
 }

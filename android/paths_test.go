@@ -993,7 +993,7 @@ func TestPathForSource(t *testing.T) {
 		{
 			name:     "in out dir",
 			buildDir: "out",
-			src:      "out/a/b/c",
+			src:      "out/soong/a/b/c",
 			err:      "is in output",
 		},
 	}
@@ -1486,7 +1486,8 @@ func TestPathRelativeToTop(t *testing.T) {
 		AssertPathRelativeToTopEquals(t, "install path for soong", "out/soong/target/product/test_device/system/install/path", p)
 	})
 	t.Run("install for make", func(t *testing.T) {
-		p := PathForModuleInstall(ctx, "install/path").ToMakePath()
+		p := PathForModuleInstall(ctx, "install/path")
+		p.makePath = true
 		AssertPathRelativeToTopEquals(t, "install path for make", "out/target/product/test_device/system/install/path", p)
 	})
 	t.Run("output", func(t *testing.T) {
@@ -1500,14 +1501,12 @@ func TestPathRelativeToTop(t *testing.T) {
 	t.Run("mixture", func(t *testing.T) {
 		paths := Paths{
 			PathForModuleInstall(ctx, "install/path"),
-			PathForModuleInstall(ctx, "install/path").ToMakePath(),
 			PathForOutput(ctx, "output/path"),
 			PathForSource(ctx, "source/path"),
 		}
 
 		expected := []string{
 			"out/soong/target/product/test_device/system/install/path",
-			"out/target/product/test_device/system/install/path",
 			"out/soong/output/path",
 			"source/path",
 		}
@@ -1525,7 +1524,7 @@ func ExampleOutputPath_ReplaceExtension() {
 	fmt.Println(p.Rel(), p2.Rel())
 
 	// Output:
-	// out/system/framework/boot.art out/system/framework/boot.oat
+	// out/soong/system/framework/boot.art out/soong/system/framework/boot.oat
 	// boot.art boot.oat
 }
 
@@ -1539,7 +1538,7 @@ func ExampleOutputPath_InSameDir() {
 	fmt.Println(p.Rel(), p2.Rel())
 
 	// Output:
-	// out/system/framework/boot.art out/system/framework/oat/arm/boot.vdex
+	// out/soong/system/framework/boot.art out/soong/system/framework/oat/arm/boot.vdex
 	// boot.art oat/arm/boot.vdex
 }
 

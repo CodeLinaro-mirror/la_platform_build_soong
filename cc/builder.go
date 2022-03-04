@@ -165,6 +165,12 @@ var (
 		}
 	}()
 
+	darwinLipo = pctx.AndroidStaticRule("darwinLipo",
+		blueprint.RuleParams{
+			Command:     "${config.MacLipoPath} -create -output $out $in",
+			CommandDeps: []string{"${config.MacLipoPath}"},
+		})
+
 	_ = pctx.SourcePathVariable("archiveRepackPath", "build/soong/scripts/archive_repack.sh")
 
 	// Rule to repack an archive (.a) file with a subset of object files.
@@ -237,14 +243,6 @@ var (
 			Deps:        blueprint.DepsGCC,
 		},
 		"asFlags")
-
-	// Rule to invoke windres, for interaction with Windows resources.
-	windres = pctx.AndroidStaticRule("windres",
-		blueprint.RuleParams{
-			Command:     "$windresCmd $flags -I$$(dirname $in) -i $in -o $out --preprocessor \"${config.ClangBin}/clang -E -xc-header -DRC_INVOKED\"",
-			CommandDeps: []string{"$windresCmd"},
-		},
-		"windresCmd", "flags")
 
 	_ = pctx.SourcePathVariable("sAbiDumper", "prebuilts/clang-tools/${config.HostPrebuiltTag}/bin/header-abi-dumper")
 
@@ -390,10 +388,11 @@ type builderFlags struct {
 	sdclang       bool
 
 	// True if these extra features are enabled.
-	tidy         bool
-	gcovCoverage bool
-	sAbiDump     bool
-	emitXrefs    bool
+	tidy          bool
+	needTidyFiles bool
+	gcovCoverage  bool
+	sAbiDump      bool
+	emitXrefs     bool
 
 	assemblerWithCpp bool // True if .s files should be processed with the c preprocessor.
 
@@ -423,6 +422,7 @@ type StripFlags struct {
 type Objects struct {
 	objFiles      android.Paths
 	tidyFiles     android.Paths
+	tidyDepFiles  android.Paths // link dependent .tidy files
 	coverageFiles android.Paths
 	sAbiDumpFiles android.Paths
 	kytheFiles    android.Paths
@@ -432,6 +432,7 @@ func (a Objects) Copy() Objects {
 	return Objects{
 		objFiles:      append(android.Paths{}, a.objFiles...),
 		tidyFiles:     append(android.Paths{}, a.tidyFiles...),
+		tidyDepFiles:  append(android.Paths{}, a.tidyDepFiles...),
 		coverageFiles: append(android.Paths{}, a.coverageFiles...),
 		sAbiDumpFiles: append(android.Paths{}, a.sAbiDumpFiles...),
 		kytheFiles:    append(android.Paths{}, a.kytheFiles...),
@@ -442,6 +443,7 @@ func (a Objects) Append(b Objects) Objects {
 	return Objects{
 		objFiles:      append(a.objFiles, b.objFiles...),
 		tidyFiles:     append(a.tidyFiles, b.tidyFiles...),
+		tidyDepFiles:  append(a.tidyDepFiles, b.tidyDepFiles...),
 		coverageFiles: append(a.coverageFiles, b.coverageFiles...),
 		sAbiDumpFiles: append(a.sAbiDumpFiles, b.sAbiDumpFiles...),
 		kytheFiles:    append(a.kytheFiles, b.kytheFiles...),
@@ -455,9 +457,8 @@ func escapeSingleQuotes(s string) string {
 }
 
 // Generate rules for compiling multiple .c, .cpp, or .S files to individual .o files
-func transformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles, noTidySrcs android.Paths,
+func transformSourceToObj(ctx ModuleContext, subdir string, srcFiles, noTidySrcs android.Paths,
 	flags builderFlags, pathDeps android.Paths, cFlagsDeps android.Paths) Objects {
-
 	// Source files are one-to-one with tidy, coverage, or kythe files, if enabled.
 	objFiles := make(android.Paths, len(srcFiles))
 	var tidyFiles android.Paths
@@ -532,11 +533,18 @@ func transformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles, no
 	cppflags += " ${config.NoOverrideGlobalCflags}"
 	toolingCppflags += " ${config.NoOverrideGlobalCflags}"
 
+	modulePath := android.PathForModuleSrc(ctx).String()
+	if android.IsThirdPartyPath(modulePath) {
+		cflags += " ${config.NoOverrideExternalGlobalCflags}"
+		toolingCflags += " ${config.NoOverrideExternalGlobalCflags}"
+		cppflags += " ${config.NoOverrideExternalGlobalCflags}"
+		toolingCppflags += " ${config.NoOverrideExternalGlobalCflags}"
+	}
+
 	// Multiple source files have build rules usually share the same cFlags or tidyFlags.
 	// Define only one version in this module and share it in multiple build rules.
 	// To simplify the code, the shared variables are all named as $flags<nnn>.
-	numSharedFlags := 0
-	flagsMap := make(map[string]string)
+	shared := ctx.getSharedFlags()
 
 	// Share flags only when there are multiple files or tidy rules.
 	var hasMultipleRules = len(srcFiles) > 1 || flags.tidy
@@ -548,11 +556,11 @@ func transformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles, no
 			return flags
 		}
 		mapKey := kind + flags
-		n, ok := flagsMap[mapKey]
+		n, ok := shared.flagsMap[mapKey]
 		if !ok {
-			numSharedFlags += 1
-			n = strconv.Itoa(numSharedFlags)
-			flagsMap[mapKey] = n
+			shared.numSharedFlags += 1
+			n = strconv.Itoa(shared.numSharedFlags)
+			shared.flagsMap[mapKey] = n
 			ctx.Variable(pctx, kind+n, flags)
 		}
 		return "$" + kind + n
@@ -575,20 +583,6 @@ func transformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles, no
 				OrderOnly:   pathDeps,
 				Args: map[string]string{
 					"asFlags": shareFlags("asFlags", flags.globalYasmFlags+" "+flags.localYasmFlags),
-				},
-			})
-			continue
-		case ".rc":
-			ctx.Build(pctx, android.BuildParams{
-				Rule:        windres,
-				Description: "windres " + srcFile.Rel(),
-				Output:      objFile,
-				Input:       srcFile,
-				Implicits:   cFlagsDeps,
-				OrderOnly:   pathDeps,
-				Args: map[string]string{
-					"windresCmd": mingwCmd(flags.toolchain, "windres"),
-					"flags":      shareFlags("flags", flags.toolchain.WindresFlags()),
 				},
 			})
 			continue
@@ -694,7 +688,6 @@ func transformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles, no
 				rule = clangTidyRE
 			}
 
-			ctx.TidyFile(tidyFile)
 			ctx.Build(pctx, android.BuildParams{
 				Rule:        rule,
 				Description: "clang-tidy " + srcFile.Rel(),
@@ -736,9 +729,14 @@ func transformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles, no
 
 	}
 
+	var tidyDepFiles android.Paths
+	if flags.needTidyFiles {
+		tidyDepFiles = tidyFiles
+	}
 	return Objects{
 		objFiles:      objFiles,
 		tidyFiles:     tidyFiles,
+		tidyDepFiles:  tidyDepFiles,
 		coverageFiles: coverageFiles,
 		sAbiDumpFiles: sAbiDumpFiles,
 		kytheFiles:    kytheFiles,
@@ -748,7 +746,7 @@ func transformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles, no
 // Generate a rule for compiling multiple .o files to a static library (.a)
 func transformObjToStaticLib(ctx android.ModuleContext,
 	objFiles android.Paths, wholeStaticLibs android.Paths,
-	flags builderFlags, outputFile android.ModuleOutPath, deps android.Paths) {
+	flags builderFlags, outputFile android.ModuleOutPath, deps android.Paths, validations android.Paths) {
 
 	arCmd := "${config.ClangBin}/llvm-ar"
 	if flags.sdclang {
@@ -766,6 +764,7 @@ func transformObjToStaticLib(ctx android.ModuleContext,
 			Output:      outputFile,
 			Inputs:      objFiles,
 			Implicits:   deps,
+			Validations: validations,
 			Args: map[string]string{
 				"arFlags": "crsPD" + arFlags,
 				"arCmd":   arCmd,
@@ -795,7 +794,7 @@ func transformObjToStaticLib(ctx android.ModuleContext,
 func transformObjToDynamicBinary(ctx android.ModuleContext,
 	objFiles, sharedLibs, staticLibs, lateStaticLibs, wholeStaticLibs, deps, crtBegin, crtEnd android.Paths,
 	groupLate bool, flags builderFlags, outputFile android.WritablePath,
-	implicitOutputs android.WritablePaths, validations android.WritablePaths) {
+	implicitOutputs android.WritablePaths, validations android.Paths) {
 
 	var ldCmd string
 	var extraFlags string
@@ -869,7 +868,7 @@ func transformObjToDynamicBinary(ctx android.ModuleContext,
 		Inputs:          objFiles,
 		Implicits:       deps,
 		OrderOnly:       sharedLibs,
-		Validations:     validations.Paths(),
+		Validations:     validations,
 		Args:            args,
 	})
 }
@@ -987,8 +986,7 @@ func sourceAbiDiff(ctx android.ModuleContext, inputDump android.Path, referenceD
 }
 
 // Generate a rule for extracting a table of contents from a shared library (.so)
-func transformSharedObjectToToc(ctx android.ModuleContext, inputFile android.Path,
-	outputFile android.WritablePath, flags builderFlags) {
+func TransformSharedObjectToToc(ctx android.ModuleContext, inputFile android.Path, outputFile android.WritablePath) {
 
 	var format string
 	if ctx.Darwin() {
@@ -1103,6 +1101,15 @@ func transformDarwinStrip(ctx android.ModuleContext, inputFile android.Path,
 		Description: "strip " + outputFile.Base(),
 		Output:      outputFile,
 		Input:       inputFile,
+	})
+}
+
+func transformDarwinUniversalBinary(ctx android.ModuleContext, outputFile android.WritablePath, inputFiles ...android.Path) {
+	ctx.Build(pctx, android.BuildParams{
+		Rule:        darwinLipo,
+		Description: "lipo " + outputFile.Base(),
+		Output:      outputFile,
+		Inputs:      inputFiles,
 	})
 }
 

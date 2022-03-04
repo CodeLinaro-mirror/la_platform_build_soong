@@ -34,8 +34,6 @@ func init() {
 func registerApexKeyBuildComponents(ctx android.RegistrationContext) {
 	ctx.RegisterModuleType("apex_key", ApexKeyFactory)
 	ctx.RegisterSingletonType("apex_keys_text", apexKeysTextFactory)
-
-	android.RegisterBp2BuildMutator("apex_key", ApexKeyBp2Build)
 }
 
 type apexKey struct {
@@ -123,13 +121,18 @@ func (s *apexKeysText) GenerateBuildActions(ctx android.SingletonContext) {
 		containerCertificate string
 		containerPrivateKey  string
 		partition            string
+		signTool             string
 	}
 	toString := func(e apexKeyEntry) string {
-		format := "name=%q public_key=%q private_key=%q container_certificate=%q container_private_key=%q partition=%q\n"
+		signTool := ""
+		if e.signTool != "" {
+			signTool = fmt.Sprintf(" sign_tool=%q", e.signTool)
+		}
+		format := "name=%q public_key=%q private_key=%q container_certificate=%q container_private_key=%q partition=%q%s\n"
 		if e.presigned {
-			return fmt.Sprintf(format, e.name, "PRESIGNED", "PRESIGNED", "PRESIGNED", "PRESIGNED", e.partition)
+			return fmt.Sprintf(format, e.name, "PRESIGNED", "PRESIGNED", "PRESIGNED", "PRESIGNED", e.partition, signTool)
 		} else {
-			return fmt.Sprintf(format, e.name, e.publicKey, e.privateKey, e.containerCertificate, e.containerPrivateKey, e.partition)
+			return fmt.Sprintf(format, e.name, e.publicKey, e.privateKey, e.containerCertificate, e.containerPrivateKey, e.partition, signTool)
 		}
 	}
 
@@ -145,6 +148,7 @@ func (s *apexKeysText) GenerateBuildActions(ctx android.SingletonContext) {
 				containerCertificate: pem.String(),
 				containerPrivateKey:  key.String(),
 				partition:            m.PartitionTag(ctx.DeviceConfig()),
+				signTool:             proptools.String(m.properties.Custom_sign_tool),
 			}
 		}
 	})
@@ -203,20 +207,9 @@ type bazelApexKeyAttributes struct {
 	Private_key bazel.LabelAttribute
 }
 
-func ApexKeyBp2Build(ctx android.TopDownMutatorContext) {
-	module, ok := ctx.Module().(*apexKey)
-	if !ok {
-		// Not an APEX key
-		return
-	}
-	if !module.ConvertWithBp2build(ctx) {
-		return
-	}
-	if ctx.ModuleType() != "apex_key" {
-		return
-	}
-
-	apexKeyBp2BuildInternal(ctx, module)
+// ConvertWithBp2build performs conversion apexKey for bp2build
+func (m *apexKey) ConvertWithBp2build(ctx android.TopDownMutatorContext) {
+	apexKeyBp2BuildInternal(ctx, m)
 }
 
 func apexKeyBp2BuildInternal(ctx android.TopDownMutatorContext, module *apexKey) {

@@ -39,6 +39,7 @@ const (
 	osArchAndroidArm64      = "android_arm64"
 	osArchAndroidX86        = "android_x86"
 	osArchAndroidX86_64     = "android_x86_64"
+	osArchDarwinArm64       = "darwin_arm64"
 	osArchDarwinX86_64      = "darwin_x86_64"
 	osArchLinuxX86          = "linux_glibc_x86"
 	osArchLinuxX86_64       = "linux_glibc_x86_64"
@@ -96,6 +97,7 @@ var (
 		osArchAndroidArm64:         "//build/bazel/platforms/os_arch:android_arm64",
 		osArchAndroidX86:           "//build/bazel/platforms/os_arch:android_x86",
 		osArchAndroidX86_64:        "//build/bazel/platforms/os_arch:android_x86_64",
+		osArchDarwinArm64:          "//build/bazel/platforms/os_arch:darwin_arm64",
 		osArchDarwinX86_64:         "//build/bazel/platforms/os_arch:darwin_x86_64",
 		osArchLinuxX86:             "//build/bazel/platforms/os_arch:linux_glibc_x86",
 		osArchLinuxX86_64:          "//build/bazel/platforms/os_arch:linux_glibc_x86_64",
@@ -106,6 +108,21 @@ var (
 		osArchWindowsX86:           "//build/bazel/platforms/os_arch:windows_x86",
 		osArchWindowsX86_64:        "//build/bazel/platforms/os_arch:windows_x86_64",
 		ConditionsDefaultConfigKey: ConditionsDefaultSelectKey, // The default condition of an os select map.
+	}
+
+	// Map where keys are OsType names, and values are slices containing the archs
+	// that that OS supports.
+	// These definitions copied from arch.go.
+	// TODO(cparsons): Source from arch.go; this task is nontrivial, as it currently results
+	// in a cyclic dependency.
+	osToArchMap = map[string][]string{
+		osAndroid:     {archArm, archArm64, archX86, archX86_64},
+		osLinux:       {archX86, archX86_64},
+		osLinuxMusl:   {archX86, archX86_64},
+		osDarwin:      {archArm64, archX86_64},
+		osLinuxBionic: {archArm64, archX86_64},
+		// TODO(cparsons): According to arch.go, this should contain archArm, archArm64, as well.
+		osWindows: {archX86, archX86_64},
 	}
 )
 
@@ -119,6 +136,10 @@ const (
 	osArch
 	productVariables
 )
+
+func osArchString(os string, arch string) string {
+	return fmt.Sprintf("%s_%s", os, arch)
+}
 
 func (ct configurationType) String() string {
 	return map[configurationType]string{
@@ -156,9 +177,9 @@ func (ct configurationType) validateConfig(config string) {
 }
 
 // SelectKey returns the Bazel select key for a given configurationType and config string.
-func (ct configurationType) SelectKey(config string) string {
-	ct.validateConfig(config)
-	switch ct {
+func (ca ConfigurationAxis) SelectKey(config string) string {
+	ca.validateConfig(config)
+	switch ca.configurationType {
 	case noConfig:
 		panic(fmt.Errorf("SelectKey is unnecessary for noConfig ConfigurationType "))
 	case arch:
@@ -168,12 +189,13 @@ func (ct configurationType) SelectKey(config string) string {
 	case osArch:
 		return platformOsArchMap[config]
 	case productVariables:
-		if config == ConditionsDefaultConfigKey {
+		if strings.HasSuffix(config, ConditionsDefaultConfigKey) {
+			// e.g. "acme__feature1__conditions_default" or "android__board__conditions_default"
 			return ConditionsDefaultSelectKey
 		}
-		return fmt.Sprintf("%s:%s", productVariableBazelPackage, strings.ToLower(config))
+		return fmt.Sprintf("%s:%s", productVariableBazelPackage, config)
 	default:
-		panic(fmt.Errorf("Unrecognized ConfigurationType %d", ct))
+		panic(fmt.Errorf("Unrecognized ConfigurationType %d", ca.configurationType))
 	}
 }
 

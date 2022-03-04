@@ -22,7 +22,6 @@ import (
 
 func init() {
 	RegisterModuleType("filegroup", FileGroupFactory)
-	RegisterBp2BuildMutator("filegroup", FilegroupBp2Build)
 }
 
 var PrepareForTestWithFilegroup = FixtureRegisterWithContext(func(ctx RegistrationContext) {
@@ -34,12 +33,8 @@ type bazelFilegroupAttributes struct {
 	Srcs bazel.LabelListAttribute
 }
 
-func FilegroupBp2Build(ctx TopDownMutatorContext) {
-	fg, ok := ctx.Module().(*fileGroup)
-	if !ok || !fg.ConvertWithBp2build(ctx) {
-		return
-	}
-
+// ConvertWithBp2build performs bp2build conversion of filegroup
+func (fg *fileGroup) ConvertWithBp2build(ctx TopDownMutatorContext) {
 	srcs := bazel.MakeLabelListAttribute(
 		BazelLabelForModuleSrcExcludes(ctx, fg.properties.Srcs, fg.properties.Exclude_srcs))
 
@@ -118,14 +113,16 @@ func (fg *fileGroup) maybeGenerateBazelBuildActions(ctx ModuleContext) {
 	}
 
 	archVariant := ctx.Arch().ArchType
+	osVariant := ctx.Os()
 	if len(fg.Srcs()) == 1 && fg.Srcs()[0].Base() == fg.Name() {
 		// This will be a regular file target, not filegroup, in Bazel.
 		// See FilegroupBp2Build for more information.
 		archVariant = Common
+		osVariant = CommonOS
 	}
 
 	bazelCtx := ctx.Config().BazelContext
-	filePaths, ok := bazelCtx.GetOutputFiles(fg.GetBazelLabel(ctx, fg), archVariant)
+	filePaths, ok := bazelCtx.GetOutputFiles(fg.GetBazelLabel(ctx, fg), configKey{archVariant, osVariant})
 	if !ok {
 		return
 	}

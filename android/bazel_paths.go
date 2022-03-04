@@ -68,24 +68,37 @@ import (
 //   cannot be resolved,the function will panic. This is often due to the dependency not being added
 //   via an AddDependency* method.
 
-// A subset of the ModuleContext methods which are sufficient to resolve references to paths/deps in
-// order to form a Bazel-compatible label for conversion.
-type BazelConversionPathContext interface {
-	EarlyModulePathContext
+// A minimal context interface to check if a module should be converted by bp2build,
+// with functions containing information to match against allowlists and denylists.
+// If a module is deemed to be convertible by bp2build, then it should rely on a
+// BazelConversionPathContext for more functions for dep/path features.
+type BazelConversionContext interface {
+	Config() Config
 
-	GetDirectDep(name string) (blueprint.Module, blueprint.DependencyTag)
-	ModuleFromName(name string) (blueprint.Module, bool)
 	Module() Module
 	OtherModuleType(m blueprint.Module) string
 	OtherModuleName(m blueprint.Module) string
 	OtherModuleDir(m blueprint.Module) string
+}
+
+// A subset of the ModuleContext methods which are sufficient to resolve references to paths/deps in
+// order to form a Bazel-compatible label for conversion.
+type BazelConversionPathContext interface {
+	EarlyModulePathContext
+	BazelConversionContext
+
+	ModuleErrorf(fmt string, args ...interface{})
+	PropertyErrorf(property, fmt string, args ...interface{})
+	GetDirectDep(name string) (blueprint.Module, blueprint.DependencyTag)
+	ModuleFromName(name string) (blueprint.Module, bool)
 	AddUnconvertedBp2buildDep(string)
+	AddMissingBp2buildDep(dep string)
 }
 
 // BazelLabelForModuleDeps expects a list of reference to other modules, ("<module>"
 // or ":<module>") and returns a Bazel-compatible label which corresponds to dependencies on the
 // module within the given ctx.
-func BazelLabelForModuleDeps(ctx TopDownMutatorContext, modules []string) bazel.LabelList {
+func BazelLabelForModuleDeps(ctx BazelConversionPathContext, modules []string) bazel.LabelList {
 	return BazelLabelForModuleDepsWithFn(ctx, modules, BazelModuleLabel)
 }
 
@@ -95,15 +108,15 @@ func BazelLabelForModuleDeps(ctx TopDownMutatorContext, modules []string) bazel.
 // list which corresponds to dependencies on the module within the given ctx, and the excluded
 // dependencies.  Prebuilt dependencies will be appended with _alwayslink so they can be handled as
 // whole static libraries.
-func BazelLabelForModuleDepsExcludes(ctx TopDownMutatorContext, modules, excludes []string) bazel.LabelList {
+func BazelLabelForModuleDepsExcludes(ctx BazelConversionPathContext, modules, excludes []string) bazel.LabelList {
 	return BazelLabelForModuleDepsExcludesWithFn(ctx, modules, excludes, BazelModuleLabel)
 }
 
 // BazelLabelForModuleDepsWithFn expects a list of reference to other modules, ("<module>"
 // or ":<module>") and applies moduleToLabelFn to determine and return a Bazel-compatible label
 // which corresponds to dependencies on the module within the given ctx.
-func BazelLabelForModuleDepsWithFn(ctx TopDownMutatorContext, modules []string,
-	moduleToLabelFn func(TopDownMutatorContext, blueprint.Module) string) bazel.LabelList {
+func BazelLabelForModuleDepsWithFn(ctx BazelConversionPathContext, modules []string,
+	moduleToLabelFn func(BazelConversionPathContext, blueprint.Module) string) bazel.LabelList {
 	var labels bazel.LabelList
 	// In some cases, a nil string list is different than an explicitly empty list.
 	if len(modules) == 0 && modules != nil {
@@ -117,8 +130,10 @@ func BazelLabelForModuleDepsWithFn(ctx TopDownMutatorContext, modules []string,
 		}
 		if m, t := SrcIsModuleWithTag(module); m != "" {
 			l := getOtherModuleLabel(ctx, m, t, moduleToLabelFn)
-			l.OriginalModuleName = bpText
-			labels.Includes = append(labels.Includes, l)
+			if l != nil {
+				l.OriginalModuleName = bpText
+				labels.Includes = append(labels.Includes, *l)
+			}
 		} else {
 			ctx.ModuleErrorf("%q, is not a module reference", module)
 		}
@@ -131,8 +146,8 @@ func BazelLabelForModuleDepsWithFn(ctx TopDownMutatorContext, modules []string,
 // to other modules, ("<module>" or ":<module>"). It applies moduleToLabelFn to determine and return a
 // Bazel-compatible label list which corresponds to dependencies on the module within the given ctx, and
 // the excluded dependencies.
-func BazelLabelForModuleDepsExcludesWithFn(ctx TopDownMutatorContext, modules, excludes []string,
-	moduleToLabelFn func(TopDownMutatorContext, blueprint.Module) string) bazel.LabelList {
+func BazelLabelForModuleDepsExcludesWithFn(ctx BazelConversionPathContext, modules, excludes []string,
+	moduleToLabelFn func(BazelConversionPathContext, blueprint.Module) string) bazel.LabelList {
 	moduleLabels := BazelLabelForModuleDepsWithFn(ctx, RemoveListFromList(modules, excludes), moduleToLabelFn)
 	if len(excludes) == 0 {
 		return moduleLabels
@@ -144,12 +159,18 @@ func BazelLabelForModuleDepsExcludesWithFn(ctx TopDownMutatorContext, modules, e
 	}
 }
 
-func BazelLabelForModuleSrcSingle(ctx TopDownMutatorContext, path string) bazel.Label {
-	return BazelLabelForModuleSrcExcludes(ctx, []string{path}, []string(nil)).Includes[0]
+func BazelLabelForModuleSrcSingle(ctx BazelConversionPathContext, path string) bazel.Label {
+	if srcs := BazelLabelForModuleSrcExcludes(ctx, []string{path}, []string(nil)).Includes; len(srcs) > 0 {
+		return srcs[0]
+	}
+	return bazel.Label{}
 }
 
-func BazelLabelForModuleDepSingle(ctx TopDownMutatorContext, path string) bazel.Label {
-	return BazelLabelForModuleDepsExcludes(ctx, []string{path}, []string(nil)).Includes[0]
+func BazelLabelForModuleDepSingle(ctx BazelConversionPathContext, path string) bazel.Label {
+	if srcs := BazelLabelForModuleDepsExcludes(ctx, []string{path}, []string(nil)).Includes; len(srcs) > 0 {
+		return srcs[0]
+	}
+	return bazel.Label{}
 }
 
 // BazelLabelForModuleSrc expects a list of path (relative to local module directory) and module
@@ -158,7 +179,7 @@ func BazelLabelForModuleDepSingle(ctx TopDownMutatorContext, path string) bazel.
 // relative if within the same package).
 // Properties must have been annotated with struct tag `android:"path"` so that dependencies modules
 // will have already been handled by the path_deps mutator.
-func BazelLabelForModuleSrc(ctx TopDownMutatorContext, paths []string) bazel.LabelList {
+func BazelLabelForModuleSrc(ctx BazelConversionPathContext, paths []string) bazel.LabelList {
 	return BazelLabelForModuleSrcExcludes(ctx, paths, []string(nil))
 }
 
@@ -168,7 +189,7 @@ func BazelLabelForModuleSrc(ctx TopDownMutatorContext, paths []string) bazel.Lab
 // (absolute if in a different package or relative if within the same package).
 // Properties must have been annotated with struct tag `android:"path"` so that dependencies modules
 // will have already been handled by the path_deps mutator.
-func BazelLabelForModuleSrcExcludes(ctx TopDownMutatorContext, paths, excludes []string) bazel.LabelList {
+func BazelLabelForModuleSrcExcludes(ctx BazelConversionPathContext, paths, excludes []string) bazel.LabelList {
 	excludeLabels := expandSrcsForBazel(ctx, excludes, []string(nil))
 	excluded := make([]string, 0, len(excludeLabels.Includes))
 	for _, e := range excludeLabels.Includes {
@@ -267,6 +288,16 @@ func transformSubpackagePaths(ctx BazelConversionPathContext, paths bazel.LabelL
 	return newPaths
 }
 
+// Converts root-relative Paths to a list of bazel.Label relative to the module in ctx.
+func RootToModuleRelativePaths(ctx BazelConversionPathContext, paths Paths) []bazel.Label {
+	var newPaths []bazel.Label
+	for _, path := range PathsWithModuleSrcSubDir(ctx, paths, "") {
+		s := path.Rel()
+		newPaths = append(newPaths, bazel.Label{Label: s})
+	}
+	return newPaths
+}
+
 // expandSrcsForBazel returns bazel.LabelList with paths rooted from the module's local source
 // directory and Bazel target labels, excluding those included in the excludes argument (which
 // should already be expanded to resolve references to Soong-modules). Valid elements of paths
@@ -288,7 +319,7 @@ func transformSubpackagePaths(ctx BazelConversionPathContext, paths bazel.LabelL
 // Properties passed as the paths or excludes argument must have been annotated with struct tag
 // `android:"path"` so that dependencies on other modules will have already been handled by the
 // path_deps mutator.
-func expandSrcsForBazel(ctx TopDownMutatorContext, paths, expandedExcludes []string) bazel.LabelList {
+func expandSrcsForBazel(ctx BazelConversionPathContext, paths, expandedExcludes []string) bazel.LabelList {
 	if paths == nil {
 		return bazel.LabelList{}
 	}
@@ -306,9 +337,9 @@ func expandSrcsForBazel(ctx TopDownMutatorContext, paths, expandedExcludes []str
 	for _, p := range paths {
 		if m, tag := SrcIsModuleWithTag(p); m != "" {
 			l := getOtherModuleLabel(ctx, m, tag, BazelModuleLabel)
-			if !InList(l.Label, expandedExcludes) {
+			if l != nil && !InList(l.Label, expandedExcludes) {
 				l.OriginalModuleName = fmt.Sprintf(":%s", m)
-				labels.Includes = append(labels.Includes, l)
+				labels.Includes = append(labels.Includes, *l)
 			}
 		} else {
 			var expandedPaths []bazel.Label
@@ -316,12 +347,7 @@ func expandSrcsForBazel(ctx TopDownMutatorContext, paths, expandedExcludes []str
 				// e.g. turn "math/*.c" in
 				// external/arm-optimized-routines to external/arm-optimized-routines/math/*.c
 				rootRelativeGlobPath := pathForModuleSrc(ctx, p).String()
-				globbedPaths := GlobFiles(ctx, rootRelativeGlobPath, rootRelativeExpandedExcludes)
-				globbedPaths = PathsWithModuleSrcSubDir(ctx, globbedPaths, "")
-				for _, path := range globbedPaths {
-					s := path.Rel()
-					expandedPaths = append(expandedPaths, bazel.Label{Label: s})
-				}
+				expandedPaths = RootToModuleRelativePaths(ctx, GlobFiles(ctx, rootRelativeGlobPath, rootRelativeExpandedExcludes))
 			} else {
 				if !InList(p, expandedExcludes) {
 					expandedPaths = append(expandedPaths, bazel.Label{Label: p})
@@ -336,11 +362,17 @@ func expandSrcsForBazel(ctx TopDownMutatorContext, paths, expandedExcludes []str
 // getOtherModuleLabel returns a bazel.Label for the given dependency/tag combination for the
 // module. The label will be relative to the current directory if appropriate. The dependency must
 // already be resolved by either deps mutator or path deps mutator.
-func getOtherModuleLabel(ctx TopDownMutatorContext, dep, tag string,
-	labelFromModule func(TopDownMutatorContext, blueprint.Module) string) bazel.Label {
+func getOtherModuleLabel(ctx BazelConversionPathContext, dep, tag string,
+	labelFromModule func(BazelConversionPathContext, blueprint.Module) string) *bazel.Label {
 	m, _ := ctx.ModuleFromName(dep)
+	// The module was not found in an Android.bp file, this is often due to:
+	//		* a limited manifest
+	//		* a required module not being converted from Android.mk
 	if m == nil {
-		panic(fmt.Errorf("No module named %q found, but was a direct dep of %q", dep, ctx.Module().Name()))
+		ctx.AddMissingBp2buildDep(dep)
+		return &bazel.Label{
+			Label: ":" + dep + "__BP2BUILD__MISSING__DEP",
+		}
 	}
 	if !convertedToBazel(ctx, m) {
 		ctx.AddUnconvertedBp2buildDep(dep)
@@ -354,12 +386,12 @@ func getOtherModuleLabel(ctx TopDownMutatorContext, dep, tag string,
 		otherLabel = bazelShortLabel(otherLabel)
 	}
 
-	return bazel.Label{
+	return &bazel.Label{
 		Label: otherLabel,
 	}
 }
 
-func BazelModuleLabel(ctx TopDownMutatorContext, module blueprint.Module) string {
+func BazelModuleLabel(ctx BazelConversionPathContext, module blueprint.Module) string {
 	// TODO(b/165114590): Convert tag (":name{.tag}") to corresponding Bazel implicit output targets.
 	if !convertedToBazel(ctx, module) {
 		return bp2buildModuleLabel(ctx, module)
@@ -370,11 +402,17 @@ func BazelModuleLabel(ctx TopDownMutatorContext, module blueprint.Module) string
 
 func bazelShortLabel(label string) string {
 	i := strings.Index(label, ":")
+	if i == -1 {
+		panic(fmt.Errorf("Could not find the ':' character in '%s', expected a fully qualified label.", label))
+	}
 	return label[i:]
 }
 
 func bazelPackage(label string) string {
 	i := strings.Index(label, ":")
+	if i == -1 {
+		panic(fmt.Errorf("Could not find the ':' character in '%s', expected a fully qualified label.", label))
+	}
 	return label[0:i]
 }
 
@@ -382,7 +420,7 @@ func samePackage(label1, label2 string) bool {
 	return bazelPackage(label1) == bazelPackage(label2)
 }
 
-func bp2buildModuleLabel(ctx BazelConversionPathContext, module blueprint.Module) string {
+func bp2buildModuleLabel(ctx BazelConversionContext, module blueprint.Module) string {
 	moduleName := ctx.OtherModuleName(module)
 	moduleDir := ctx.OtherModuleDir(module)
 	return fmt.Sprintf("//%s:%s", moduleDir, moduleName)

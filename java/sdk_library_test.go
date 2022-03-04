@@ -48,6 +48,7 @@ func TestJavaSdkLibrary(t *testing.T) {
 			name: "bar",
 			srcs: ["a.java", "b.java"],
 			api_packages: ["bar"],
+			exclude_kotlinc_generated_files: true,
 		}
 		java_library {
 			name: "baz",
@@ -161,6 +162,14 @@ func TestJavaSdkLibrary(t *testing.T) {
 		android.AssertDeepEquals(t, "qux exports (required)", []string{"fred", "quuz", "foo", "bar"}, requiredSdkLibs)
 		android.AssertDeepEquals(t, "qux exports (optional)", []string{}, optionalSdkLibs)
 	}
+
+	fooDexJar := result.ModuleForTests("foo", "android_common").Rule("d8")
+	// tests if kotlinc generated files are NOT excluded from output of foo.
+	android.AssertStringDoesNotContain(t, "foo dex", fooDexJar.BuildParams.Args["mergeZipsFlags"], "-stripFile META-INF/*.kotlin_module")
+
+	barDexJar := result.ModuleForTests("bar", "android_common").Rule("d8")
+	// tests if kotlinc generated files are excluded from output of bar.
+	android.AssertStringDoesContain(t, "bar dex", barDexJar.BuildParams.Args["mergeZipsFlags"], "-stripFile META-INF/*.kotlin_module")
 }
 
 func TestJavaSdkLibrary_UpdatableLibrary(t *testing.T) {
@@ -195,18 +204,18 @@ func TestJavaSdkLibrary_UpdatableLibrary(t *testing.T) {
 `)
 	// test that updatability attributes are passed on correctly
 	fooUpdatable := result.ModuleForTests("fooUpdatable.xml", "android_common").Rule("java_sdk_xml")
-	android.AssertStringDoesContain(t, "fooUpdatable.xml java_sdk_xml command", fooUpdatable.RuleParams.Command, `on_bootclasspath_since=\"9001\"`)
-	android.AssertStringDoesContain(t, "fooUpdatable.xml java_sdk_xml command", fooUpdatable.RuleParams.Command, `on_bootclasspath_before=\"9002\"`)
-	android.AssertStringDoesContain(t, "fooUpdatable.xml java_sdk_xml command", fooUpdatable.RuleParams.Command, `min_device_sdk=\"9003\"`)
-	android.AssertStringDoesContain(t, "fooUpdatable.xml java_sdk_xml command", fooUpdatable.RuleParams.Command, `max_device_sdk=\"10000\"`)
+	android.AssertStringDoesContain(t, "fooUpdatable.xml java_sdk_xml command", fooUpdatable.RuleParams.Command, `on-bootclasspath-since=\"9001\"`)
+	android.AssertStringDoesContain(t, "fooUpdatable.xml java_sdk_xml command", fooUpdatable.RuleParams.Command, `on-bootclasspath-before=\"9002\"`)
+	android.AssertStringDoesContain(t, "fooUpdatable.xml java_sdk_xml command", fooUpdatable.RuleParams.Command, `min-device-sdk=\"9003\"`)
+	android.AssertStringDoesContain(t, "fooUpdatable.xml java_sdk_xml command", fooUpdatable.RuleParams.Command, `max-device-sdk=\"10000\"`)
 
 	// double check that updatability attributes are not written if they don't exist in the bp file
 	// the permissions file for the foo library defined above
 	fooPermissions := result.ModuleForTests("foo.xml", "android_common").Rule("java_sdk_xml")
-	android.AssertStringDoesNotContain(t, "foo.xml java_sdk_xml command", fooPermissions.RuleParams.Command, `on_bootclasspath_since`)
-	android.AssertStringDoesNotContain(t, "foo.xml java_sdk_xml command", fooPermissions.RuleParams.Command, `on_bootclasspath_before`)
-	android.AssertStringDoesNotContain(t, "foo.xml java_sdk_xml command", fooPermissions.RuleParams.Command, `min_device_sdk`)
-	android.AssertStringDoesNotContain(t, "foo.xml java_sdk_xml command", fooPermissions.RuleParams.Command, `max_device_sdk`)
+	android.AssertStringDoesNotContain(t, "foo.xml java_sdk_xml command", fooPermissions.RuleParams.Command, `on-bootclasspath-since`)
+	android.AssertStringDoesNotContain(t, "foo.xml java_sdk_xml command", fooPermissions.RuleParams.Command, `on-bootclasspath-before`)
+	android.AssertStringDoesNotContain(t, "foo.xml java_sdk_xml command", fooPermissions.RuleParams.Command, `min-device-sdk`)
+	android.AssertStringDoesNotContain(t, "foo.xml java_sdk_xml command", fooPermissions.RuleParams.Command, `max-device-sdk`)
 }
 
 func TestJavaSdkLibrary_UpdatableLibrary_Validation_ValidVersion(t *testing.T) {
@@ -338,7 +347,7 @@ func TestJavaSdkLibrary_UpdatableLibrary_usesNewTag(t *testing.T) {
 `)
 	// test that updatability attributes are passed on correctly
 	fooUpdatable := result.ModuleForTests("foo.xml", "android_common").Rule("java_sdk_xml")
-	android.AssertStringDoesContain(t, "foo.xml java_sdk_xml command", fooUpdatable.RuleParams.Command, `<updatable-library`)
+	android.AssertStringDoesContain(t, "foo.xml java_sdk_xml command", fooUpdatable.RuleParams.Command, `<apex-library`)
 	android.AssertStringDoesNotContain(t, "foo.xml java_sdk_xml command", fooUpdatable.RuleParams.Command, `<library`)
 }
 
@@ -1139,4 +1148,88 @@ func TestJavaSdkLibraryDist(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSdkLibrary_CheckMinSdkVersion(t *testing.T) {
+	preparer := android.GroupFixturePreparers(
+		PrepareForTestWithJavaBuildComponents,
+		PrepareForTestWithJavaDefaultModules,
+		PrepareForTestWithJavaSdkLibraryFiles,
+	)
+
+	preparer.RunTestWithBp(t, `
+		java_sdk_library {
+			name: "sdklib",
+            srcs: ["a.java"],
+            static_libs: ["util"],
+            min_sdk_version: "30",
+			unsafe_ignore_missing_latest_api: true,
+        }
+
+		java_library {
+			name: "util",
+			srcs: ["a.java"],
+			min_sdk_version: "30",
+		}
+	`)
+
+	preparer.
+		RunTestWithBp(t, `
+			java_sdk_library {
+				name: "sdklib",
+				srcs: ["a.java"],
+				libs: ["util"],
+				impl_only_libs: ["util"],
+				stub_only_libs: ["util"],
+				stub_only_static_libs: ["util"],
+				min_sdk_version: "30",
+				unsafe_ignore_missing_latest_api: true,
+			}
+
+			java_library {
+				name: "util",
+				srcs: ["a.java"],
+			}
+		`)
+
+	preparer.ExtendWithErrorHandler(android.FixtureExpectsAtLeastOneErrorMatchingPattern(`module "util".*should support min_sdk_version\(30\)`)).
+		RunTestWithBp(t, `
+			java_sdk_library {
+				name: "sdklib",
+				srcs: ["a.java"],
+				static_libs: ["util"],
+				min_sdk_version: "30",
+				unsafe_ignore_missing_latest_api: true,
+			}
+
+			java_library {
+				name: "util",
+				srcs: ["a.java"],
+				min_sdk_version: "31",
+			}
+		`)
+
+	preparer.ExtendWithErrorHandler(android.FixtureExpectsAtLeastOneErrorMatchingPattern(`module "another_util".*should support min_sdk_version\(30\)`)).
+		RunTestWithBp(t, `
+			java_sdk_library {
+				name: "sdklib",
+				srcs: ["a.java"],
+				static_libs: ["util"],
+				min_sdk_version: "30",
+				unsafe_ignore_missing_latest_api: true,
+			}
+
+			java_library {
+				name: "util",
+				srcs: ["a.java"],
+				static_libs: ["another_util"],
+				min_sdk_version: "30",
+			}
+
+			java_library {
+				name: "another_util",
+				srcs: ["a.java"],
+				min_sdk_version: "31",
+			}
+		`)
 }

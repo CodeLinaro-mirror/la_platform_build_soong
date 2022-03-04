@@ -14,9 +14,11 @@ var (
 type CcInfo struct {
 	OutputFiles          []string
 	CcObjectFiles        []string
+	CcSharedLibraryFiles []string
 	CcStaticLibraryFiles []string
 	Includes             []string
 	SystemIncludes       []string
+	Headers              []string
 	// Archives owned by the current target (not by its dependencies). These will
 	// be a subset of OutputFiles. (or static libraries, this will be equal to OutputFiles,
 	// but general cc_library will also have dynamic libraries in output files).
@@ -105,6 +107,7 @@ cc_info = providers(target)["CcInfo"]
 
 includes = cc_info.compilation_context.includes.to_list()
 system_includes = cc_info.compilation_context.system_includes.to_list()
+headers = [f.path for f in cc_info.compilation_context.headers.to_list()]
 
 ccObjectFiles = []
 staticLibraries = []
@@ -126,27 +129,43 @@ else:
         if linker_input.owner == target.label:
           rootStaticArchives.append(library.static_library.path)
 
-rootDynamicLibraries = []
+sharedLibraries = []
+rootSharedLibraries = []
 
 shared_info_tag = "@rules_cc//examples:experimental_cc_shared_library.bzl%CcSharedLibraryInfo"
 if shared_info_tag in providers(target):
   shared_info = providers(target)[shared_info_tag]
   for lib in shared_info.linker_input.libraries:
-    rootDynamicLibraries += [lib.dynamic_library.path]
+    path = lib.dynamic_library.path
+    rootSharedLibraries += [path]
+    sharedLibraries.append(path)
+else:
+  for linker_input in linker_inputs:
+    for library in linker_input.libraries:
+      if library.dynamic_library:
+        path = library.dynamic_library.path
+        sharedLibraries.append(path)
+        if linker_input.owner == target.label:
+          rootSharedLibraries.append(path)
 
 toc_file = ""
 toc_file_tag = "//build/bazel/rules:generate_toc.bzl%CcTocInfo"
 if toc_file_tag in providers(target):
   toc_file = providers(target)[toc_file_tag].toc.path
+else:
+  # NOTE: It's OK if there's no ToC, as Soong just uses it for optimization
+  pass
 
 returns = [
   outputFiles,
-  staticLibraries,
   ccObjectFiles,
+  sharedLibraries,
+  staticLibraries,
   includes,
   system_includes,
+  headers,
   rootStaticArchives,
-  rootDynamicLibraries,
+  rootSharedLibraries,
   [toc_file]
 ]
 
@@ -157,30 +176,39 @@ return "|".join([", ".join(r) for r in returns])`
 // The given rawString must correspond to the string output which was created by evaluating the
 // Starlark given in StarlarkFunctionBody.
 func (g getCcInfoType) ParseResult(rawString string) (CcInfo, error) {
-	var outputFiles []string
-	var ccObjects []string
-
+	const expectedLen = 10
 	splitString := strings.Split(rawString, "|")
-	if expectedLen := 8; len(splitString) != expectedLen {
+	if len(splitString) != expectedLen {
 		return CcInfo{}, fmt.Errorf("Expected %d items, got %q", expectedLen, splitString)
 	}
 	outputFilesString := splitString[0]
-	ccStaticLibrariesString := splitString[1]
-	ccObjectsString := splitString[2]
-	outputFiles = splitOrEmpty(outputFilesString, ", ")
+	ccObjectsString := splitString[1]
+	ccSharedLibrariesString := splitString[2]
+	ccStaticLibrariesString := splitString[3]
+	includesString := splitString[4]
+	systemIncludesString := splitString[5]
+	headersString := splitString[6]
+	rootStaticArchivesString := splitString[7]
+	rootDynamicLibrariesString := splitString[8]
+	tocFile := splitString[9] // NOTE: Will be the empty string if there wasn't
+
+	outputFiles := splitOrEmpty(outputFilesString, ", ")
+	ccObjects := splitOrEmpty(ccObjectsString, ", ")
+	ccSharedLibraries := splitOrEmpty(ccSharedLibrariesString, ", ")
 	ccStaticLibraries := splitOrEmpty(ccStaticLibrariesString, ", ")
-	ccObjects = splitOrEmpty(ccObjectsString, ", ")
-	includes := splitOrEmpty(splitString[3], ", ")
-	systemIncludes := splitOrEmpty(splitString[4], ", ")
-	rootStaticArchives := splitOrEmpty(splitString[5], ", ")
-	rootDynamicLibraries := splitOrEmpty(splitString[6], ", ")
-	tocFile := splitString[7] // NOTE: Will be the empty string if there wasn't
+	includes := splitOrEmpty(includesString, ", ")
+	systemIncludes := splitOrEmpty(systemIncludesString, ", ")
+	headers := splitOrEmpty(headersString, ", ")
+	rootStaticArchives := splitOrEmpty(rootStaticArchivesString, ", ")
+	rootDynamicLibraries := splitOrEmpty(rootDynamicLibrariesString, ", ")
 	return CcInfo{
 		OutputFiles:          outputFiles,
 		CcObjectFiles:        ccObjects,
+		CcSharedLibraryFiles: ccSharedLibraries,
 		CcStaticLibraryFiles: ccStaticLibraries,
 		Includes:             includes,
 		SystemIncludes:       systemIncludes,
+		Headers:              headers,
 		RootStaticArchives:   rootStaticArchives,
 		RootDynamicLibraries: rootDynamicLibraries,
 		TocFile:              tocFile,

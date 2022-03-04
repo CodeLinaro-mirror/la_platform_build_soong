@@ -344,13 +344,14 @@ type ApiScopeProperties struct {
 	// The sdk_version to use for building the stubs.
 	//
 	// If not specified then it will use an sdk_version determined as follows:
+	//
 	// 1) If the sdk_version specified on the java_sdk_library is none then this
-	//    will be none. This is used for java_sdk_library instances that are used
-	//    to create stubs that contribute to the core_current sdk version.
-	// 2) Otherwise, it is assumed that this library extends but does not contribute
-	//    directly to a specific sdk_version and so this uses the sdk_version appropriate
-	//    for the api scope. e.g. public will use sdk_version: current, system will use
-	//    sdk_version: system_current, etc.
+	// will be none. This is used for java_sdk_library instances that are used
+	// to create stubs that contribute to the core_current sdk version.
+	// 2) Otherwise, it is assumed that this library extends but does not
+	// contribute directly to a specific sdk_version and so this uses the
+	// sdk_version appropriate for the api scope. e.g. public will use
+	// sdk_version: current, system will use sdk_version: system_current, etc.
 	//
 	// This does not affect the sdk_version used for either generating the stubs source
 	// or the API file. They both have to use the same sdk_version as is used for
@@ -1128,6 +1129,22 @@ func (module *SdkLibrary) getGeneratedApiScopes(ctx android.EarlyModuleContext) 
 	return generatedScopes
 }
 
+var _ android.ModuleWithMinSdkVersionCheck = (*SdkLibrary)(nil)
+
+func (module *SdkLibrary) CheckMinSdkVersion(ctx android.ModuleContext) {
+	android.CheckMinSdkVersion(ctx, module.MinSdkVersion(ctx).ApiLevel, func(c android.ModuleContext, do android.PayloadDepsCallback) {
+		ctx.WalkDeps(func(child android.Module, parent android.Module) bool {
+			isExternal := !module.depIsInSameApex(ctx, child)
+			if am, ok := child.(android.ApexModule); ok {
+				if !do(ctx, parent, am, isExternal) {
+					return false
+				}
+			}
+			return !isExternal
+		})
+	})
+}
+
 type sdkLibraryComponentTag struct {
 	blueprint.BaseDependencyTag
 	name string
@@ -1205,14 +1222,23 @@ func (module *SdkLibrary) DepsMutator(ctx android.BottomUpMutatorContext) {
 
 func (module *SdkLibrary) OutputFiles(tag string) (android.Paths, error) {
 	paths, err := module.commonOutputFiles(tag)
-	if paths == nil && err == nil {
-		return module.Library.OutputFiles(tag)
-	} else {
+	if paths != nil || err != nil {
 		return paths, err
 	}
+	if module.requiresRuntimeImplementationLibrary() {
+		return module.Library.OutputFiles(tag)
+	}
+	if tag == "" {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("unsupported module reference tag %q", tag)
 }
 
 func (module *SdkLibrary) GenerateAndroidBuildActions(ctx android.ModuleContext) {
+	if proptools.String(module.deviceProperties.Min_sdk_version) != "" {
+		module.CheckMinSdkVersion(ctx)
+	}
+
 	module.generateCommonBuildActions(ctx)
 
 	// Only build an implementation library if required.
@@ -2521,7 +2547,8 @@ func formattedOptionalSdkLevelAttribute(ctx android.ModuleContext, attrName stri
 	}
 	apiLevel, err := android.ApiLevelFromUser(ctx, *value)
 	if err != nil {
-		ctx.PropertyErrorf(attrName, err.Error())
+		// attributes in bp files have underscores but in the xml have dashes.
+		ctx.PropertyErrorf(strings.ReplaceAll(attrName, "-", "_"), err.Error())
 		return ""
 	}
 	intStr := strconv.Itoa(apiLevel.FinalOrPreviewInt())
@@ -2542,15 +2569,15 @@ func (module *sdkLibraryXml) permissionsContents(ctx android.ModuleContext) stri
 	libNameAttr := formattedOptionalAttribute("name", &libName)
 	filePath := module.implPath(ctx)
 	filePathAttr := formattedOptionalAttribute("file", &filePath)
-	implicitFromAttr := formattedOptionalSdkLevelAttribute(ctx, "on_bootclasspath_since", module.properties.On_bootclasspath_since)
-	implicitUntilAttr := formattedOptionalSdkLevelAttribute(ctx, "on_bootclasspath_before", module.properties.On_bootclasspath_before)
-	minSdkAttr := formattedOptionalSdkLevelAttribute(ctx, "min_device_sdk", module.properties.Min_device_sdk)
-	maxSdkAttr := formattedOptionalSdkLevelAttribute(ctx, "max_device_sdk", module.properties.Max_device_sdk)
-	// <library> is understood in all android versions whereas <updatable-library> is only understood from API T (and ignored before that).
-	// similarly, min_device_sdk is only understood from T. So if a library is using that, we need to use the updatable-library to make sure this library is not loaded before T
+	implicitFromAttr := formattedOptionalSdkLevelAttribute(ctx, "on-bootclasspath-since", module.properties.On_bootclasspath_since)
+	implicitUntilAttr := formattedOptionalSdkLevelAttribute(ctx, "on-bootclasspath-before", module.properties.On_bootclasspath_before)
+	minSdkAttr := formattedOptionalSdkLevelAttribute(ctx, "min-device-sdk", module.properties.Min_device_sdk)
+	maxSdkAttr := formattedOptionalSdkLevelAttribute(ctx, "max-device-sdk", module.properties.Max_device_sdk)
+	// <library> is understood in all android versions whereas <apex-library> is only understood from API T (and ignored before that).
+	// similarly, min_device_sdk is only understood from T. So if a library is using that, we need to use the apex-library to make sure this library is not loaded before T
 	var libraryTag string
 	if module.properties.Min_device_sdk != nil {
-		libraryTag = `    <updatable-library\n`
+		libraryTag = `    <apex-library\n`
 	} else {
 		libraryTag = `    <library\n`
 	}
@@ -2603,18 +2630,18 @@ func (module *sdkLibraryXml) GenerateAndroidBuildActions(ctx android.ModuleConte
 
 func (module *sdkLibraryXml) AndroidMkEntries() []android.AndroidMkEntries {
 	if module.hideApexVariantFromMake {
-		return []android.AndroidMkEntries{android.AndroidMkEntries{
+		return []android.AndroidMkEntries{{
 			Disabled: true,
 		}}
 	}
 
-	return []android.AndroidMkEntries{android.AndroidMkEntries{
+	return []android.AndroidMkEntries{{
 		Class:      "ETC",
 		OutputFile: android.OptionalPathForPath(module.outputFilePath),
 		ExtraEntries: []android.AndroidMkExtraEntriesFunc{
 			func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
 				entries.SetString("LOCAL_MODULE_TAGS", "optional")
-				entries.SetString("LOCAL_MODULE_PATH", module.installDirPath.ToMakePath().String())
+				entries.SetString("LOCAL_MODULE_PATH", module.installDirPath.String())
 				entries.SetString("LOCAL_INSTALLED_MODULE_STEM", module.outputFilePath.Base())
 			},
 		},

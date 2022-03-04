@@ -29,7 +29,6 @@ func init() {
 	android.RegisterModuleType("cc_object", ObjectFactory)
 	android.RegisterSdkMemberType(ccObjectSdkMemberType)
 
-	android.RegisterBp2BuildMutator("cc_object", ObjectBp2Build)
 }
 
 var ccObjectSdkMemberType = &librarySdkMemberType{
@@ -54,7 +53,7 @@ type objectBazelHandler struct {
 
 func (handler *objectBazelHandler) GenerateBazelBuildActions(ctx android.ModuleContext, label string) bool {
 	bazelCtx := ctx.Config().BazelContext
-	objPaths, ok := bazelCtx.GetOutputFiles(label, ctx.Arch().ArchType)
+	objPaths, ok := bazelCtx.GetOutputFiles(label, android.GetConfigKey(ctx))
 	if ok {
 		if len(objPaths) != 1 {
 			ctx.ModuleErrorf("expected exactly one object file for '%s', but got %s", label, objPaths)
@@ -117,6 +116,7 @@ func ObjectFactory() android.Module {
 
 	module.sdkMemberTypes = []android.SdkMemberType{ccObjectSdkMemberType}
 
+	module.bazelable = true
 	return module.Init()
 }
 
@@ -135,26 +135,17 @@ type bazelObjectAttributes struct {
 	Linker_script       bazel.LabelAttribute
 }
 
-// ObjectBp2Build is the bp2build converter from cc_object modules to the
+// objectBp2Build is the bp2build converter from cc_object modules to the
 // Bazel equivalent target, plus any necessary include deps for the cc_object.
-func ObjectBp2Build(ctx android.TopDownMutatorContext) {
-	m, ok := ctx.Module().(*Module)
-	if !ok || !m.ConvertWithBp2build(ctx) {
-		return
-	}
-
-	// a Module can be something other than a cc_object.
-	if ctx.ModuleType() != "cc_object" {
-		return
-	}
-
+func objectBp2Build(ctx android.TopDownMutatorContext, m *Module) {
 	if m.compiler == nil {
 		// a cc_object must have access to the compiler decorator for its props.
 		ctx.ModuleErrorf("compiler must not be nil for a cc_object module")
 	}
 
 	// Set arch-specific configurable attributes
-	compilerAttrs := bp2BuildParseCompilerProps(ctx, m)
+	baseAttributes := bp2BuildParseBaseProps(ctx, m)
+	compilerAttrs := baseAttributes.compilerAttributes
 	var deps bazel.LabelListAttribute
 	systemDynamicDeps := bazel.LabelListAttribute{ForceSpecifyEmptyList: true}
 
@@ -164,7 +155,8 @@ func ObjectBp2Build(ctx android.TopDownMutatorContext) {
 		for config, props := range configToProps {
 			if objectLinkerProps, ok := props.(*ObjectLinkerProperties); ok {
 				if objectLinkerProps.Linker_script != nil {
-					linkerScript.SetSelectValue(axis, config, android.BazelLabelForModuleSrcSingle(ctx, *objectLinkerProps.Linker_script))
+					label := android.BazelLabelForModuleSrcSingle(ctx, *objectLinkerProps.Linker_script)
+					linkerScript.SetSelectValue(axis, config, label)
 				}
 				deps.SetSelectValue(axis, config, android.BazelLabelForModuleDeps(ctx, objectLinkerProps.Objs))
 				systemSharedLibs := objectLinkerProps.System_shared_libs

@@ -259,7 +259,9 @@ func GenerateBazelTargets(ctx *CodegenContext, generateFilegroups bool) (convers
 
 	// Simple metrics tracking for bp2build
 	metrics := CodegenMetrics{
-		ruleClassCount: make(map[string]int),
+		ruleClassCount:           make(map[string]uint64),
+		convertedModuleTypeCount: make(map[string]uint64),
+		totalModuleTypeCount:     make(map[string]uint64),
 	}
 
 	dirs := make(map[string]bool)
@@ -269,6 +271,7 @@ func GenerateBazelTargets(ctx *CodegenContext, generateFilegroups bool) (convers
 	bpCtx := ctx.Context()
 	bpCtx.VisitAllModules(func(m blueprint.Module) {
 		dir := bpCtx.ModuleDir(m)
+		moduleType := bpCtx.ModuleType(m)
 		dirs[dir] = true
 
 		var targets []BazelTarget
@@ -292,7 +295,7 @@ func GenerateBazelTargets(ctx *CodegenContext, generateFilegroups bool) (convers
 				// targets in the same BUILD file (or package).
 
 				// Log the module.
-				metrics.AddConvertedModule(m.Name(), Handcrafted)
+				metrics.AddConvertedModule(m, moduleType, Handcrafted)
 
 				pathToBuildFile := getBazelPackagePath(b)
 				if _, exists := buildFileToAppend[pathToBuildFile]; exists {
@@ -312,13 +315,22 @@ func GenerateBazelTargets(ctx *CodegenContext, generateFilegroups bool) (convers
 				// Handle modules converted to generated targets.
 
 				// Log the module.
-				metrics.AddConvertedModule(m.Name(), Generated)
+				metrics.AddConvertedModule(aModule, moduleType, Generated)
 
 				// Handle modules with unconverted deps. By default, emit a warning.
 				if unconvertedDeps := aModule.GetUnconvertedBp2buildDeps(); len(unconvertedDeps) > 0 {
 					msg := fmt.Sprintf("%q depends on unconverted modules: %s", m.Name(), strings.Join(unconvertedDeps, ", "))
 					if ctx.unconvertedDepMode == warnUnconvertedDeps {
 						metrics.moduleWithUnconvertedDepsMsgs = append(metrics.moduleWithUnconvertedDepsMsgs, msg)
+					} else if ctx.unconvertedDepMode == errorModulesUnconvertedDeps {
+						errs = append(errs, fmt.Errorf(msg))
+						return
+					}
+				}
+				if unconvertedDeps := aModule.GetMissingBp2buildDeps(); len(unconvertedDeps) > 0 {
+					msg := fmt.Sprintf("%q depends on missing modules: %s", m.Name(), strings.Join(unconvertedDeps, ", "))
+					if ctx.unconvertedDepMode == warnUnconvertedDeps {
+						metrics.moduleWithMissingDepsMsgs = append(metrics.moduleWithMissingDepsMsgs, msg)
 					} else if ctx.unconvertedDepMode == errorModulesUnconvertedDeps {
 						errs = append(errs, fmt.Errorf(msg))
 						return
@@ -331,7 +343,7 @@ func GenerateBazelTargets(ctx *CodegenContext, generateFilegroups bool) (convers
 					metrics.IncrementRuleClassCount(t.ruleClass)
 				}
 			} else {
-				metrics.IncrementUnconvertedCount()
+				metrics.AddUnconvertedModule(moduleType)
 				return
 			}
 		case QueryView:
@@ -532,8 +544,8 @@ func isStructPtr(t reflect.Type) bool {
 
 // prettyPrint a property value into the equivalent Starlark representation
 // recursively.
-func prettyPrint(propertyValue reflect.Value, indent int) (string, error) {
-	if isZero(propertyValue) {
+func prettyPrint(propertyValue reflect.Value, indent int, emitZeroValues bool) (string, error) {
+	if !emitZeroValues && isZero(propertyValue) {
 		// A property value being set or unset actually matters -- Soong does set default
 		// values for unset properties, like system_shared_libs = ["libc", "libm", "libdl"] at
 		// https://cs.android.com/android/platform/superproject/+/master:build/soong/cc/linker.go;l=281-287;drc=f70926eef0b9b57faf04c17a1062ce50d209e480
@@ -556,7 +568,7 @@ func prettyPrint(propertyValue reflect.Value, indent int) (string, error) {
 	case reflect.Int, reflect.Uint, reflect.Int64:
 		ret = fmt.Sprintf("%v", propertyValue.Interface())
 	case reflect.Ptr:
-		return prettyPrint(propertyValue.Elem(), indent)
+		return prettyPrint(propertyValue.Elem(), indent, emitZeroValues)
 	case reflect.Slice:
 		if propertyValue.Len() == 0 {
 			return "[]", nil
@@ -565,7 +577,7 @@ func prettyPrint(propertyValue reflect.Value, indent int) (string, error) {
 		if propertyValue.Len() == 1 {
 			// Single-line list for list with only 1 element
 			ret += "["
-			indexedValue, err := prettyPrint(propertyValue.Index(0), indent)
+			indexedValue, err := prettyPrint(propertyValue.Index(0), indent, emitZeroValues)
 			if err != nil {
 				return "", err
 			}
@@ -575,7 +587,7 @@ func prettyPrint(propertyValue reflect.Value, indent int) (string, error) {
 			// otherwise, use a multiline list.
 			ret += "[\n"
 			for i := 0; i < propertyValue.Len(); i++ {
-				indexedValue, err := prettyPrint(propertyValue.Index(i), indent+1)
+				indexedValue, err := prettyPrint(propertyValue.Index(i), indent+1, emitZeroValues)
 				if err != nil {
 					return "", err
 				}
@@ -660,7 +672,7 @@ func extractStructProperties(structValue reflect.Value, indent int) map[string]s
 		}
 
 		propertyName := proptools.PropertyNameForField(field.Name)
-		prettyPrintedValue, err := prettyPrint(fieldValue, indent+1)
+		prettyPrintedValue, err := prettyPrint(fieldValue, indent+1, false)
 		if err != nil {
 			panic(
 				fmt.Errorf(
@@ -698,9 +710,9 @@ func isZero(value reflect.Value) bool {
 		} else {
 			return true
 		}
-	// Always print bools, if you want a bool attribute to be able to take the default value, use a
-	// bool pointer instead
-	case reflect.Bool:
+	// Always print bool/strings, if you want a bool/string attribute to be able to take the default value, use a
+	// pointer instead
+	case reflect.Bool, reflect.String:
 		return false
 	default:
 		if !value.IsValid() {

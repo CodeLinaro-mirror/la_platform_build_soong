@@ -14,6 +14,7 @@ bootstrap_go_package {
         "soong-snapshot",
     ],
     srcs: [
+        "afdo.go",
         "androidmk.go",
         "benchmark.go",
         "binary.go",
@@ -38,6 +39,7 @@ bootstrap_go_package {
         "strip.go",
         "test.go",
         "testing.go",
+        "toolchain_library.go",
     ],
     testSrcs: [
         "benchmark_test.go",
@@ -54,6 +56,7 @@ bootstrap_go_package {
         "project_json_test.go",
         "protobuf_test.go",
         "rust_test.go",
+        "sanitize_test.go",
         "source_provider_test.go",
         "test_test.go",
         "vendor_snapshot_test.go",

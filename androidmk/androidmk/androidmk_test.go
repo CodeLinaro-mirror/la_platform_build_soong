@@ -1121,6 +1121,25 @@ prebuilt_usr_share_host {
 `,
 	},
 	{
+		desc: "prebuilt_root_host",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := foo
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(HOST_OUT)/subdir
+LOCAL_SRC_FILES := foo.txt
+include $(BUILD_PREBUILT)
+`,
+		expected: `
+prebuilt_root_host {
+	name: "foo",
+
+	src: "foo.txt",
+	relative_install_path: "subdir",
+}
+`,
+	},
+	{
 		desc: "prebuilt_font",
 		in: `
 include $(CLEAR_VARS)
@@ -1514,6 +1533,74 @@ android_app {
         "bar.test",
         "baz.test",
     ],
+}
+`,
+	},
+	{
+		desc: "Obsolete LOCAL_MODULE_PATH",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := foo
+LOCAL_MODULE_PATH := $(TARGET_OUT_DATA_APPS)
+LOCAL_MODULE_PATH := $(TARGET_OUT_OPTIONAL_EXECUTABLES)
+LOCAL_CTS_TEST_PACKAGE := bar
+LOCAL_USE_AAPT2 := blah
+include $(BUILD_PACKAGE)
+`,
+		expected: `
+android_app {
+  name: "foo",
+
+}
+`,
+	},
+	{
+		desc: "LOCAL_LICENSE_KINDS, LOCAL_LICENSE_CONDITIONS, LOCAL_NOTICE_FILE",
+		// When "android_license_files" is valid, the test requires an Android.mk file
+		// outside the current (and an Android.bp file is required as well if the license
+		// files locates directory), thus a mock file system is needed. The integration
+		// test cases for these scenarios have been added in
+		// $(ANDROID_BUILD_TOP)/build/soong/tests/androidmk_test.sh.
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := foo
+LOCAL_LICENSE_KINDS := license_kind
+LOCAL_LICENSE_CONDITIONS := license_condition
+LOCAL_NOTICE_FILE := license_notice
+include $(BUILD_PACKAGE)
+`,
+		expected: `
+package {
+    // See: http://go/android-license-faq
+    default_applicable_licenses: [
+	"Android-Apache-2.0",
+    ],
+}
+
+android_app {
+    name: "foo",
+    // ANDROIDMK TRANSLATION ERROR: Only $(LOCAL_PATH)/.. values are allowed
+    // LOCAL_NOTICE_FILE := license_notice
+
+}
+`,
+	},
+	{
+		desc: "LOCAL_CHECK_ELF_FILES",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := foo
+LOCAL_SRC_FILES := test.c
+LOCAL_MODULE_CLASS := SHARED_LIBRARIES
+LOCAL_CHECK_ELF_FILES := false
+include $(BUILD_PREBUILT)
+		`,
+		expected: `
+cc_prebuilt_library_shared {
+	name: "foo",
+	srcs: ["test.c"],
+
+	check_elf_files: false,
 }
 `,
 	},

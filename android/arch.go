@@ -168,7 +168,7 @@ func newArch(name, multilib string) ArchType {
 	return archType
 }
 
-// ArchTypeList returns the a slice copy of the 4 supported ArchTypes for arm,
+// ArchTypeList returns a slice copy of the 4 supported ArchTypes for arm,
 // arm64, x86 and x86_64.
 func ArchTypeList() []ArchType {
 	return append([]ArchType(nil), archTypeList...)
@@ -308,7 +308,7 @@ var (
 	// LinuxMusl is the OS for the Linux kernel plus the musl runtime.
 	LinuxMusl = newOsType("linux_musl", Host, false, X86, X86_64)
 	// Darwin is the OS for MacOS/Darwin host machines.
-	Darwin = newOsType("darwin", Host, false, X86_64)
+	Darwin = newOsType("darwin", Host, false, Arm64, X86_64)
 	// LinuxBionic is the OS for the Linux kernel plus the Bionic libc runtime, but without the
 	// rest of Android.
 	LinuxBionic = newOsType("linux_bionic", Host, false, Arm64, X86_64)
@@ -408,7 +408,7 @@ func bp2buildArchPathDepsMutator(ctx BottomUpMutatorContext) {
 
 	// addPathDepsForProps does not descend into sub structs, so we need to descend into the
 	// arch-specific properties ourselves
-	properties := []interface{}{}
+	var properties []interface{}
 	for _, archProperties := range m.archProperties {
 		for _, archProps := range archProperties {
 			archPropValues := reflect.ValueOf(archProps).Elem()
@@ -566,6 +566,8 @@ func GetOsSpecificVariantsOfCommonOSVariant(mctx BaseModuleContext) []Module {
 	return variants
 }
 
+var DarwinUniversalVariantTag = archDepTag{name: "darwin universal binary"}
+
 // archMutator splits a module into a variant for each Target requested by the module.  Target selection
 // for a module is in three levels, OsClass, multilib, and then Target.
 // OsClass selection is determined by:
@@ -652,7 +654,7 @@ func archMutator(bpctx blueprint.BottomUpMutatorContext) {
 	prefer32 := os == Windows
 
 	// Determine the multilib selection for this module.
-	multilib, extraMultilib := decodeMultilib(base, os.Class)
+	multilib, extraMultilib := decodeMultilib(base, os)
 
 	// Convert the multilib selection into a list of Targets.
 	targets, err := decodeMultilibTargets(multilib, osTargets, prefer32)
@@ -696,6 +698,21 @@ func archMutator(bpctx blueprint.BottomUpMutatorContext) {
 	for i, m := range modules {
 		addTargetProperties(m, targets[i], multiTargets, i == 0)
 		m.base().setArchProperties(mctx)
+
+		// Install support doesn't understand Darwin+Arm64
+		if os == Darwin && targets[i].HostCross {
+			m.base().commonProperties.SkipInstall = true
+		}
+	}
+
+	// Create a dependency for Darwin Universal binaries from the primary to secondary
+	// architecture. The module itself will be responsible for calling lipo to merge the outputs.
+	if os == Darwin {
+		if multilib == "darwin_universal" && len(modules) == 2 {
+			mctx.AddInterVariantDependency(DarwinUniversalVariantTag, modules[1], modules[0])
+		} else if multilib == "darwin_universal_common_first" && len(modules) == 3 {
+			mctx.AddInterVariantDependency(DarwinUniversalVariantTag, modules[2], modules[1])
+		}
 	}
 }
 
@@ -712,9 +729,9 @@ func addTargetProperties(m Module, target Target, multiTargets []Target, primary
 // multilib from the factory's call to InitAndroidArchModule if none was set.  For modules that
 // called InitAndroidMultiTargetsArchModule it always returns "common" for multilib, and returns
 // the actual multilib in extraMultilib.
-func decodeMultilib(base *ModuleBase, class OsClass) (multilib, extraMultilib string) {
+func decodeMultilib(base *ModuleBase, os OsType) (multilib, extraMultilib string) {
 	// First check the "android.compile_multilib" or "host.compile_multilib" properties.
-	switch class {
+	switch os.Class {
 	case Device:
 		multilib = String(base.commonProperties.Target.Android.Compile_multilib)
 	case Host:
@@ -732,6 +749,26 @@ func decodeMultilib(base *ModuleBase, class OsClass) (multilib, extraMultilib st
 	}
 
 	if base.commonProperties.UseTargetVariants {
+		// Darwin has the concept of "universal binaries" which is implemented in Soong by
+		// building both x86_64 and arm64 variants, and having select module types know how to
+		// merge the outputs of their corresponding variants together into a final binary. Most
+		// module types don't need to understand this logic, as we only build a small portion
+		// of the tree for Darwin, and only module types writing macho files need to do the
+		// merging.
+		//
+		// This logic is not enabled for:
+		//  "common", as it's not an arch-specific variant
+		//  "32", as Darwin never has a 32-bit variant
+		//  !UseTargetVariants, as the module has opted into handling the arch-specific logic on
+		//    its own.
+		if os == Darwin && multilib != "common" && multilib != "32" {
+			if multilib == "common_first" {
+				multilib = "darwin_universal_common_first"
+			} else {
+				multilib = "darwin_universal"
+			}
+		}
+
 		return multilib, ""
 	} else {
 		// For app modules a single arch variant will be created per OS class which is expected to handle all the
@@ -956,10 +993,11 @@ func initArchModule(m Module) {
 
 	base := m.base()
 
-	// Store the original list of top level property structs
-	base.generalProperties = m.GetProperties()
+	if len(base.archProperties) != 0 {
+		panic(fmt.Errorf("module %s already has archProperties", m.Name()))
+	}
 
-	for _, properties := range base.generalProperties {
+	getStructType := func(properties interface{}) reflect.Type {
 		propertiesValue := reflect.ValueOf(properties)
 		t := propertiesValue.Type()
 		if propertiesValue.Kind() != reflect.Ptr {
@@ -969,10 +1007,14 @@ func initArchModule(m Module) {
 
 		propertiesValue = propertiesValue.Elem()
 		if propertiesValue.Kind() != reflect.Struct {
-			panic(fmt.Errorf("properties must be a pointer to a struct, got %T",
+			panic(fmt.Errorf("properties must be a pointer to a struct, got a pointer to %T",
 				propertiesValue.Interface()))
 		}
+		return t
+	}
 
+	for _, properties := range m.GetProperties() {
+		t := getStructType(properties)
 		// Get or create the arch-specific property struct types for this property struct type.
 		archPropTypes := archPropTypeMap.Once(NewCustomOnceKey(t), func() interface{} {
 			return createArchPropTypeDesc(t)
@@ -992,9 +1034,6 @@ func initArchModule(m Module) {
 		m.AddProperties(archProperties...)
 	}
 
-	// Update the list of properties that can be set by a defaults module or a call to
-	// AppendMatchingProperties or PrependMatchingProperties.
-	base.customizableProperties = m.GetProperties()
 }
 
 func maybeBlueprintEmbed(src reflect.Value) reflect.Value {
@@ -1067,8 +1106,8 @@ func getChildPropertyStruct(ctx ArchVariantContext,
 func (m *ModuleBase) setOSProperties(ctx BottomUpMutatorContext) {
 	os := m.commonProperties.CompileOS
 
-	for i := range m.generalProperties {
-		genProps := m.generalProperties[i]
+	for i := range m.archProperties {
+		genProps := m.GetProperties()[i]
 		if m.archProperties[i] == nil {
 			continue
 		}
@@ -1395,8 +1434,8 @@ func (m *ModuleBase) setArchProperties(ctx BottomUpMutatorContext) {
 	arch := m.Arch()
 	os := m.Os()
 
-	for i := range m.generalProperties {
-		genProps := m.generalProperties[i]
+	for i := range m.archProperties {
+		genProps := m.GetProperties()[i]
 		if m.archProperties[i] == nil {
 			continue
 		}
@@ -1587,10 +1626,12 @@ func hasArmAbi(arch Arch) bool {
 	return PrefixInList(arch.Abi, "arm")
 }
 
-// hasArmArch returns true if targets has at least non-native_bridge arm Android arch
+// hasArmAndroidArch returns true if targets has at least
+// one arm Android arch (possibly native bridged)
 func hasArmAndroidArch(targets []Target) bool {
 	for _, target := range targets {
-		if target.Os == Android && target.Arch.ArchType == Arm {
+		if target.Os == Android &&
+			(target.Arch.ArchType == Arm || target.Arch.ArchType == Arm64) {
 			return true
 		}
 	}
@@ -1786,6 +1827,15 @@ func decodeMultilibTargets(multilib string, targets []Target, prefer32 bool) ([]
 		if len(buildTargets) == 0 {
 			buildTargets = filterMultilibTargets(targets, "lib64")
 		}
+	case "darwin_universal":
+		buildTargets = filterMultilibTargets(targets, "lib64")
+		// Reverse the targets so that the first architecture can depend on the second
+		// architecture module in order to merge the outputs.
+		reverseSliceInPlace(buildTargets)
+	case "darwin_universal_common_first":
+		archTargets := filterMultilibTargets(targets, "lib64")
+		reverseSliceInPlace(archTargets)
+		buildTargets = append(getCommonTargets(targets), archTargets...)
 	default:
 		return nil, fmt.Errorf(`compile_multilib must be "both", "first", "32", "64", "prefer32" or "first_prefer32" found %q`,
 			multilib)
@@ -1963,8 +2013,8 @@ func (m *ModuleBase) GetArchVariantProperties(ctx ArchVariantContext, propertySe
 	var archProperties []interface{}
 
 	// First find the property set in the module that corresponds to the requested
-	// one. m.archProperties[i] corresponds to m.generalProperties[i].
-	for i, generalProp := range m.generalProperties {
+	// one. m.archProperties[i] corresponds to m.GetProperties()[i].
+	for i, generalProp := range m.GetProperties() {
 		srcType := reflect.ValueOf(generalProp).Type()
 		if srcType == dstType {
 			archProperties = m.archProperties[i]
@@ -2006,17 +2056,10 @@ func (m *ModuleBase) GetArchVariantProperties(ctx ArchVariantContext, propertySe
 	osToProp := ArchVariantProperties{}
 	archOsToProp := ArchVariantProperties{}
 
-	var linuxStructs, bionicStructs []reflect.Value
-	var ok bool
-
-	linuxStructs, ok = getTargetStructs(ctx, archProperties, "Linux")
-	if !ok {
-		linuxStructs = make([]reflect.Value, 0)
-	}
-	bionicStructs, ok = getTargetStructs(ctx, archProperties, "Bionic")
-	if !ok {
-		bionicStructs = make([]reflect.Value, 0)
-	}
+	linuxStructs := getTargetStructs(ctx, archProperties, "Linux")
+	bionicStructs := getTargetStructs(ctx, archProperties, "Bionic")
+	hostStructs := getTargetStructs(ctx, archProperties, "Host")
+	hostNotWindowsStructs := getTargetStructs(ctx, archProperties, "Not_windows")
 
 	// For android, linux, ...
 	for _, os := range osTypeList {
@@ -2025,9 +2068,10 @@ func (m *ModuleBase) GetArchVariantProperties(ctx ArchVariantContext, propertySe
 			continue
 		}
 		osStructs := make([]reflect.Value, 0)
-		osSpecificStructs, ok := getTargetStructs(ctx, archProperties, os.Field)
-		if ok {
-			osStructs = append(osStructs, osSpecificStructs...)
+
+		osSpecificStructs := getTargetStructs(ctx, archProperties, os.Field)
+		if os.Class == Host {
+			osStructs = append(osStructs, hostStructs...)
 		}
 		if os.Linux() {
 			osStructs = append(osStructs, linuxStructs...)
@@ -2035,36 +2079,43 @@ func (m *ModuleBase) GetArchVariantProperties(ctx ArchVariantContext, propertySe
 		if os.Bionic() {
 			osStructs = append(osStructs, bionicStructs...)
 		}
+
+		if os == LinuxMusl {
+			osStructs = append(osStructs, getTargetStructs(ctx, archProperties, "Musl")...)
+		}
+		if os == Linux {
+			osStructs = append(osStructs, getTargetStructs(ctx, archProperties, "Glibc")...)
+		}
+
+		osStructs = append(osStructs, osSpecificStructs...)
+
+		if os.Class == Host && os != Windows {
+			osStructs = append(osStructs, hostNotWindowsStructs...)
+		}
 		osToProp[os.Name] = mergeStructs(ctx, osStructs, propertySet)
 
 		// For arm, x86, ...
 		for _, arch := range osArchTypeMap[os] {
 			osArchStructs := make([]reflect.Value, 0)
 
-			targetField := GetCompoundTargetField(os, arch)
-			targetName := fmt.Sprintf("%s_%s", os.Name, arch.Name)
-			targetStructs, ok := getTargetStructs(ctx, archProperties, targetField)
-			if ok {
-				osArchStructs = append(osArchStructs, targetStructs...)
-			}
-
 			// Auto-combine with Linux_ and Bionic_ targets. This potentially results in
 			// repetition and select() bloat, but use of Linux_* and Bionic_* targets is rare.
 			// TODO(b/201423152): Look into cleanup.
 			if os.Linux() {
 				targetField := "Linux_" + arch.Name
-				targetStructs, ok := getTargetStructs(ctx, archProperties, targetField)
-				if ok {
-					osArchStructs = append(osArchStructs, targetStructs...)
-				}
+				targetStructs := getTargetStructs(ctx, archProperties, targetField)
+				osArchStructs = append(osArchStructs, targetStructs...)
 			}
 			if os.Bionic() {
 				targetField := "Bionic_" + arch.Name
-				targetStructs, ok := getTargetStructs(ctx, archProperties, targetField)
-				if ok {
-					osArchStructs = append(osArchStructs, targetStructs...)
-				}
+				targetStructs := getTargetStructs(ctx, archProperties, targetField)
+				osArchStructs = append(osArchStructs, targetStructs...)
 			}
+
+			targetField := GetCompoundTargetField(os, arch)
+			targetName := fmt.Sprintf("%s_%s", os.Name, arch.Name)
+			targetStructs := getTargetStructs(ctx, archProperties, targetField)
+			osArchStructs = append(osArchStructs, targetStructs...)
 
 			archOsToProp[targetName] = mergeStructs(ctx, osArchStructs, propertySet)
 		}
@@ -2089,8 +2140,8 @@ func (m *ModuleBase) GetArchVariantProperties(ctx ArchVariantContext, propertySe
 //      }
 //    }
 // This would return a BaseCompilerProperties with BaseCompilerProperties.Srcs = ["foo.c"]
-func getTargetStructs(ctx ArchVariantContext, archProperties []interface{}, targetName string) ([]reflect.Value, bool) {
-	propertyStructs := make([]reflect.Value, 0)
+func getTargetStructs(ctx ArchVariantContext, archProperties []interface{}, targetName string) []reflect.Value {
+	var propertyStructs []reflect.Value
 	for _, archProperty := range archProperties {
 		archPropValues := reflect.ValueOf(archProperty).Elem()
 		targetProp := archPropValues.FieldByName("Target").Elem()
@@ -2098,11 +2149,11 @@ func getTargetStructs(ctx ArchVariantContext, archProperties []interface{}, targ
 		if ok {
 			propertyStructs = append(propertyStructs, targetStruct)
 		} else {
-			return propertyStructs, false
+			return []reflect.Value{}
 		}
 	}
 
-	return propertyStructs, true
+	return propertyStructs
 }
 
 func mergeStructs(ctx ArchVariantContext, propertyStructs []reflect.Value, propertySet interface{}) interface{} {

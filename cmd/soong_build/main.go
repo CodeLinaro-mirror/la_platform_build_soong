@@ -217,20 +217,24 @@ func doChosenActivity(configuration android.Config, extraNinjaDeps []string) str
 	generateModuleGraphFile := moduleGraphFile != ""
 	generateDocFile := docFile != ""
 
-	blueprintArgs := cmdlineArgs
-
-	var stopBefore bootstrap.StopBefore
-	if !generateModuleGraphFile && !generateQueryView && !generateDocFile {
-		stopBefore = bootstrap.DoEverything
-	} else {
-		stopBefore = bootstrap.StopBeforePrepareBuildActions
-	}
-
 	if generateBazelWorkspace {
 		// Run the alternate pipeline of bp2build mutators and singleton to convert
 		// Blueprint to BUILD files before everything else.
 		runBp2Build(configuration, extraNinjaDeps)
 		return bp2buildMarker
+	}
+
+	blueprintArgs := cmdlineArgs
+
+	var stopBefore bootstrap.StopBefore
+	if generateModuleGraphFile {
+		stopBefore = bootstrap.StopBeforeWriteNinja
+	} else if generateQueryView {
+		stopBefore = bootstrap.StopBeforePrepareBuildActions
+	} else if generateDocFile {
+		stopBefore = bootstrap.StopBeforePrepareBuildActions
+	} else {
+		stopBefore = bootstrap.DoEverything
 	}
 
 	ctx := newContext(configuration)
@@ -382,7 +386,7 @@ func touch(path string) {
 // - won't be overwritten by corresponding bp2build generated files
 //
 // And return their paths so they can be left out of the Bazel workspace dir (i.e. ignored)
-func getPathsToIgnoredBuildFiles(topDir string, generatedRoot string, srcDirBazelFiles []string) []string {
+func getPathsToIgnoredBuildFiles(topDir string, generatedRoot string, srcDirBazelFiles []string, verbose bool) []string {
 	paths := make([]string, 0)
 
 	for _, srcDirBazelFileRelativePath := range srcDirBazelFiles {
@@ -412,7 +416,9 @@ func getPathsToIgnoredBuildFiles(topDir string, generatedRoot string, srcDirBaze
 			// BUILD file clash resolution happens later in the symlink forest creation
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "Ignoring existing BUILD file: %s\n", srcDirBazelFileRelativePath)
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Ignoring existing BUILD file: %s\n", srcDirBazelFileRelativePath)
+		}
 		paths = append(paths, srcDirBazelFileRelativePath)
 	}
 
@@ -459,6 +465,11 @@ func runBp2Build(configuration android.Config, extraNinjaDeps []string) {
 	// Register an alternate set of singletons and mutators for bazel
 	// conversion for Bazel conversion.
 	bp2buildCtx := android.NewContext(configuration)
+
+	// Soong internals like LoadHooks behave differently when running as
+	// bp2build. This is the bit to differentiate between Soong-as-Soong and
+	// Soong-as-bp2build.
+	bp2buildCtx.SetRunningAsBp2build()
 
 	// Propagate "allow misssing dependencies" bit. This is normally set in
 	// newContext(), but we create bp2buildCtx without calling that method.
@@ -514,7 +525,7 @@ func runBp2Build(configuration android.Config, extraNinjaDeps []string) {
 		os.Exit(1)
 	}
 
-	pathsToIgnoredBuildFiles := getPathsToIgnoredBuildFiles(topDir, generatedRoot, existingBazelRelatedFiles)
+	pathsToIgnoredBuildFiles := getPathsToIgnoredBuildFiles(topDir, generatedRoot, existingBazelRelatedFiles, configuration.IsEnvTrue("BP2BUILD_VERBOSE"))
 	excludes = append(excludes, pathsToIgnoredBuildFiles...)
 
 	excludes = append(excludes, getTemporaryExcludes()...)
@@ -526,6 +537,7 @@ func runBp2Build(configuration android.Config, extraNinjaDeps []string) {
 	// for queryview, since that's a total repo-wide conversion and there's a
 	// 1:1 mapping for each module.
 	metrics.Print()
+	writeBp2BuildMetrics(&metrics, configuration)
 
 	ninjaDeps = append(ninjaDeps, codegenContext.AdditionalNinjaDeps()...)
 	ninjaDeps = append(ninjaDeps, symlinkForestDeps...)
@@ -534,4 +546,14 @@ func runBp2Build(configuration android.Config, extraNinjaDeps []string) {
 
 	// Create an empty bp2build marker file.
 	touch(shared.JoinPath(topDir, bp2buildMarker))
+}
+
+// Write Bp2Build metrics into $LOG_DIR
+func writeBp2BuildMetrics(metrics *bp2build.CodegenMetrics, configuration android.Config) {
+	metricsDir := configuration.Getenv("LOG_DIR")
+	if len(metricsDir) < 1 {
+		fmt.Fprintf(os.Stderr, "\nMissing required env var for generating bp2build metrics: LOG_DIR\n")
+		os.Exit(1)
+	}
+	metrics.Write(metricsDir)
 }

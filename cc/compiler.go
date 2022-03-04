@@ -209,15 +209,6 @@ type BaseCompilerProperties struct {
 
 	// Build and link with OpenMP
 	Openmp *bool `android:"arch_variant"`
-
-	// Deprecated.
-	// Adds __ANDROID_APEX_<APEX_MODULE_NAME>__ macro defined for apex variants in addition to __ANDROID_APEX__
-	Use_apex_name_macro *bool
-
-	// Adds two macros for apex variants in addition to __ANDROID_APEX__
-	// * __ANDROID_APEX_COM_ANDROID_FOO__
-	// * __ANDROID_APEX_NAME__="com.android.foo"
-	UseApexNameMacro bool `blueprint:"mutated"`
 }
 
 func NewBaseCompiler() *baseCompiler {
@@ -291,10 +282,6 @@ func (compiler *baseCompiler) compilerDeps(ctx DepsContext, deps Deps) Deps {
 	return deps
 }
 
-func (compiler *baseCompiler) useApexNameMacro() bool {
-	return Bool(compiler.Properties.Use_apex_name_macro) || compiler.Properties.UseApexNameMacro
-}
-
 // Return true if the module is in the WarningAllowedProjects.
 func warningsAreAllowed(subdir string) bool {
 	subdir += "/"
@@ -317,11 +304,24 @@ func parseCppStd(cppStdPtr *string) string {
 	cppStd := String(cppStdPtr)
 	switch cppStd {
 	case "":
-		cppStd = config.CppStdVersion
+		return config.CppStdVersion
 	case "experimental":
-		cppStd = config.ExperimentalCppStdVersion
+		return config.ExperimentalCppStdVersion
+	default:
+		return cppStd
 	}
-	return cppStd
+}
+
+func parseCStd(cStdPtr *string) string {
+	cStd := String(cStdPtr)
+	switch cStd {
+	case "":
+		return config.CStdVersion
+	case "experimental":
+		return config.ExperimentalCStdVersion
+	default:
+		return cStd
+	}
 }
 
 // Create a Flags struct that collects the compile flags from global values,
@@ -405,10 +405,6 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 
 	if ctx.apexVariationName() != "" {
 		flags.Global.CommonFlags = append(flags.Global.CommonFlags, "-D__ANDROID_APEX__")
-		if compiler.useApexNameMacro() {
-			flags.Global.CommonFlags = append(flags.Global.CommonFlags, "-D__ANDROID_APEX_"+makeDefineString(ctx.apexVariationName())+"__")
-			flags.Global.CommonFlags = append(flags.Global.CommonFlags, "-D__ANDROID_APEX_NAME__='\""+ctx.apexVariationName()+"\"'")
-		}
 		if ctx.Device() {
 			flags.Global.CommonFlags = append(flags.Global.CommonFlags,
 				fmt.Sprintf("-D__ANDROID_APEX_MIN_SDK_VERSION__=%d",
@@ -496,13 +492,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 
 	flags.Global.CommonFlags = append(flags.Global.CommonFlags, tc.ToolchainCflags())
 
-	cStd := config.CStdVersion
-	if String(compiler.Properties.C_std) == "experimental" {
-		cStd = config.ExperimentalCStdVersion
-	} else if String(compiler.Properties.C_std) != "" {
-		cStd = String(compiler.Properties.C_std)
-	}
-
+	cStd := parseCStd(compiler.Properties.C_std)
 	cppStd := parseCppStd(compiler.Properties.Cpp_std)
 
 	cStd, cppStd = maybeReplaceGnuToC(compiler.Properties.Gnu_extensions, cStd, cppStd)
@@ -554,11 +544,6 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 			"-I"+android.PathForModuleGen(ctx, "yacc", ctx.ModuleDir()).String())
 	}
 
-	if compiler.hasSrcExt(".mc") {
-		flags.Local.CommonFlags = append(flags.Local.CommonFlags,
-			"-I"+android.PathForModuleGen(ctx, "windmc", ctx.ModuleDir()).String())
-	}
-
 	if compiler.hasSrcExt(".aidl") {
 		flags.aidlFlags = append(flags.aidlFlags, compiler.Properties.Aidl.Flags...)
 		if len(compiler.Properties.Aidl.Local_include_dirs) > 0 {
@@ -573,6 +558,12 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 		if Bool(compiler.Properties.Aidl.Generate_traces) {
 			flags.aidlFlags = append(flags.aidlFlags, "-t")
 		}
+
+		aidlMinSdkVersion := ctx.minSdkVersion()
+		if aidlMinSdkVersion == "" {
+			aidlMinSdkVersion = "platform_apis"
+		}
+		flags.aidlFlags = append(flags.aidlFlags, "--min_sdk_version="+aidlMinSdkVersion)
 
 		flags.Local.CommonFlags = append(flags.Local.CommonFlags,
 			"-I"+android.PathForModuleGen(ctx, "aidl").String())
@@ -634,10 +625,6 @@ func (compiler *baseCompiler) hasSrcExt(ext string) bool {
 	return false
 }
 
-func (compiler *baseCompiler) uniqueApexVariations() bool {
-	return compiler.useApexNameMacro()
-}
-
 var invalidDefineCharRegex = regexp.MustCompile("[^a-zA-Z0-9_]")
 
 // makeDefineString transforms a name of an APEX module into a value to be used as value for C define
@@ -650,9 +637,9 @@ var gnuToCReplacer = strings.NewReplacer("gnu", "c")
 
 func ndkPathDeps(ctx ModuleContext) android.Paths {
 	if ctx.Module().(*Module).IsSdkVariant() {
-		// The NDK sysroot timestamp file depends on all the NDK sysroot files
-		// (headers and libraries).
-		return android.Paths{getNdkBaseTimestampFile(ctx)}
+		// The NDK sysroot timestamp file depends on all the NDK sysroot header files
+		// for compiling src to obj files.
+		return android.Paths{getNdkHeadersTimestampFile(ctx)}
 	}
 	return nil
 }
@@ -688,7 +675,7 @@ func (compiler *baseCompiler) compile(ctx ModuleContext, flags Flags, deps PathD
 }
 
 // Compile a list of source files into objects a specified subdirectory
-func compileObjs(ctx android.ModuleContext, flags builderFlags, subdir string,
+func compileObjs(ctx ModuleContext, flags builderFlags, subdir string,
 	srcFiles, noTidySrcs, pathDeps android.Paths, cFlagsDeps android.Paths) Objects {
 
 	return transformSourceToObj(ctx, subdir, srcFiles, noTidySrcs, flags, pathDeps, cFlagsDeps)

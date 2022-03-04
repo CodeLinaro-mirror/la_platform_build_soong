@@ -721,10 +721,6 @@ func (c *configImpl) Arguments() []string {
 }
 
 func (c *configImpl) SoongBuildInvocationNeeded() bool {
-	if c.Dist() {
-		return true
-	}
-
 	if len(c.Arguments()) > 0 {
 		// Explicit targets requested that are not special targets like b2pbuild
 		// or the JSON module graph
@@ -733,6 +729,11 @@ func (c *configImpl) SoongBuildInvocationNeeded() bool {
 
 	if !c.JsonModuleGraph() && !c.Bp2Build() && !c.Queryview() && !c.SoongDocs() {
 		// Command line was empty, the default Ninja target is built
+		return true
+	}
+
+	// bp2build + dist may be used to dist bp2build logs but does not require SoongBuildInvocation
+	if c.Dist() && !c.Bp2Build() {
 		return true
 	}
 
@@ -784,24 +785,25 @@ func (c *configImpl) PrebuiltOS() string {
 		panic("Unknown GOOS")
 	}
 }
+
 func (c *configImpl) HostToolDir() string {
-	return filepath.Join(c.SoongOutDir(), "host", c.PrebuiltOS(), "bin")
+	if c.SkipKatiNinja() {
+		return filepath.Join(c.SoongOutDir(), "host", c.PrebuiltOS(), "bin")
+	} else {
+		return filepath.Join(c.OutDir(), "host", c.PrebuiltOS(), "bin")
+	}
 }
 
 func (c *configImpl) NamedGlobFile(name string) string {
-	return shared.JoinPath(c.SoongOutDir(), ".bootstrap/build-globs."+name+".ninja")
+	return shared.JoinPath(c.SoongOutDir(), "globs-"+name+".ninja")
 }
 
 func (c *configImpl) UsedEnvFile(tag string) string {
 	return shared.JoinPath(c.SoongOutDir(), usedEnvFile+"."+tag)
 }
 
-func (c *configImpl) MainNinjaFile() string {
-	return shared.JoinPath(c.SoongOutDir(), "build.ninja")
-}
-
 func (c *configImpl) Bp2BuildMarkerFile() string {
-	return shared.JoinPath(c.SoongOutDir(), ".bootstrap/bp2build_workspace_marker")
+	return shared.JoinPath(c.SoongOutDir(), "bp2build_workspace_marker")
 }
 
 func (c *configImpl) SoongDocsHtml() string {
@@ -1254,16 +1256,22 @@ func (c *configImpl) MetricsUploaderApp() string {
 	return c.metricsUploader
 }
 
-// LogsDir returns the logs directory where build log and metrics
-// files are located. By default, the logs directory is the out
+// LogsDir returns the absolute path to the logs directory where build log and
+// metrics files are located. By default, the logs directory is the out
 // directory. If the argument dist is specified, the logs directory
 // is <dist_dir>/logs.
 func (c *configImpl) LogsDir() string {
+	dir := c.OutDir()
 	if c.Dist() {
 		// Always write logs to the real dist dir, even if Bazel is using a rigged dist dir for other files
-		return filepath.Join(c.RealDistDir(), "logs")
+		dir = filepath.Join(c.RealDistDir(), "logs")
 	}
-	return c.OutDir()
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nError making log dir '%s' absolute: %s\n", dir, err.Error())
+		os.Exit(1)
+	}
+	return absDir
 }
 
 // BazelMetricsDir returns the <logs dir>/bazel_metrics directory

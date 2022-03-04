@@ -47,6 +47,7 @@ func (library *Library) AndroidMkEntriesHostDex() android.AndroidMkEntries {
 					if library.dexJarFile.IsSet() {
 						entries.SetPath("LOCAL_SOONG_DEX_JAR", library.dexJarFile.Path())
 					}
+					entries.SetPath("LOCAL_SOONG_INSTALLED_MODULE", library.hostdexInstallFile)
 					entries.SetPath("LOCAL_SOONG_HEADER_JAR", library.headerJarFile)
 					entries.SetPath("LOCAL_SOONG_CLASSES_JAR", library.implementationAndResourcesJar)
 					entries.SetString("LOCAL_MODULE_STEM", library.Stem()+"-hostdex")
@@ -59,6 +60,11 @@ func (library *Library) AndroidMkEntriesHostDex() android.AndroidMkEntries {
 
 func (library *Library) AndroidMkEntries() []android.AndroidMkEntries {
 	var entriesList []android.AndroidMkEntries
+
+	if library.Os() == android.Windows {
+		// Make does not support Windows Java modules
+		return nil
+	}
 
 	if library.hideApexVariantFromMake {
 		// For a java library built for an APEX, we don't need a Make module for itself. Otherwise, it
@@ -176,7 +182,14 @@ func (j *TestHelperLibrary) AndroidMkEntries() []android.AndroidMkEntries {
 }
 
 func (prebuilt *Import) AndroidMkEntries() []android.AndroidMkEntries {
-	if prebuilt.hideApexVariantFromMake || !prebuilt.ContainingSdk().Unversioned() {
+	if prebuilt.hideApexVariantFromMake {
+		// For a library imported from a prebuilt APEX, we don't need a Make module for itself, as we
+		// don't need to install it. However, we need to add its dexpreopt outputs as sub-modules, if it
+		// is preopted.
+		dexpreoptEntries := prebuilt.dexpreopter.AndroidMkEntriesForApex()
+		return append(dexpreoptEntries, android.AndroidMkEntries{Disabled: true})
+	}
+	if !prebuilt.ContainingSdk().Unversioned() {
 		return []android.AndroidMkEntries{android.AndroidMkEntries{
 			Disabled: true,
 		}}
@@ -250,6 +263,10 @@ func (prebuilt *AARImport) AndroidMkEntries() []android.AndroidMkEntries {
 }
 
 func (binary *Binary) AndroidMkEntries() []android.AndroidMkEntries {
+	if binary.Os() == android.Windows {
+		// Make does not support Windows Java modules
+		return nil
+	}
 
 	if !binary.isWrapperVariant {
 		return []android.AndroidMkEntries{android.AndroidMkEntries{
@@ -276,11 +293,6 @@ func (binary *Binary) AndroidMkEntries() []android.AndroidMkEntries {
 		}}
 	} else {
 		outputFile := binary.wrapperFile
-		// Have Make installation trigger Soong installation by using Soong's install path as
-		// the output file.
-		if binary.Host() {
-			outputFile = binary.binaryFile
-		}
 
 		return []android.AndroidMkEntries{android.AndroidMkEntries{
 			Class:      "EXECUTABLES",
@@ -421,8 +433,10 @@ func (a *AndroidApp) getOverriddenPackages() []string {
 	if len(a.appProperties.Overrides) > 0 {
 		overridden = append(overridden, a.appProperties.Overrides...)
 	}
-	if a.Name() != a.installApkName {
-		overridden = append(overridden, a.Name())
+	// When APK name is overridden via PRODUCT_PACKAGE_NAME_OVERRIDES
+	// ensure that the original name is overridden.
+	if a.Stem() != a.installApkName {
+		overridden = append(overridden, a.Stem())
 	}
 	return overridden
 }
@@ -680,7 +694,7 @@ func (r *RuntimeResourceOverlay) AndroidMkEntries() []android.AndroidMkEntries {
 		ExtraEntries: []android.AndroidMkExtraEntriesFunc{
 			func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
 				entries.SetString("LOCAL_CERTIFICATE", r.certificate.AndroidMkString())
-				entries.SetPath("LOCAL_MODULE_PATH", r.installDir.ToMakePath())
+				entries.SetPath("LOCAL_MODULE_PATH", r.installDir)
 				entries.AddStrings("LOCAL_OVERRIDES_PACKAGES", r.properties.Overrides...)
 			},
 		},
@@ -691,12 +705,12 @@ func (apkSet *AndroidAppSet) AndroidMkEntries() []android.AndroidMkEntries {
 	return []android.AndroidMkEntries{
 		android.AndroidMkEntries{
 			Class:      "APPS",
-			OutputFile: android.OptionalPathForPath(apkSet.packedOutput),
+			OutputFile: android.OptionalPathForPath(apkSet.primaryOutput),
 			Include:    "$(BUILD_SYSTEM)/soong_android_app_set.mk",
 			ExtraEntries: []android.AndroidMkExtraEntriesFunc{
 				func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
 					entries.SetBoolIfTrue("LOCAL_PRIVILEGED_MODULE", apkSet.Privileged())
-					entries.SetString("LOCAL_APK_SET_INSTALL_FILE", apkSet.InstallFile())
+					entries.SetPath("LOCAL_APK_SET_INSTALL_FILE", apkSet.PackedAdditionalOutputs())
 					entries.SetPath("LOCAL_APKCERTS_FILE", apkSet.apkcertsFile)
 					entries.AddStrings("LOCAL_OVERRIDES_PACKAGES", apkSet.properties.Overrides...)
 				},

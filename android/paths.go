@@ -112,7 +112,6 @@ type ModuleInstallPathContext interface {
 	InstallInDebugRamdisk() bool
 	InstallInRecovery() bool
 	InstallInRoot() bool
-	InstallBypassMake() bool
 	InstallForceOS() (*OsType, *ArchType)
 }
 
@@ -462,6 +461,13 @@ func (p OutputPaths) Strings() []string {
 	return ret
 }
 
+// PathForGoBinary returns the path to the installed location of a bootstrap_go_binary module.
+func PathForGoBinary(ctx PathContext, goBinary bootstrap.GoBinaryTool) Path {
+	goBinaryInstallDir := pathForInstall(ctx, ctx.Config().BuildOS, ctx.Config().BuildArch, "bin", false)
+	rel := Rel(ctx, goBinaryInstallDir.String(), goBinary.InstallPath())
+	return goBinaryInstallDir.Join(ctx, rel)
+}
+
 // Expands Paths to a SourceFileProducer or OutputFileProducer module dependency referenced via ":name" or ":name{.tag}" syntax.
 // If the dependency is not found, a missingErrorDependency is returned.
 // If the module dependency is not a SourceFileProducer or OutputFileProducer, appropriate errors will be returned.
@@ -482,11 +488,8 @@ func getPathsFromModuleDep(ctx ModuleWithDepsPathContext, path, moduleName, tag 
 	} else if tag != "" {
 		return nil, fmt.Errorf("path dependency %q is not an output file producing module", path)
 	} else if goBinary, ok := module.(bootstrap.GoBinaryTool); ok {
-		if rel, err := filepath.Rel(PathForOutput(ctx).String(), goBinary.InstallPath()); err == nil {
-			return Paths{PathForOutput(ctx, rel).WithoutRel()}, nil
-		} else {
-			return nil, fmt.Errorf("cannot find output path for %q: %w", goBinary.InstallPath(), err)
-		}
+		goBinaryPath := PathForGoBinary(ctx, goBinary)
+		return Paths{goBinaryPath}, nil
 	} else if srcProducer, ok := module.(SourceFileProducer); ok {
 		return srcProducer.Srcs(), nil
 	} else {
@@ -1571,6 +1574,8 @@ type InstallPath struct {
 	// For example, it is host/<os>-<arch> for host modules, and target/product/<device>/<partition> for device modules.
 	partitionDir string
 
+	partition string
+
 	// makePath indicates whether this path is for Soong (false) or Make (true).
 	makePath bool
 }
@@ -1637,8 +1642,8 @@ func (p InstallPath) withRel(rel string) InstallPath {
 	return p
 }
 
-// ToMakePath returns a new InstallPath that points to Make's install directory instead of Soong's,
-// i.e. out/ instead of out/soong/.
+// Deprecated: ToMakePath is a noop, PathForModuleInstall always returns Make paths when building
+// embedded in Make.
 func (p InstallPath) ToMakePath() InstallPath {
 	p.makePath = true
 	return p
@@ -1650,6 +1655,12 @@ func PathForModuleInstall(ctx ModuleInstallPathContext, pathComponents ...string
 	os, arch := osAndArch(ctx)
 	partition := modulePartition(ctx, os)
 	return makePathForInstall(ctx, os, arch, partition, ctx.Debug(), pathComponents...)
+}
+
+// PathForHostDexInstall returns an InstallPath representing the install path for the
+// module appended with paths...
+func PathForHostDexInstall(ctx ModuleInstallPathContext, pathComponents ...string) InstallPath {
+	return makePathForInstall(ctx, ctx.Config().BuildOS, ctx.Config().BuildArch, "", ctx.Debug(), pathComponents...)
 }
 
 // PathForModuleInPartitionInstall is similar to PathForModuleInstall but partition is provided by the caller
@@ -1673,9 +1684,6 @@ func osAndArch(ctx ModuleInstallPathContext) (OsType, ArchType) {
 
 func makePathForInstall(ctx ModuleInstallPathContext, os OsType, arch ArchType, partition string, debug bool, pathComponents ...string) InstallPath {
 	ret := pathForInstall(ctx, os, arch, partition, debug, pathComponents...)
-	if ctx.InstallBypassMake() && ctx.Config().KatiEnabled() {
-		ret = ret.ToMakePath()
-	}
 	return ret
 }
 
@@ -1716,7 +1724,11 @@ func pathForInstall(ctx PathContext, os OsType, arch ArchType, partition string,
 		basePath:     basePath{partionPath, ""},
 		soongOutDir:  ctx.Config().soongOutDir,
 		partitionDir: partionPath,
-		makePath:     false,
+		partition:    partition,
+	}
+
+	if ctx.Config().KatiEnabled() {
+		base.makePath = true
 	}
 
 	return base.Join(ctx, pathComponents...)
@@ -1741,8 +1753,7 @@ func PathForMainlineSdksInstall(ctx PathContext, paths ...string) InstallPath {
 }
 
 func InstallPathToOnDevicePath(ctx PathContext, path InstallPath) string {
-	rel := Rel(ctx, PathForOutput(ctx, "target", "product", ctx.Config().DeviceName()).String(), path.String())
-
+	rel := Rel(ctx, strings.TrimSuffix(path.PartitionDir(), path.partition), path.String())
 	return "/" + rel
 }
 
@@ -1993,10 +2004,6 @@ func (m testModuleInstallPathContext) InstallInRoot() bool {
 	return m.inRoot
 }
 
-func (m testModuleInstallPathContext) InstallBypassMake() bool {
-	return false
-}
-
 func (m testModuleInstallPathContext) InstallForceOS() (*OsType, *ArchType) {
 	return m.forceOS, m.forceArch
 }
@@ -2049,7 +2056,12 @@ func maybeRelErr(basePath string, targetPath string) (string, bool, error) {
 // Writes a file to the output directory.  Attempting to write directly to the output directory
 // will fail due to the sandbox of the soong_build process.
 func WriteFileToOutputDir(path WritablePath, data []byte, perm os.FileMode) error {
-	return ioutil.WriteFile(absolutePath(path.String()), data, perm)
+	absPath := absolutePath(path.String())
+	err := os.MkdirAll(filepath.Dir(absPath), 0777)
+	if err != nil {
+		return err
+	}
+	return ioutil.WriteFile(absPath, data, perm)
 }
 
 func RemoveAllOutputDir(path WritablePath) error {
