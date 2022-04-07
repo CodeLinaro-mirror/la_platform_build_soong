@@ -64,13 +64,6 @@ type appProperties struct {
 	// list of resource labels to generate individual resource packages
 	Package_splits []string
 
-	// Names of modules to be overridden. Listed modules can only be other binaries
-	// (in Make or Soong).
-	// This does not completely prevent installation of the overridden binaries, but if both
-	// binaries would be installed by default (in PRODUCT_PACKAGES) the other binary will be removed
-	// from PRODUCT_PACKAGES.
-	Overrides []string
-
 	// list of native libraries that will be provided in or alongside the resulting jar
 	Jni_libs []string `android:"arch_variant"`
 
@@ -137,6 +130,13 @@ type overridableAppProperties struct {
 
 	// Whether to rename the package in resources to the override name rather than the base name. Defaults to true.
 	Rename_resources_package *bool
+
+	// Names of modules to be overridden. Listed modules can only be other binaries
+	// (in Make or Soong).
+	// This does not completely prevent installation of the overridden binaries, but if both
+	// binaries would be installed by default (in PRODUCT_PACKAGES) the other binary will be removed
+	// from PRODUCT_PACKAGES.
+	Overrides []string
 }
 
 type AndroidApp struct {
@@ -428,7 +428,8 @@ func (a *AndroidApp) aaptBuildActions(ctx android.ModuleContext) {
 
 	a.aapt.splitNames = a.appProperties.Package_splits
 	a.aapt.LoggingParent = String(a.overridableAppProperties.Logging_parent)
-	a.aapt.buildActions(ctx, android.SdkContext(a), a.classLoaderContexts, aaptLinkFlags...)
+	a.aapt.buildActions(ctx, android.SdkContext(a), a.classLoaderContexts,
+		a.usesLibraryProperties.Exclude_uses_libs, aaptLinkFlags...)
 
 	// apps manifests are handled by aapt, don't let Module see them
 	a.properties.Manifest = nil
@@ -946,7 +947,7 @@ func AndroidAppFactory() android.Module {
 
 	android.InitAndroidMultiTargetsArchModule(module, android.DeviceSupported, android.MultilibCommon)
 	android.InitDefaultableModule(module)
-	android.InitOverridableModule(module, &module.appProperties.Overrides)
+	android.InitOverridableModule(module, &module.overridableAppProperties.Overrides)
 	android.InitApexModule(module)
 	android.InitBazelModule(module)
 
@@ -1069,7 +1070,7 @@ func AndroidTestFactory() android.Module {
 
 	android.InitAndroidMultiTargetsArchModule(module, android.DeviceSupported, android.MultilibCommon)
 	android.InitDefaultableModule(module)
-	android.InitOverridableModule(module, &module.appProperties.Overrides)
+	android.InitOverridableModule(module, &module.overridableAppProperties.Overrides)
 	return module
 }
 
@@ -1217,6 +1218,23 @@ type UsesLibraryProperties struct {
 	// libraries, because SDK ones are automatically picked up by Soong. The <uses-library> name
 	// normally is the same as the module name, but there are exceptions.
 	Provides_uses_lib *string
+
+	// A list of shared library names to exclude from the classpath of the APK. Adding a library here
+	// will prevent it from being used when precompiling the APK and prevent it from being implicitly
+	// added to the APK's manifest's <uses-library> elements.
+	//
+	// Care must be taken when using this as it could result in runtime errors if the APK actually
+	// uses classes provided by the library and which are not provided in any other way.
+	//
+	// This is primarily intended for use by various CTS tests that check the runtime handling of the
+	// android.test.base shared library (and related libraries) but which depend on some common
+	// libraries that depend on the android.test.base library. Without this those tests will end up
+	// with a <uses-library android:name="android.test.base"/> in their manifest which would either
+	// render the tests worthless (as they would be testing the wrong behavior), or would break the
+	// test altogether by providing access to classes that the tests were not expecting. Those tests
+	// provide the android.test.base statically and use jarjar to rename them so they do not collide
+	// with the classes provided by the android.test.base library.
+	Exclude_uses_libs []string
 }
 
 // usesLibrary provides properties and helper functions for AndroidApp and AndroidAppImport to verify that the
@@ -1431,24 +1449,24 @@ func androidAppCertificateBp2Build(ctx android.TopDownMutatorContext, module *An
 
 	props := bazel.BazelTargetModuleProperties{
 		Rule_class:        "android_app_certificate",
-		Bzl_load_location: "//build/bazel/rules:android_app_certificate.bzl",
+		Bzl_load_location: "//build/bazel/rules/android:android_app_certificate.bzl",
 	}
 
 	ctx.CreateBazelTargetModule(props, android.CommonAttributes{Name: module.Name()}, attrs)
 }
 
 type bazelAndroidAppAttributes struct {
-	Srcs           bazel.LabelListAttribute
-	Manifest       bazel.Label
-	Custom_package *string
-	Resource_files bazel.LabelListAttribute
-	Deps           bazel.LabelListAttribute
+	*javaLibraryAttributes
+	Manifest         bazel.Label
+	Custom_package   *string
+	Resource_files   bazel.LabelListAttribute
+	Certificate      *bazel.Label
+	Certificate_name *string
 }
 
 // ConvertWithBp2build is used to convert android_app to Bazel.
 func (a *AndroidApp) ConvertWithBp2build(ctx android.TopDownMutatorContext) {
-	//TODO(b/209577426): Support multiple arch variants
-	srcs := bazel.MakeLabelListAttribute(android.BazelLabelForModuleSrcExcludes(ctx, a.properties.Srcs, a.properties.Exclude_srcs))
+	libAttrs := a.convertLibraryAttrsBp2Build(ctx)
 
 	manifest := proptools.StringDefault(a.aaptProperties.Manifest, "AndroidManifest.xml")
 
@@ -1460,18 +1478,30 @@ func (a *AndroidApp) ConvertWithBp2build(ctx android.TopDownMutatorContext) {
 		resourceFiles.Includes = append(resourceFiles.Includes, files...)
 	}
 
-	deps := bazel.MakeLabelListAttribute(android.BazelLabelForModuleDeps(ctx, a.properties.Static_libs))
+	var certificate *bazel.Label
+	certificateNamePtr := a.overridableAppProperties.Certificate
+	certificateName := proptools.StringDefault(certificateNamePtr, "")
+	certModule := android.SrcIsModule(certificateName)
+	if certModule != "" {
+		c := android.BazelLabelForModuleDepSingle(ctx, certificateName)
+		certificate = &c
+		certificateNamePtr = nil
+	}
 
 	attrs := &bazelAndroidAppAttributes{
-		Srcs:     srcs,
-		Manifest: android.BazelLabelForModuleSrcSingle(ctx, manifest),
+		libAttrs,
+		android.BazelLabelForModuleSrcSingle(ctx, manifest),
 		// TODO(b/209576404): handle package name override by product variable PRODUCT_MANIFEST_PACKAGE_NAME_OVERRIDES
-		Custom_package: a.overridableAppProperties.Package_name,
-		Resource_files: bazel.MakeLabelListAttribute(resourceFiles),
-		Deps:           deps,
+		a.overridableAppProperties.Package_name,
+		bazel.MakeLabelListAttribute(resourceFiles),
+		certificate,
+		certificateNamePtr,
 	}
-	props := bazel.BazelTargetModuleProperties{Rule_class: "android_binary",
-		Bzl_load_location: "@rules_android//rules:rules.bzl"}
+
+	props := bazel.BazelTargetModuleProperties{
+		Rule_class:        "android_binary",
+		Bzl_load_location: "//build/bazel/rules/android:android_binary.bzl",
+	}
 
 	ctx.CreateBazelTargetModule(props, android.CommonAttributes{Name: a.Name()}, attrs)
 

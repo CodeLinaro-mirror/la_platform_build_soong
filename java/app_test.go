@@ -1966,7 +1966,7 @@ func TestOverrideAndroidApp(t *testing.T) {
 
 		// Check if the overrides field values are correctly aggregated.
 		mod := variant.Module().(*AndroidApp)
-		android.AssertDeepEquals(t, "overrides property", expected.overrides, mod.appProperties.Overrides)
+		android.AssertDeepEquals(t, "overrides property", expected.overrides, mod.overridableAppProperties.Overrides)
 
 		// Test Overridable property: Logging_parent
 		logging_parent := mod.aapt.LoggingParent
@@ -1981,6 +1981,64 @@ func TestOverrideAndroidApp(t *testing.T) {
 			expectedPackage = ""
 		}
 		checkAapt2LinkFlag(t, aapt2Flags, "rename-resources-package", expectedPackage)
+	}
+}
+
+func TestOverrideAndroidAppOverrides(t *testing.T) {
+	ctx, _ := testJava(
+		t, `
+		android_app {
+			name: "foo",
+			srcs: ["a.java"],
+			sdk_version: "current",
+			overrides: ["qux"]
+		}
+
+		android_app {
+			name: "bar",
+			srcs: ["b.java"],
+			sdk_version: "current",
+			overrides: ["foo"]
+		}
+
+		override_android_app {
+			name: "foo_override",
+			base: "foo",
+			overrides: ["bar"]
+		}
+		`)
+
+	expectedVariants := []struct {
+		name        string
+		moduleName  string
+		variantName string
+		overrides   []string
+	}{
+		{
+			name:        "foo",
+			moduleName:  "foo",
+			variantName: "android_common",
+			overrides:   []string{"qux"},
+		},
+		{
+			name:        "bar",
+			moduleName:  "bar",
+			variantName: "android_common",
+			overrides:   []string{"foo"},
+		},
+		{
+			name:        "foo",
+			moduleName:  "foo_override",
+			variantName: "android_common_foo_override",
+			overrides:   []string{"bar", "foo"},
+		},
+	}
+	for _, expected := range expectedVariants {
+		variant := ctx.ModuleForTests(expected.name, expected.variantName)
+
+		// Check if the overrides field values are correctly aggregated.
+		mod := variant.Module().(*AndroidApp)
+		android.AssertDeepEquals(t, "overrides property", expected.overrides, mod.overridableAppProperties.Overrides)
 	}
 }
 
@@ -2164,9 +2222,9 @@ func TestOverrideAndroidTest(t *testing.T) {
 
 		// Check if the overrides field values are correctly aggregated.
 		mod := variant.Module().(*AndroidTest)
-		if !reflect.DeepEqual(expected.overrides, mod.appProperties.Overrides) {
+		if !reflect.DeepEqual(expected.overrides, mod.overridableAppProperties.Overrides) {
 			t.Errorf("Incorrect overrides property value, expected: %q, got: %q",
-				expected.overrides, mod.appProperties.Overrides)
+				expected.overrides, mod.overridableAppProperties.Overrides)
 		}
 
 		// Check if javac classpath has the correct jar file path. This checks instrumentation_for overrides.
@@ -2515,7 +2573,7 @@ func TestUsesLibraries(t *testing.T) {
 		`--uses-library qux ` +
 		`--uses-library quuz ` +
 		`--uses-library runtime-library`
-	android.AssertStringEquals(t, "manifest_fixer args", expectManifestFixerArgs, actualManifestFixerArgs)
+	android.AssertStringDoesContain(t, "manifest_fixer args", actualManifestFixerArgs, expectManifestFixerArgs)
 
 	// Test that all libraries are verified (library order matters).
 	verifyCmd := app.Rule("verify_uses_libraries").RuleParams.Command
@@ -3058,7 +3116,7 @@ func TestTargetSdkVersionManifestFixer(t *testing.T) {
 		result := fixture.RunTestWithBp(t, bp)
 		foo := result.ModuleForTests("foo", "android_common")
 
-		manifestFixerArgs := foo.Output("manifest_fixer/AndroidManifest.xml").Args
-		android.AssertStringEquals(t, testCase.name, testCase.targetSdkVersionExpected, manifestFixerArgs["targetSdkVersion"])
+		manifestFixerArgs := foo.Output("manifest_fixer/AndroidManifest.xml").Args["args"]
+		android.AssertStringDoesContain(t, testCase.name, manifestFixerArgs, "--targetSdkVersion  "+testCase.targetSdkVersionExpected)
 	}
 }

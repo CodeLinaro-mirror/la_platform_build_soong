@@ -284,6 +284,7 @@ func bootstrapBlueprint(ctx Context, config Config) {
 		config.ModuleGraphFile(),
 		[]string{
 			"--module_graph_file", config.ModuleGraphFile(),
+			"--module_actions_file", config.ModuleActionsFile(),
 		},
 		fmt.Sprintf("generating the Soong module graph at %s", config.ModuleGraphFile()),
 	)
@@ -517,6 +518,9 @@ func runSoong(ctx Context, config Config) {
 	if shouldCollectBuildSoongMetrics(config) && ctx.Metrics != nil {
 		ctx.Metrics.SetSoongBuildMetrics(soongBuildMetrics)
 	}
+	if config.JsonModuleGraph() {
+		distGzipFile(ctx, config, config.ModuleGraphFile(), "soong")
+	}
 }
 
 func runMicrofactory(ctx Context, config Config, name string, pkg string, mapping map[string]string) {
@@ -544,7 +548,7 @@ func shouldCollectBuildSoongMetrics(config Config) bool {
 }
 
 func loadSoongBuildMetrics(ctx Context, config Config) *soong_metrics_proto.SoongBuildMetrics {
-	soongBuildMetricsFile := filepath.Join(config.OutDir(), "soong", "soong_build_metrics.pb")
+	soongBuildMetricsFile := filepath.Join(config.LogsDir(), "soong_build_metrics.pb")
 	buf, err := ioutil.ReadFile(soongBuildMetricsFile)
 	if err != nil {
 		ctx.Fatalf("Failed to load %s: %s", soongBuildMetricsFile, err)

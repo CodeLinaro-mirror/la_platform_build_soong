@@ -76,6 +76,8 @@ func RegisterPostDepsMutators(ctx android.RegisterMutatorsContext) {
 	ctx.BottomUp("apex", apexMutator).Parallel()
 	ctx.BottomUp("apex_directly_in_any", apexDirectlyInAnyMutator).Parallel()
 	ctx.BottomUp("apex_flattened", apexFlattenedMutator).Parallel()
+	// Register after apex_info mutator so that it can use ApexVariationName
+	ctx.TopDown("apex_strict_updatability_lint", apexStrictUpdatibilityLintMutator).Parallel()
 }
 
 type apexBundleProperties struct {
@@ -107,15 +109,6 @@ type apexBundleProperties struct {
 	ApexNativeDependencies
 
 	Multilib apexMultilibProperties
-
-	// List of bootclasspath fragments that are embedded inside this APEX bundle.
-	Bootclasspath_fragments []string
-
-	// List of systemserverclasspath fragments that are embedded inside this APEX bundle.
-	Systemserverclasspath_fragments []string
-
-	// List of java libraries that are embedded inside this APEX bundle.
-	Java_libs []string
 
 	// List of sh binaries that are embedded inside this APEX bundle.
 	Sh_binaries []string
@@ -316,6 +309,15 @@ type overridableProperties struct {
 	// List of BPF programs inside this APEX bundle.
 	Bpfs []string
 
+	// List of bootclasspath fragments that are embedded inside this APEX bundle.
+	Bootclasspath_fragments []string
+
+	// List of systemserverclasspath fragments that are embedded inside this APEX bundle.
+	Systemserverclasspath_fragments []string
+
+	// List of java libraries that are embedded inside this APEX bundle.
+	Java_libs []string
+
 	// Names of modules to be overridden. Listed modules can only be other binaries (in Make or
 	// Soong). This does not completely prevent installation of the overridden binaries, but if
 	// both binaries would be installed by default (in PRODUCT_PACKAGES) the other binary will
@@ -416,7 +418,11 @@ type apexBundle struct {
 	mergedNotices android.NoticeOutputs
 
 	// The built APEX file. This is the main product.
+	// Could be .apex or .capex
 	outputFile android.WritablePath
+
+	// The built uncompressed .apex file.
+	outputApexFile android.WritablePath
 
 	// The built APEX file in app bundle format. This file is not directly installed to the
 	// device. For an APEX, multiple app bundles are created each of which is for a specific ABI
@@ -783,9 +789,6 @@ func (a *apexBundle) DepsMutator(ctx android.BottomUpMutatorContext) {
 
 	// Common-arch dependencies come next
 	commonVariation := ctx.Config().AndroidCommonTarget.Variations()
-	ctx.AddFarVariationDependencies(commonVariation, bcpfTag, a.properties.Bootclasspath_fragments...)
-	ctx.AddFarVariationDependencies(commonVariation, sscpfTag, a.properties.Systemserverclasspath_fragments...)
-	ctx.AddFarVariationDependencies(commonVariation, javaLibTag, a.properties.Java_libs...)
 	ctx.AddFarVariationDependencies(commonVariation, fsTag, a.properties.Filesystems...)
 	ctx.AddFarVariationDependencies(commonVariation, compatConfigTag, a.properties.Compat_configs...)
 
@@ -813,6 +816,9 @@ func (a *apexBundle) OverridablePropertiesDepsMutator(ctx android.BottomUpMutato
 	ctx.AddFarVariationDependencies(commonVariation, androidAppTag, a.overridableProperties.Apps...)
 	ctx.AddFarVariationDependencies(commonVariation, bpfTag, a.overridableProperties.Bpfs...)
 	ctx.AddFarVariationDependencies(commonVariation, rroTag, a.overridableProperties.Rros...)
+	ctx.AddFarVariationDependencies(commonVariation, bcpfTag, a.overridableProperties.Bootclasspath_fragments...)
+	ctx.AddFarVariationDependencies(commonVariation, sscpfTag, a.overridableProperties.Systemserverclasspath_fragments...)
+	ctx.AddFarVariationDependencies(commonVariation, javaLibTag, a.overridableProperties.Java_libs...)
 	if prebuilts := a.overridableProperties.Prebuilts; len(prebuilts) > 0 {
 		// For prebuilt_etc, use the first variant (64 on 64/32bit device, 32 on 32bit device)
 		// regardless of the TARGET_PREFER_* setting. See b/144532908
@@ -888,9 +894,18 @@ func (a *apexBundle) ApexInfoMutator(mctx android.TopDownMutatorContext) {
 	// APEX, but shared across APEXes via the VNDK APEX.
 	useVndk := a.SocSpecific() || a.DeviceSpecific() || (a.ProductSpecific() && mctx.Config().EnforceProductPartitionInterface())
 	excludeVndkLibs := useVndk && proptools.Bool(a.properties.Use_vndk_as_stable)
-	if !useVndk && proptools.Bool(a.properties.Use_vndk_as_stable) {
-		mctx.PropertyErrorf("use_vndk_as_stable", "not supported for system/system_ext APEXes")
-		return
+	if proptools.Bool(a.properties.Use_vndk_as_stable) {
+		if !useVndk {
+			mctx.PropertyErrorf("use_vndk_as_stable", "not supported for system/system_ext APEXes")
+		}
+		mctx.VisitDirectDepsWithTag(sharedLibTag, func(dep android.Module) {
+			if c, ok := dep.(*cc.Module); ok && c.IsVndk() {
+				mctx.PropertyErrorf("use_vndk_as_stable", "Trying to include a VNDK library(%s) while use_vndk_as_stable is true.", dep.Name())
+			}
+		})
+		if mctx.Failed() {
+			return
+		}
 	}
 
 	continueApexDepsWalk := func(child, parent android.Module) bool {
@@ -990,6 +1005,66 @@ func apexInfoMutator(mctx android.TopDownMutatorContext) {
 		a.ApexInfoMutator(mctx)
 		return
 	}
+}
+
+// apexStrictUpdatibilityLintMutator propagates strict_updatability_linting to transitive deps of a mainline module
+// This check is enforced for updatable modules
+func apexStrictUpdatibilityLintMutator(mctx android.TopDownMutatorContext) {
+	if !mctx.Module().Enabled() {
+		return
+	}
+	if apex, ok := mctx.Module().(*apexBundle); ok && apex.checkStrictUpdatabilityLinting() {
+		mctx.WalkDeps(func(child, parent android.Module) bool {
+			// b/208656169 Do not propagate strict updatability linting to libcore/
+			// These libs are available on the classpath during compilation
+			// These libs are transitive deps of the sdk. See java/sdk.go:decodeSdkDep
+			// Only skip libraries defined in libcore root, not subdirectories
+			if mctx.OtherModuleDir(child) == "libcore" {
+				// Do not traverse transitive deps of libcore/ libs
+				return false
+			}
+			if android.InList(child.Name(), skipLintJavalibAllowlist) {
+				return false
+			}
+			if lintable, ok := child.(java.LintDepSetsIntf); ok {
+				lintable.SetStrictUpdatabilityLinting(true)
+			}
+			// visit transitive deps
+			return true
+		})
+	}
+}
+
+// TODO: b/215736885 Whittle the denylist
+// Transitive deps of certain mainline modules baseline NewApi errors
+// Skip these mainline modules for now
+var (
+	skipStrictUpdatabilityLintAllowlist = []string{
+		"com.android.art",
+		"com.android.art.debug",
+		"com.android.conscrypt",
+		"com.android.media",
+		// test apexes
+		"test_com.android.art",
+		"test_com.android.conscrypt",
+		"test_com.android.media",
+		"test_jitzygote_com.android.art",
+	}
+
+	// TODO: b/215736885 Remove this list
+	skipLintJavalibAllowlist = []string{
+		"conscrypt.module.platform.api.stubs",
+		"conscrypt.module.public.api.stubs",
+		"conscrypt.module.public.api.stubs.system",
+		"conscrypt.module.public.api.stubs.module_lib",
+		"framework-media.stubs",
+		"framework-media.stubs.system",
+		"framework-media.stubs.module_lib",
+	}
+)
+
+func (a *apexBundle) checkStrictUpdatabilityLinting() bool {
+	return a.Updatable() && !android.InList(a.ApexVariationName(), skipStrictUpdatabilityLintAllowlist)
 }
 
 // apexUniqueVariationsMutator checks if any dependencies use unique apex variations. If so, use
@@ -1275,6 +1350,12 @@ func (a *apexBundle) OutputFiles(tag string) (android.Paths, error) {
 	case "", android.DefaultDistTag:
 		// This is the default dist path.
 		return android.Paths{a.outputFile}, nil
+	case imageApexSuffix:
+		// uncompressed one
+		if a.outputApexFile != nil {
+			return android.Paths{a.outputApexFile}, nil
+		}
+		fallthrough
 	default:
 		return nil, fmt.Errorf("unsupported module reference tag %q", tag)
 	}
@@ -1396,7 +1477,7 @@ func (a *apexBundle) AddSanitizerDependencies(ctx android.BottomUpMutatorContext
 		for _, target := range ctx.MultiTargets() {
 			if target.Arch.ArchType.Multilib == "lib64" {
 				addDependenciesForNativeModules(ctx, ApexNativeDependencies{
-					Native_shared_libs: []string{"libclang_rt.hwasan-aarch64-android"},
+					Native_shared_libs: []string{"libclang_rt.hwasan"},
 					Tests:              nil,
 					Jni_libs:           nil,
 					Binaries:           nil,
@@ -1736,6 +1817,7 @@ func (a *apexBundle) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 					fi := apexFileForRustLibrary(ctx, r)
 					fi.isJniLib = isJniLib
 					filesInfo = append(filesInfo, fi)
+					return true // track transitive dependencies
 				} else {
 					propertyName := "native_shared_libs"
 					if isJniLib {
@@ -2575,9 +2657,9 @@ func isStaticExecutableAllowed(apex string, exec string) bool {
 
 // Collect information for opening IDE project files in java/jdeps.go.
 func (a *apexBundle) IDEInfo(dpInfo *android.IdeInfo) {
-	dpInfo.Deps = append(dpInfo.Deps, a.properties.Java_libs...)
-	dpInfo.Deps = append(dpInfo.Deps, a.properties.Bootclasspath_fragments...)
-	dpInfo.Deps = append(dpInfo.Deps, a.properties.Systemserverclasspath_fragments...)
+	dpInfo.Deps = append(dpInfo.Deps, a.overridableProperties.Java_libs...)
+	dpInfo.Deps = append(dpInfo.Deps, a.overridableProperties.Bootclasspath_fragments...)
+	dpInfo.Deps = append(dpInfo.Deps, a.overridableProperties.Systemserverclasspath_fragments...)
 	dpInfo.Paths = append(dpInfo.Paths, a.modulePaths...)
 }
 
@@ -2661,7 +2743,6 @@ func makeApexAvailableBaseline() map[string][]string {
 		"android.hardware.graphics.common@1.0",
 		"android.hardware.graphics.common@1.1",
 		"android.hardware.graphics.common@1.2",
-		"android.hardware.media@1.0",
 		"android.hidl.safe_union@1.0",
 		"android.hidl.token@1.0",
 		"android.hidl.token@1.0-utils",
@@ -2677,7 +2758,6 @@ func makeApexAvailableBaseline() map[string][]string {
 		"lib-bt-packets",
 		"lib-bt-packets-avrcp",
 		"lib-bt-packets-base",
-		"libFraunhoferAAC",
 		"libaudio-a2dp-hw-utils",
 		"libaudio-hearing-aid-hw-utils",
 		"libbluetooth",
@@ -2705,11 +2785,8 @@ func makeApexAvailableBaseline() map[string][]string {
 		"libfmq",
 		"libg722codec",
 		"libgui_headers",
-		"libmedia_headers",
 		"libmodpb64",
 		"libosi",
-		"libstagefright_foundation_headers",
-		"libstagefright_headers",
 		"libstatslog",
 		"libstatssocket",
 		"libtinyxml2",
@@ -2762,258 +2839,13 @@ func makeApexAvailableBaseline() map[string][]string {
 	// Module separator
 	//
 	m["com.android.media"] = []string{
-		"android.frameworks.bufferhub@1.0",
-		"android.hardware.cas.native@1.0",
-		"android.hardware.cas@1.0",
-		"android.hardware.configstore-utils",
-		"android.hardware.configstore@1.0",
-		"android.hardware.configstore@1.1",
-		"android.hardware.graphics.allocator@2.0",
-		"android.hardware.graphics.allocator@3.0",
-		"android.hardware.graphics.bufferqueue@1.0",
-		"android.hardware.graphics.bufferqueue@2.0",
-		"android.hardware.graphics.common@1.0",
-		"android.hardware.graphics.common@1.1",
-		"android.hardware.graphics.common@1.2",
-		"android.hardware.graphics.mapper@2.0",
-		"android.hardware.graphics.mapper@2.1",
-		"android.hardware.graphics.mapper@3.0",
-		"android.hardware.media.omx@1.0",
-		"android.hardware.media@1.0",
-		"android.hidl.allocator@1.0",
-		"android.hidl.memory.token@1.0",
-		"android.hidl.memory@1.0",
-		"android.hidl.token@1.0",
-		"android.hidl.token@1.0-utils",
-		"bionic_libc_platform_headers",
-		"exoplayer2-extractor",
-		"exoplayer2-extractor-annotation-stubs",
-		"gl_headers",
-		"jsr305",
-		"libEGL",
-		"libEGL_blobCache",
-		"libEGL_getProcAddress",
-		"libFLAC",
-		"libFLAC-config",
-		"libFLAC-headers",
-		"libGLESv2",
-		"libaacextractor",
-		"libamrextractor",
-		"libarect",
-		"libaudio_system_headers",
-		"libaudioclient",
-		"libaudioclient_headers",
-		"libaudiofoundation",
-		"libaudiofoundation_headers",
-		"libaudiomanager",
-		"libaudiopolicy",
-		"libaudioutils",
-		"libaudioutils_fixedfft",
-		"libbluetooth-types-header",
-		"libbufferhub",
-		"libbufferhub_headers",
-		"libbufferhubqueue",
-		"libc_malloc_debug_backtrace",
-		"libcamera_client",
-		"libcamera_metadata",
-		"libdvr_headers",
-		"libexpat",
-		"libfifo",
-		"libflacextractor",
-		"libgrallocusage",
-		"libgraphicsenv",
-		"libgui",
-		"libgui_headers",
-		"libhardware_headers",
-		"libinput",
-		"liblzma",
-		"libmath",
-		"libmedia",
-		"libmedia_codeclist",
-		"libmedia_headers",
-		"libmedia_helper",
-		"libmedia_helper_headers",
-		"libmedia_midiiowrapper",
-		"libmedia_omx",
-		"libmediautils",
-		"libmidiextractor",
-		"libmkvextractor",
-		"libmp3extractor",
-		"libmp4extractor",
-		"libmpeg2extractor",
-		"libnativebase_headers",
-		"libnativewindow_headers",
-		"libnblog",
-		"liboggextractor",
-		"libpackagelistparser",
-		"libpdx",
-		"libpdx_default_transport",
-		"libpdx_headers",
-		"libpdx_uds",
-		"libprocinfo",
-		"libspeexresampler",
-		"libspeexresampler",
-		"libstagefright_esds",
-		"libstagefright_flacdec",
-		"libstagefright_flacdec",
-		"libstagefright_foundation",
-		"libstagefright_foundation_headers",
-		"libstagefright_foundation_without_imemory",
-		"libstagefright_headers",
-		"libstagefright_id3",
-		"libstagefright_metadatautils",
-		"libstagefright_mpeg2extractor",
-		"libstagefright_mpeg2support",
-		"libui",
-		"libui_headers",
-		"libunwindstack",
-		"libvibrator",
-		"libvorbisidec",
-		"libwavextractor",
-		"libwebm",
-		"media_ndk_headers",
-		"media_plugin_headers",
-		"updatable-media",
+		// empty
 	}
 	//
 	// Module separator
 	//
 	m["com.android.media.swcodec"] = []string{
-		"android.frameworks.bufferhub@1.0",
-		"android.hardware.common-ndk_platform",
-		"android.hardware.configstore-utils",
-		"android.hardware.configstore@1.0",
-		"android.hardware.configstore@1.1",
-		"android.hardware.graphics.allocator@2.0",
-		"android.hardware.graphics.allocator@3.0",
-		"android.hardware.graphics.allocator@4.0",
-		"android.hardware.graphics.bufferqueue@1.0",
-		"android.hardware.graphics.bufferqueue@2.0",
-		"android.hardware.graphics.common-ndk_platform",
-		"android.hardware.graphics.common@1.0",
-		"android.hardware.graphics.common@1.1",
-		"android.hardware.graphics.common@1.2",
-		"android.hardware.graphics.mapper@2.0",
-		"android.hardware.graphics.mapper@2.1",
-		"android.hardware.graphics.mapper@3.0",
-		"android.hardware.graphics.mapper@4.0",
-		"android.hardware.media.bufferpool@2.0",
-		"android.hardware.media.c2@1.0",
-		"android.hardware.media.c2@1.1",
-		"android.hardware.media.omx@1.0",
-		"android.hardware.media@1.0",
-		"android.hardware.media@1.0",
-		"android.hidl.memory.token@1.0",
-		"android.hidl.memory@1.0",
-		"android.hidl.safe_union@1.0",
-		"android.hidl.token@1.0",
-		"android.hidl.token@1.0-utils",
-		"libEGL",
-		"libFLAC",
-		"libFLAC-config",
-		"libFLAC-headers",
-		"libFraunhoferAAC",
-		"libLibGuiProperties",
-		"libarect",
-		"libaudio_system_headers",
-		"libaudioutils",
-		"libaudioutils",
-		"libaudioutils_fixedfft",
-		"libavcdec",
-		"libavcenc",
-		"libavservices_minijail",
-		"libavservices_minijail",
-		"libbinderthreadstateutils",
-		"libbluetooth-types-header",
-		"libbufferhub_headers",
-		"libcodec2",
-		"libcodec2_headers",
-		"libcodec2_hidl@1.0",
-		"libcodec2_hidl@1.1",
-		"libcodec2_internal",
-		"libcodec2_soft_aacdec",
-		"libcodec2_soft_aacenc",
-		"libcodec2_soft_amrnbdec",
-		"libcodec2_soft_amrnbenc",
-		"libcodec2_soft_amrwbdec",
-		"libcodec2_soft_amrwbenc",
-		"libcodec2_soft_av1dec_gav1",
-		"libcodec2_soft_avcdec",
-		"libcodec2_soft_avcenc",
-		"libcodec2_soft_common",
-		"libcodec2_soft_flacdec",
-		"libcodec2_soft_flacenc",
-		"libcodec2_soft_g711alawdec",
-		"libcodec2_soft_g711mlawdec",
-		"libcodec2_soft_gsmdec",
-		"libcodec2_soft_h263dec",
-		"libcodec2_soft_h263enc",
-		"libcodec2_soft_hevcdec",
-		"libcodec2_soft_hevcenc",
-		"libcodec2_soft_mp3dec",
-		"libcodec2_soft_mpeg2dec",
-		"libcodec2_soft_mpeg4dec",
-		"libcodec2_soft_mpeg4enc",
-		"libcodec2_soft_opusdec",
-		"libcodec2_soft_opusenc",
-		"libcodec2_soft_rawdec",
-		"libcodec2_soft_vorbisdec",
-		"libcodec2_soft_vp8dec",
-		"libcodec2_soft_vp8enc",
-		"libcodec2_soft_vp9dec",
-		"libcodec2_soft_vp9enc",
-		"libcodec2_vndk",
-		"libdvr_headers",
-		"libfmq",
-		"libfmq",
-		"libgav1",
-		"libgralloctypes",
-		"libgrallocusage",
-		"libgraphicsenv",
-		"libgsm",
-		"libgui_bufferqueue_static",
-		"libgui_headers",
-		"libhardware",
-		"libhardware_headers",
-		"libhevcdec",
-		"libhevcenc",
-		"libion",
-		"libjpeg",
-		"liblzma",
-		"libmath",
-		"libmedia_codecserviceregistrant",
-		"libmedia_headers",
-		"libmpeg2dec",
-		"libnativebase_headers",
-		"libnativewindow_headers",
-		"libpdx_headers",
-		"libscudo_wrapper",
-		"libsfplugin_ccodec_utils",
-		"libspeexresampler",
-		"libstagefright_amrnb_common",
-		"libstagefright_amrnbdec",
-		"libstagefright_amrnbenc",
-		"libstagefright_amrwbdec",
-		"libstagefright_amrwbenc",
-		"libstagefright_bufferpool@2.0.1",
-		"libstagefright_enc_common",
-		"libstagefright_flacdec",
-		"libstagefright_foundation",
-		"libstagefright_foundation_headers",
-		"libstagefright_headers",
-		"libstagefright_m4vh263dec",
-		"libstagefright_m4vh263enc",
-		"libstagefright_mp3dec",
-		"libui",
-		"libui_headers",
-		"libunwindstack",
-		"libvorbisidec",
-		"libvpx",
-		"libyuv",
-		"libyuv_static",
-		"media_ndk_headers",
-		"media_plugin_headers",
-		"mediaswcodec",
+		// empty
 	}
 	//
 	// Module separator
@@ -3291,6 +3123,7 @@ type bazelApexBundleAttributes struct {
 	Prebuilts             bazel.LabelListAttribute
 	Native_shared_libs_32 bazel.LabelListAttribute
 	Native_shared_libs_64 bazel.LabelListAttribute
+	Compressible          bazel.BoolAttribute
 }
 
 type convertedNativeSharedLibs struct {
@@ -3368,6 +3201,11 @@ func (a *apexBundle) ConvertWithBp2build(ctx android.TopDownMutatorContext) {
 		installableAttribute.Value = a.properties.Installable
 	}
 
+	var compressibleAttribute bazel.BoolAttribute
+	if a.overridableProperties.Compressible != nil {
+		compressibleAttribute.Value = a.overridableProperties.Compressible
+	}
+
 	attrs := &bazelApexBundleAttributes{
 		Manifest:              manifestLabelAttribute,
 		Android_manifest:      androidManifestLabelAttribute,
@@ -3381,6 +3219,7 @@ func (a *apexBundle) ConvertWithBp2build(ctx android.TopDownMutatorContext) {
 		Native_shared_libs_64: nativeSharedLibs.Native_shared_libs_64,
 		Binaries:              binariesLabelListAttribute,
 		Prebuilts:             prebuiltsLabelListAttribute,
+		Compressible:          compressibleAttribute,
 	}
 
 	props := bazel.BazelTargetModuleProperties{

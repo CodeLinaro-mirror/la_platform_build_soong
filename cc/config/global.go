@@ -125,6 +125,9 @@ var (
 		// Nested and array designated initialization is nice to have.
 		"-Wno-c99-designator",
 
+		// Many old files still have GNU designator syntax.
+		"-Wno-gnu-designator",
+
 		// Warnings from clang-12
 		"-Wno-gnu-folding-constant",
 
@@ -134,6 +137,9 @@ var (
 		// This macro allows the bionic versioning.h to indirectly determine whether the
 		// option -Wunguarded-availability is on or not.
 		"-D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__",
+
+		// Turn off FMA which got enabled by default in clang-r445002 (http://b/218805949)
+		"-ffp-contract=off",
 	}
 
 	commonGlobalConlyflags = []string{}
@@ -169,7 +175,6 @@ var (
 		"-Wl,-z,relro",
 		"-Wl,-z,now",
 		"-Wl,--build-id=md5",
-		"-Wl,--warn-shared-textrel",
 		"-Wl,--fatal-warnings",
 		"-Wl,--no-undefined-version",
 		// TODO: Eventually we should link against a libunwind.a with hidden symbols, and then these
@@ -268,6 +273,8 @@ var (
 		// http://b/197240255
 		"-Wno-unused-but-set-variable",
 		"-Wno-unused-but-set-parameter",
+		// http://b/215753485
+		"-Wno-bitwise-instead-of-logical",
 	}
 
 	// Extra cflags for external third-party projects to disable warnings that
@@ -317,8 +324,8 @@ var (
 
 	// prebuilts/clang default settings.
 	ClangDefaultBase         = "prebuilts/clang/host"
-	ClangDefaultVersion      = "clang-r437112b"
-	ClangDefaultShortVersion = "14.0.1"
+	ClangDefaultVersion      = "clang-r450784"
+	ClangDefaultShortVersion = "14.0.3"
 
 	// Directories with warnings from Android.bp files.
 	WarningAllowedProjects = []string{
