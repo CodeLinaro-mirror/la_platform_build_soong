@@ -424,9 +424,9 @@ func setSdclangVars() {
 	}
 
 	// Sanity check SDCLANG_PATH
-	if envPath := os.Getenv("SDCLANG_PATH"); sdclangPath == "" && envPath == "" {
-		panic("SDCLANG_PATH can not be empty")
-	}
+//	if envPath := os.Getenv("SDCLANG_PATH"); sdclangPath == "" && envPath == "" {
+//		panic("SDCLANG_PATH can not be empty")
+//	}
 
 	// Override SDCLANG_PATH if the variable is set in the environment
 	pctx.VariableFunc("SDClangBin", func(ctx android.PackageVarContext) string {
