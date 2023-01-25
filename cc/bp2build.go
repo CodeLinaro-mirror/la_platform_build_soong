@@ -63,7 +63,7 @@ type staticOrSharedAttributes struct {
 
 	Enabled bazel.BoolAttribute
 
-	Native_coverage bazel.BoolAttribute
+	Native_coverage *bool
 
 	sdkAttributes
 
@@ -75,15 +75,29 @@ type tidyAttributes struct {
 	Tidy_flags            []string
 	Tidy_checks           []string
 	Tidy_checks_as_errors []string
+	Tidy_disabled_srcs    bazel.LabelListAttribute
+	Tidy_timeout_srcs     bazel.LabelListAttribute
 }
 
-func (m *Module) convertTidyAttributes(moduleAttrs *tidyAttributes) {
+func (m *Module) convertTidyAttributes(ctx android.BaseMutatorContext, moduleAttrs *tidyAttributes) {
 	for _, f := range m.features {
 		if tidy, ok := f.(*tidyFeature); ok {
 			moduleAttrs.Tidy = tidy.Properties.Tidy
 			moduleAttrs.Tidy_flags = tidy.Properties.Tidy_flags
 			moduleAttrs.Tidy_checks = tidy.Properties.Tidy_checks
 			moduleAttrs.Tidy_checks_as_errors = tidy.Properties.Tidy_checks_as_errors
+		}
+
+	}
+	archVariantProps := m.GetArchVariantProperties(ctx, &BaseCompilerProperties{})
+	for axis, configToProps := range archVariantProps {
+		for config, _props := range configToProps {
+			if archProps, ok := _props.(*BaseCompilerProperties); ok {
+				archDisabledSrcs := android.BazelLabelForModuleSrc(ctx, archProps.Tidy_disabled_srcs)
+				moduleAttrs.Tidy_disabled_srcs.SetSelectValue(axis, config, archDisabledSrcs)
+				archTimeoutSrcs := android.BazelLabelForModuleSrc(ctx, archProps.Tidy_timeout_srcs)
+				moduleAttrs.Tidy_timeout_srcs.SetSelectValue(axis, config, archTimeoutSrcs)
+			}
 		}
 	}
 }
@@ -323,14 +337,28 @@ func bp2BuildParsePrebuiltBinaryProps(ctx android.BazelConversionPathContext, mo
 	}
 }
 
+func bp2BuildParsePrebuiltObjectProps(ctx android.BazelConversionPathContext, module *Module) prebuiltAttributes {
+	var srcLabelAttribute bazel.LabelAttribute
+	bp2BuildPropParseHelper(ctx, module, &prebuiltObjectProperties{}, func(axis bazel.ConfigurationAxis, config string, props interface{}) {
+		if props, ok := props.(*prebuiltObjectProperties); ok {
+			parseSrc(ctx, &srcLabelAttribute, axis, config, props.Srcs)
+		}
+	})
+
+	return prebuiltAttributes{
+		Src: srcLabelAttribute,
+	}
+}
+
 type baseAttributes struct {
 	compilerAttributes
 	linkerAttributes
 
-	// A combination of compilerAttributes.features and linkerAttributes.features
+	// A combination of compilerAttributes.features and linkerAttributes.features, as well as sanitizer features
 	features        bazel.StringListAttribute
 	protoDependency *bazel.LabelAttribute
 	aidlDependency  *bazel.LabelAttribute
+	Native_coverage *bool
 }
 
 // Convenience struct to hold all attributes parsed from compiler properties.
@@ -379,6 +407,8 @@ type compilerAttributes struct {
 	features bazel.StringListAttribute
 
 	suffix bazel.StringAttribute
+
+	fdoProfile bazel.LabelAttribute
 }
 
 type filterOutFn func(string) bool
@@ -724,10 +754,10 @@ func bp2BuildParseBaseProps(ctx android.Bp2buildMutatorContext, module *Module) 
 	compilerAttrs.convertStlProps(ctx, module)
 	(&linkerAttrs).convertStripProps(ctx, module)
 
+	var nativeCoverage *bool
 	if module.coverage != nil && module.coverage.Properties.Native_coverage != nil &&
 		!Bool(module.coverage.Properties.Native_coverage) {
-		// Native_coverage is arch neutral
-		(&linkerAttrs).features.Append(bazel.MakeStringListAttribute([]string{"-coverage"}))
+		nativeCoverage = BoolPtr(false)
 	}
 
 	productVariableProps := android.ProductVariableProperties(ctx)
@@ -763,11 +793,18 @@ func bp2BuildParseBaseProps(ctx android.Bp2buildMutatorContext, module *Module) 
 	(&compilerAttrs).srcs.Add(&convertedLSrcs.srcName)
 	(&compilerAttrs).cSrcs.Add(&convertedLSrcs.cSrcName)
 
+	if module.afdo != nil && module.afdo.Properties.Afdo {
+		fdoProfileDep := bp2buildFdoProfile(ctx, module)
+		if fdoProfileDep != nil {
+			(&compilerAttrs).fdoProfile.SetValue(*fdoProfileDep)
+		}
+	}
+
 	if !compilerAttrs.syspropSrcs.IsEmpty() {
 		(&linkerAttrs).wholeArchiveDeps.Add(bp2buildCcSysprop(ctx, module.Name(), module.Properties.Min_sdk_version, compilerAttrs.syspropSrcs))
 	}
 
-	features := compilerAttrs.features.Clone().Append(linkerAttrs.features)
+	features := compilerAttrs.features.Clone().Append(linkerAttrs.features).Append(bp2buildSanitizerFeatures(ctx, module))
 	features.DeduplicateAxesFromBase()
 
 	return baseAttributes{
@@ -776,7 +813,43 @@ func bp2BuildParseBaseProps(ctx android.Bp2buildMutatorContext, module *Module) 
 		*features,
 		protoDep.protoDep,
 		aidlDep,
+		nativeCoverage,
 	}
+}
+
+type fdoProfileAttributes struct {
+	Absolute_path_profile string
+}
+
+func bp2buildFdoProfile(
+	ctx android.Bp2buildMutatorContext,
+	m *Module,
+) *bazel.Label {
+	for _, project := range globalAfdoProfileProjects {
+		// Ensure handcrafted BUILD file exists in the project
+		BUILDPath := android.ExistentPathForSource(ctx, project, "BUILD")
+		if BUILDPath.Valid() {
+			// We handcraft a BUILD file with fdo_profile targets that use the existing profiles in the project
+			// This implementation is assuming that every afdo profile in globalAfdoProfileProjects already has
+			// an associated fdo_profile target declared in the same package.
+			// TODO(b/260714900): Handle arch-specific afdo profiles (e.g. `<module-name>-arm<64>.afdo`)
+			path := android.ExistentPathForSource(ctx, project, m.Name()+".afdo")
+			if path.Valid() {
+				// FIXME: Some profiles only exist internally and are not released to AOSP.
+				// When generated BUILD files are checked in, we'll run into merge conflict.
+				// The cc_library_shared target in AOSP won't have reference to an fdo_profile target because
+				// the profile doesn't exist. Internally, the same cc_library_shared target will
+				// have reference to the fdo_profile.
+				// For more context, see b/258682955#comment2
+				fdoProfileLabel := "//" + strings.TrimSuffix(project, "/") + ":" + m.Name()
+				return &bazel.Label{
+					Label: fdoProfileLabel,
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func bp2buildCcAidlLibrary(
@@ -1243,6 +1316,13 @@ func bp2BuildParseExportedIncludes(ctx android.BazelConversionPathContext, modul
 	} else {
 		exported = BazelIncludes{}
 	}
+
+	// cc library Export_include_dirs and Export_system_include_dirs are marked
+	// "variant_prepend" in struct tag, set their prepend property to true to make
+	// sure bp2build generates correct result.
+	exported.Includes.Prepend = true
+	exported.SystemIncludes.Prepend = true
+
 	bp2BuildPropParseHelper(ctx, module, &FlagExporterProperties{}, func(axis bazel.ConfigurationAxis, config string, props interface{}) {
 		if flagExporterProperties, ok := props.(*FlagExporterProperties); ok {
 			if len(flagExporterProperties.Export_include_dirs) > 0 {
@@ -1349,4 +1429,21 @@ func bp2buildBinaryLinkerProps(ctx android.BazelConversionPathContext, m *Module
 	})
 
 	return attrs
+}
+
+func bp2buildSanitizerFeatures(ctx android.BazelConversionPathContext, m *Module) bazel.StringListAttribute {
+	sanitizerFeatures := bazel.StringListAttribute{}
+	bp2BuildPropParseHelper(ctx, m, &SanitizeProperties{}, func(axis bazel.ConfigurationAxis, config string, props interface{}) {
+		var features []string
+		if sanitizerProps, ok := props.(*SanitizeProperties); ok {
+			if sanitizerProps.Sanitize.Integer_overflow != nil && *sanitizerProps.Sanitize.Integer_overflow {
+				features = append(features, "ubsan_integer_overflow")
+			}
+			for _, sanitizer := range sanitizerProps.Sanitize.Misc_undefined {
+				features = append(features, "ubsan_"+sanitizer)
+			}
+			sanitizerFeatures.SetSelectValue(axis, config, features)
+		}
+	})
+	return sanitizerFeatures
 }

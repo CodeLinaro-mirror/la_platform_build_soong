@@ -843,6 +843,26 @@ func (lla *LabelListAttribute) Exclude(axis ConfigurationAxis, config string, la
 // ResolveExcludes handles excludes across the various axes, ensuring that items are removed from
 // the base value and included in default values as appropriate.
 func (lla *LabelListAttribute) ResolveExcludes() {
+	// If there are OsAndInApexAxis, we need to use
+	//   * includes from the OS & in APEX Axis for non-Android configs for libraries that need to be
+	//     included in non-Android OSes
+	//   * excludes from the OS Axis for non-Android configs, to exclude libraries that should _not_
+	//     be included in the non-Android OSes
+	if _, ok := lla.ConfigurableValues[OsAndInApexAxis]; ok {
+		inApexLabels := lla.ConfigurableValues[OsAndInApexAxis][ConditionsDefaultConfigKey]
+		for config, labels := range lla.ConfigurableValues[OsConfigurationAxis] {
+			// OsAndroid has already handled its excludes.
+			// We only need to copy the excludes from other arches, so if there are none, skip it.
+			if config == OsAndroid || len(labels.Excludes) == 0 {
+				continue
+			}
+			lla.ConfigurableValues[OsAndInApexAxis][config] = LabelList{
+				Includes: inApexLabels.Includes,
+				Excludes: labels.Excludes,
+			}
+		}
+	}
+
 	for axis, configToLabels := range lla.ConfigurableValues {
 		baseLabels := lla.Value.deepCopy()
 		for config, val := range configToLabels {
@@ -1187,6 +1207,11 @@ type StringListAttribute struct {
 	// The configured attribute label list Values. Optional
 	// a map of independent configurability axes
 	ConfigurableValues configurableStringLists
+
+	// If a property has struct tag "variant_prepend", this value should
+	// be set to True, so that when bp2build generates BUILD.bazel, variant
+	// properties(select ...) come before general properties.
+	Prepend bool
 }
 
 // IsEmpty returns true if the attribute has no values under any configuration.

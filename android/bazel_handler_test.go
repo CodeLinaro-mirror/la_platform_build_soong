@@ -9,8 +9,9 @@ import (
 	"testing"
 
 	"android/soong/bazel/cquery"
-	"google.golang.org/protobuf/proto"
 	analysis_v2_proto "prebuilts/bazel/common/proto/analysis_v2"
+
+	"google.golang.org/protobuf/proto"
 )
 
 var testConfig = TestConfig("out", nil, "", nil)
@@ -22,7 +23,7 @@ func TestRequestResultsAfterInvokeBazel(t *testing.T) {
 		bazelCommand{command: "cquery", expression: "deps(@soong_injection//mixed_builds:buildroot, 2)"}: `@//foo:bar|arm64_armv8-a|android>>out/foo/bar.txt`,
 	})
 	bazelContext.QueueBazelRequest(label, cquery.GetOutputFiles, cfg)
-	err := bazelContext.InvokeBazel(testConfig)
+	err := bazelContext.InvokeBazel(testConfig, nil)
 	if err != nil {
 		t.Fatalf("Did not expect error invoking Bazel, but got %s", err)
 	}
@@ -36,7 +37,7 @@ func TestRequestResultsAfterInvokeBazel(t *testing.T) {
 
 func TestInvokeBazelWritesBazelFiles(t *testing.T) {
 	bazelContext, baseDir := testBazelContext(t, map[bazelCommand]string{})
-	err := bazelContext.InvokeBazel(testConfig)
+	err := bazelContext.InvokeBazel(testConfig, nil)
 	if err != nil {
 		t.Fatalf("Did not expect error invoking Bazel, but got %s", err)
 	}
@@ -86,7 +87,7 @@ func TestInvokeBazelPopulatesBuildStatements(t *testing.T) {
    { "id": 1, "label": "one" },
    { "id": 2, "label": "two" }]
 }`,
-			"cd 'test/exec_root' && rm -f 'one' && touch foo",
+			"cd 'test/exec_root' && rm -rf 'one' && touch foo",
 		}, {`
 {
  "artifacts": [
@@ -105,7 +106,7 @@ func TestInvokeBazelPopulatesBuildStatements(t *testing.T) {
    { "id": 20, "label": "one.d", "parent_id": 30 },
    { "id": 30, "label": "parent" }]
 }`,
-			`cd 'test/exec_root' && rm -f 'parent/one' && bogus command && sed -i'' -E 's@(^|\s|")bazel-out/@\1test/bazel_out/@g' 'parent/one.d'`,
+			`cd 'test/exec_root' && rm -rf 'parent/one' && bogus command && sed -i'' -E 's@(^|\s|")bazel-out/@\1test/bazel_out/@g' 'parent/one.d'`,
 		},
 	}
 
@@ -117,7 +118,7 @@ func TestInvokeBazelPopulatesBuildStatements(t *testing.T) {
 		bazelContext, _ := testBazelContext(t, map[bazelCommand]string{
 			bazelCommand{command: "aquery", expression: "deps(@soong_injection//mixed_builds:buildroot)"}: string(data)})
 
-		err = bazelContext.InvokeBazel(testConfig)
+		err = bazelContext.InvokeBazel(testConfig, nil)
 		if err != nil {
 			t.Fatalf("testCase #%d: did not expect error invoking Bazel, but got %s", i+1, err)
 		}
@@ -128,7 +129,8 @@ func TestInvokeBazelPopulatesBuildStatements(t *testing.T) {
 		}
 
 		cmd := RuleBuilderCommand{}
-		createCommand(&cmd, got[0], "test/exec_root", "test/bazel_out", PathContextForTesting(TestConfig("out", nil, "", nil)))
+		ctx := builderContextForTests{PathContextForTesting(TestConfig("out", nil, "", nil))}
+		createCommand(&cmd, got[0], "test/exec_root", "test/bazel_out", ctx)
 		if actual, expected := cmd.buf.String(), testCase.command; expected != actual {
 			t.Errorf("expected: [%s], actual: [%s]", expected, actual)
 		}
@@ -154,6 +156,10 @@ func TestCoverageFlagsAfterInvokeBazel(t *testing.T) {
 	testConfig.productVariables.NativeCoverageExcludePaths = []string{"bar1"}
 	verifyExtraFlags(t, testConfig, `--collect_code_coverage --instrumentation_filter=-bar1`)
 
+	testConfig.productVariables.NativeCoveragePaths = []string{"*"}
+	testConfig.productVariables.NativeCoverageExcludePaths = nil
+	verifyExtraFlags(t, testConfig, `--collect_code_coverage --instrumentation_filter=+.*`)
+
 	testConfig.productVariables.ClangCoverage = boolPtr(false)
 	actual := verifyExtraFlags(t, testConfig, ``)
 	if strings.Contains(actual, "--collect_code_coverage") ||
@@ -165,7 +171,7 @@ func TestCoverageFlagsAfterInvokeBazel(t *testing.T) {
 func verifyExtraFlags(t *testing.T, config Config, expected string) string {
 	bazelContext, _ := testBazelContext(t, map[bazelCommand]string{})
 
-	err := bazelContext.InvokeBazel(config)
+	err := bazelContext.InvokeBazel(config, nil)
 	if err != nil {
 		t.Fatalf("Did not expect error invoking Bazel, but got %s", err)
 	}
@@ -192,7 +198,7 @@ func testBazelContext(t *testing.T, bazelCommandResults map[bazelCommand]string)
 	}
 	aqueryCommand := bazelCommand{command: "aquery", expression: "deps(@soong_injection//mixed_builds:buildroot)"}
 	if _, exists := bazelCommandResults[aqueryCommand]; !exists {
-		bazelCommandResults[aqueryCommand] = "{}\n"
+		bazelCommandResults[aqueryCommand] = ""
 	}
 	runner := &mockBazelRunner{bazelCommandResults: bazelCommandResults}
 	return &bazelContext{

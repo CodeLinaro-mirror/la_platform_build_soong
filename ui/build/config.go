@@ -65,23 +65,25 @@ type configImpl struct {
 	buildDateTime string
 
 	// From the arguments
-	parallel        int
-	keepGoing       int
-	verbose         bool
-	checkbuild      bool
-	dist            bool
-	jsonModuleGraph bool
-	apiBp2build     bool // Generate BUILD files for Soong modules that contribute APIs
-	bp2build        bool
-	queryview       bool
-	reportMkMetrics bool // Collect and report mk2bp migration progress metrics.
-	soongDocs       bool
-	skipConfig      bool
-	skipKati        bool
-	skipKatiNinja   bool
-	skipSoong       bool
-	skipNinja       bool
-	skipSoongTests  bool
+	parallel          int
+	keepGoing         int
+	verbose           bool
+	checkbuild        bool
+	dist              bool
+	jsonModuleGraph   bool
+	apiBp2build       bool // Generate BUILD files for Soong modules that contribute APIs
+	bp2build          bool
+	queryview         bool
+	reportMkMetrics   bool // Collect and report mk2bp migration progress metrics.
+	soongDocs         bool
+	skipConfig        bool
+	skipKati          bool
+	skipKatiNinja     bool
+	skipSoong         bool
+	skipNinja         bool
+	skipSoongTests    bool
+	searchApiDir      bool // Scan the Android.bp files generated in out/api_surfaces
+	skipMetricsUpload bool
 
 	// From the product config
 	katiArgs        []string
@@ -108,6 +110,10 @@ type configImpl struct {
 	emptyNinjaFile bool
 
 	metricsUploader string
+
+	bazelForceEnabledModules string
+
+	includeTags []string
 }
 
 const srcDirFileCheck = "build/soong/root.bp"
@@ -237,7 +243,7 @@ func loadEnvConfig(ctx Context, config *configImpl) error {
 }
 
 func defaultBazelProdMode(cfg *configImpl) bool {
-	// Envirnoment flag to disable Bazel for users which experience
+	// Environment flag to disable Bazel for users which experience
 	// broken bazel-handled builds, or significant performance regressions.
 	if cfg.IsBazelMixedBuildForceDisabled() {
 		return false
@@ -730,6 +736,8 @@ func (c *configImpl) parseArgs(ctx Context, args []string) {
 			c.skipConfig = true
 		} else if arg == "--skip-soong-tests" {
 			c.skipSoongTests = true
+		} else if arg == "--skip-metrics-upload" {
+			c.skipMetricsUpload = true
 		} else if arg == "--mk-metrics" {
 			c.reportMkMetrics = true
 		} else if arg == "--bazel-mode" {
@@ -738,6 +746,16 @@ func (c *configImpl) parseArgs(ctx Context, args []string) {
 			c.bazelDevMode = true
 		} else if arg == "--bazel-mode-staging" {
 			c.bazelStagingMode = true
+		} else if arg == "--search-api-dir" {
+			c.searchApiDir = true
+		} else if strings.HasPrefix(arg, "--build-command=") {
+			buildCmd := strings.TrimPrefix(arg, "--build-command=")
+			// remove quotations
+			buildCmd = strings.TrimPrefix(buildCmd, "\"")
+			buildCmd = strings.TrimSuffix(buildCmd, "\"")
+			ctx.Metrics.SetBuildCommand([]string{buildCmd})
+		} else if strings.HasPrefix(arg, "--bazel-force-enabled-modules=") {
+			c.bazelForceEnabledModules = strings.TrimPrefix(arg, "--bazel-force-enabled-modules=")
 		} else if len(arg) > 0 && arg[0] == '-' {
 			parseArgNum := func(def int) int {
 				if len(arg) > 2 {
@@ -896,8 +914,16 @@ func (c *configImpl) BazelOutDir() string {
 	return filepath.Join(c.OutDir(), "bazel")
 }
 
+func (c *configImpl) bazelOutputBase() string {
+	return filepath.Join(c.BazelOutDir(), "output")
+}
+
 func (c *configImpl) SoongOutDir() string {
 	return filepath.Join(c.OutDir(), "soong")
+}
+
+func (c *configImpl) ApiSurfacesOutDir() string {
+	return filepath.Join(c.OutDir(), "api_surfaces")
 }
 
 func (c *configImpl) PrebuiltOS() string {
@@ -1056,6 +1082,14 @@ func (c *configImpl) KatiArgs() []string {
 
 func (c *configImpl) Parallel() int {
 	return c.parallel
+}
+
+func (c *configImpl) GetIncludeTags() []string {
+	return c.includeTags
+}
+
+func (c *configImpl) SetIncludeTags(i []string) {
+	c.includeTags = i
 }
 
 func (c *configImpl) HighmemParallel() int {
@@ -1475,6 +1509,14 @@ func (c *configImpl) EmptyNinjaFile() bool {
 
 func (c *configImpl) IsBazelMixedBuildForceDisabled() bool {
 	return c.Environment().IsEnvTrue("BUILD_BROKEN_DISABLE_BAZEL")
+}
+
+func (c *configImpl) BazelModulesForceEnabledByFlag() string {
+	return c.bazelForceEnabledModules
+}
+
+func (c *configImpl) SkipMetricsUpload() bool {
+	return c.skipMetricsUpload
 }
 
 func GetMetricsUploader(topDir string, env *Environment) string {

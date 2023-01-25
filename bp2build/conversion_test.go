@@ -88,6 +88,14 @@ func TestCreateBazelFiles_Bp2Build_CreatesDefaultFiles(t *testing.T) {
 
 	expectedFilePaths := []bazelFilepath{
 		{
+			dir:      "android",
+			basename: GeneratedBuildFileName,
+		},
+		{
+			dir:      "android",
+			basename: "constants.bzl",
+		},
+		{
 			dir:      "cc_toolchain",
 			basename: GeneratedBuildFileName,
 		},
@@ -138,6 +146,14 @@ func TestCreateBazelFiles_Bp2Build_CreatesDefaultFiles(t *testing.T) {
 		{
 			dir:      "api_levels",
 			basename: "api_levels.bzl",
+		},
+		{
+			dir:      "allowlists",
+			basename: "mixed_build_prod_allowlist.txt",
+		},
+		{
+			dir:      "allowlists",
+			basename: "mixed_build_staging_allowlist.txt",
 		},
 	}
 

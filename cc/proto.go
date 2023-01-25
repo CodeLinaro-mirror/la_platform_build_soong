@@ -165,7 +165,8 @@ func protoFlags(ctx ModuleContext, flags Flags, p *android.ProtoProperties) Flag
 }
 
 type protoAttributes struct {
-	Deps bazel.LabelListAttribute
+	Deps            bazel.LabelListAttribute
+	Min_sdk_version *string
 }
 
 type bp2buildProtoDeps struct {
@@ -203,15 +204,16 @@ func bp2buildProto(ctx android.Bp2buildMutatorContext, m *Module, protoSrcs baze
 
 	var protoAttrs protoAttributes
 	protoAttrs.Deps.SetValue(protoInfo.Proto_libs)
+	protoAttrs.Min_sdk_version = m.Properties.Min_sdk_version
 
 	name := m.Name() + suffix
-
+	tags := android.ApexAvailableTags(m)
 	ctx.CreateBazelTargetModule(
 		bazel.BazelTargetModuleProperties{
 			Rule_class:        rule_class,
 			Bzl_load_location: "//build/bazel/rules/cc:cc_proto.bzl",
 		},
-		android.CommonAttributes{Name: name},
+		android.CommonAttributes{Name: name, Tags: tags},
 		&protoAttrs)
 
 	var privateHdrs bool

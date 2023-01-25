@@ -457,7 +457,7 @@ func (a *AndroidApp) aaptBuildActions(ctx android.ModuleContext) {
 func (a *AndroidApp) proguardBuildActions(ctx android.ModuleContext) {
 	var staticLibProguardFlagFiles android.Paths
 	ctx.VisitDirectDeps(func(m android.Module) {
-		if lib, ok := m.(AndroidLibraryDependency); ok && ctx.OtherModuleDependencyTag(m) == staticLibTag {
+		if lib, ok := m.(LibraryDependency); ok && ctx.OtherModuleDependencyTag(m) == staticLibTag {
 			staticLibProguardFlagFiles = append(staticLibProguardFlagFiles, lib.ExportedProguardFlagFiles()...)
 		}
 	})
@@ -591,7 +591,7 @@ func processMainCert(m android.ModuleBase, certPropValue string, certificates []
 		// Set a certificate to avoid panics later when accessing it.
 		mainCertificate = Certificate{
 			Key: android.PathForModuleOut(ctx, "missing.pk8"),
-			Pem: android.PathForModuleOut(ctx, "missing.pem"),
+			Pem: android.PathForModuleOut(ctx, "missing.x509.pem"),
 		}
 	}
 
@@ -1295,14 +1295,14 @@ func (u *usesLibrary) addLib(lib string, optional bool) {
 	}
 }
 
-func (u *usesLibrary) deps(ctx android.BottomUpMutatorContext, hasFrameworkLibs bool) {
+func (u *usesLibrary) deps(ctx android.BottomUpMutatorContext, addCompatDeps bool) {
 	if !ctx.Config().UnbundledBuild() || ctx.Config().UnbundledBuildImage() {
 		ctx.AddVariationDependencies(nil, usesLibReqTag, u.usesLibraryProperties.Uses_libs...)
 		ctx.AddVariationDependencies(nil, usesLibOptTag, u.presentOptionalUsesLibs(ctx)...)
-		// Only add these extra dependencies if the module depends on framework libs. This avoids
-		// creating a cyclic dependency:
+		// Only add these extra dependencies if the module is an app that depends on framework
+		// libs. This avoids creating a cyclic dependency:
 		//     e.g. framework-res -> org.apache.http.legacy -> ... -> framework-res.
-		if hasFrameworkLibs {
+		if addCompatDeps {
 			// Dexpreopt needs paths to the dex jars of these libraries in order to construct
 			// class loader context for dex2oat. Add them as a dependency with a special tag.
 			ctx.AddVariationDependencies(nil, usesLibCompat29ReqTag, dexpreopt.CompatUsesLibs29...)
@@ -1492,7 +1492,8 @@ type bazelAndroidAppAttributes struct {
 
 // ConvertWithBp2build is used to convert android_app to Bazel.
 func (a *AndroidApp) ConvertWithBp2build(ctx android.TopDownMutatorContext) {
-	commonAttrs, depLabels := a.convertLibraryAttrsBp2Build(ctx)
+	commonAttrs, bp2BuildInfo := a.convertLibraryAttrsBp2Build(ctx)
+	depLabels := bp2BuildInfo.DepLabels
 
 	deps := depLabels.Deps
 	deps.Append(depLabels.StaticDeps)

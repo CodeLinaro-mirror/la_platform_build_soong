@@ -11,7 +11,7 @@ var (
 	GetPythonBinary     = &getPythonBinaryRequestType{}
 	GetCcInfo           = &getCcInfoType{}
 	GetApexInfo         = &getApexInfoType{}
-	GetCcUnstrippedInfo = &getCcUnstippedInfoType{}
+	GetCcUnstrippedInfo = &getCcUnstrippedInfoType{}
 )
 
 type CcInfo struct {
@@ -30,8 +30,10 @@ type CcInfo struct {
 	// be a subset of OutputFiles. (or shared libraries, this will be equal to OutputFiles,
 	// but general cc_library will also have dynamic libraries in output files).
 	RootDynamicLibraries []string
+	TidyFiles            []string
 	TocFile              string
 	UnstrippedOutput     string
+	AbiDiffFiles         []string
 }
 
 type getOutputFilesRequestType struct{}
@@ -49,7 +51,7 @@ func (g getOutputFilesRequestType) Name() string {
 // all request-relevant information about a target and returns a string containing
 // this information.
 // The function should have the following properties:
-//   - `target` is the only parameter to this function (a configured target).
+//   - The arguments are `target` (a configured target) and `id_string` (the label + configuration).
 //   - The return value must be a string.
 //   - The function body should not be indented outside of its own scope.
 func (g getOutputFilesRequestType) StarlarkFunctionBody() string {
@@ -74,7 +76,7 @@ func (g getPythonBinaryRequestType) Name() string {
 // all request-relevant information about a target and returns a string containing
 // this information.
 // The function should have the following properties:
-//   - `target` is the only parameter to this function (a configured target).
+//   - The arguments are `target` (a configured target) and `id_string` (the label + configuration).
 //   - The return value must be a string.
 //   - The function body should not be indented outside of its own scope.
 func (g getPythonBinaryRequestType) StarlarkFunctionBody() string {
@@ -101,13 +103,16 @@ func (g getCcInfoType) Name() string {
 // all request-relevant information about a target and returns a string containing
 // this information.
 // The function should have the following properties:
-//   - `target` is the only parameter to this function (a configured target).
+//   - The arguments are `target` (a configured target) and `id_string` (the label + configuration).
 //   - The return value must be a string.
 //   - The function body should not be indented outside of its own scope.
 func (g getCcInfoType) StarlarkFunctionBody() string {
 	return `
 outputFiles = [f.path for f in target.files.to_list()]
-cc_info = providers(target)["CcInfo"]
+p = providers(target)
+cc_info = p.get("CcInfo")
+if not cc_info:
+  fail("%s did not provide CcInfo" % id_string)
 
 includes = cc_info.compilation_context.includes.to_list()
 system_includes = cc_info.compilation_context.system_includes.to_list()
@@ -119,8 +124,8 @@ rootStaticArchives = []
 linker_inputs = cc_info.linking_context.linker_inputs.to_list()
 
 static_info_tag = "//build/bazel/rules/cc:cc_library_static.bzl%CcStaticLibraryInfo"
-if static_info_tag in providers(target):
-  static_info = providers(target)[static_info_tag]
+if static_info_tag in p:
+  static_info = p[static_info_tag]
   ccObjectFiles = [f.path for f in static_info.objects]
   rootStaticArchives = [static_info.root_static_archive.path]
 else:
@@ -140,14 +145,14 @@ shared_info_tag = "//build/bazel/rules/cc:cc_library_shared.bzl%CcSharedLibraryO
 unstripped_tag = "//build/bazel/rules/cc:stripped_cc_common.bzl%CcUnstrippedInfo"
 unstripped = ""
 
-if shared_info_tag in providers(target):
-  shared_info = providers(target)[shared_info_tag]
+if shared_info_tag in p:
+  shared_info = p[shared_info_tag]
   path = shared_info.output_file.path
   sharedLibraries.append(path)
   rootSharedLibraries += [path]
   unstripped = path
-  if unstripped_tag in providers(target):
-    unstripped = providers(target)[unstripped_tag].unstripped.path
+  if unstripped_tag in p:
+    unstripped = p[unstripped_tag].unstripped.path
 else:
   for linker_input in linker_inputs:
     for library in linker_input.libraries:
@@ -159,11 +164,21 @@ else:
 
 toc_file = ""
 toc_file_tag = "//build/bazel/rules/cc:generate_toc.bzl%CcTocInfo"
-if toc_file_tag in providers(target):
-  toc_file = providers(target)[toc_file_tag].toc.path
+if toc_file_tag in p:
+  toc_file = p[toc_file_tag].toc.path
 else:
   # NOTE: It's OK if there's no ToC, as Soong just uses it for optimization
   pass
+
+tidy_files = []
+clang_tidy_info = p.get("//build/bazel/rules/cc:clang_tidy.bzl%ClangTidyInfo")
+if clang_tidy_info:
+  tidy_files = [v.path for v in clang_tidy_info.tidy_files.to_list()]
+
+abi_diff_files = []
+abi_diff_info = p.get("//build/bazel/rules/abi:abi_dump.bzl%AbiDiffInfo")
+if abi_diff_info:
+  abi_diff_files = [f.path for f in abi_diff_info.diff_files.to_list()]
 
 return json_encode({
 	"OutputFiles": outputFiles,
@@ -175,8 +190,10 @@ return json_encode({
 	"Headers": headers,
 	"RootStaticArchives": rootStaticArchives,
 	"RootDynamicLibraries": rootSharedLibraries,
+	"TidyFiles": tidy_files,
 	"TocFile": toc_file,
 	"UnstrippedOutput": unstripped,
+	"AbiDiffFiles": abi_diff_files,
 })`
 
 }
@@ -186,7 +203,9 @@ return json_encode({
 // Starlark given in StarlarkFunctionBody.
 func (g getCcInfoType) ParseResult(rawString string) (CcInfo, error) {
 	var ccInfo CcInfo
-	parseJson(rawString, &ccInfo)
+	if err := parseJson(rawString, &ccInfo); err != nil {
+		return ccInfo, err
+	}
 	return ccInfo, nil
 }
 
@@ -203,11 +222,14 @@ func (g getApexInfoType) Name() string {
 // The returned string is the body of a Starlark function which obtains
 // all request-relevant information about a target and returns a string containing
 // this information. The function should have the following properties:
-//   - `target` is the only parameter to this function (a configured target).
+//   - The arguments are `target` (a configured target) and `id_string` (the label + configuration).
 //   - The return value must be a string.
 //   - The function body should not be indented outside of its own scope.
 func (g getApexInfoType) StarlarkFunctionBody() string {
-	return `info = providers(target)["//build/bazel/rules/apex:apex.bzl%ApexInfo"]
+	return `
+info = providers(target).get("//build/bazel/rules/apex:apex_info.bzl%ApexInfo")
+if not info:
+  fail("%s did not provide ApexInfo" % id_string)
 bundle_key_info = info.bundle_key_info
 container_key_info = info.container_key_info
 return json_encode({
@@ -218,38 +240,48 @@ return json_encode({
     "bundle_key_info": [bundle_key_info.public_key.path, bundle_key_info.private_key.path],
     "container_key_info": [container_key_info.pem.path, container_key_info.pk8.path, container_key_info.key_name],
     "package_name": info.package_name,
+    "symbols_used_by_apex": info.symbols_used_by_apex.path,
+    "java_symbols_used_by_apex": info.java_symbols_used_by_apex.path,
+    "backing_libs": info.backing_libs.path,
+    "bundle_file": info.base_with_config_zip.path,
+    "installed_files": info.installed_files.path,
 })`
 }
 
 type ApexInfo struct {
-	SignedOutput     string   `json:"signed_output"`
-	UnsignedOutput   string   `json:"unsigned_output"`
-	ProvidesLibs     []string `json:"provides_native_libs"`
-	RequiresLibs     []string `json:"requires_native_libs"`
-	BundleKeyInfo    []string `json:"bundle_key_info"`
-	ContainerKeyInfo []string `json:"container_key_info"`
-	PackageName      string   `json:"package_name"`
+	SignedOutput          string   `json:"signed_output"`
+	UnsignedOutput        string   `json:"unsigned_output"`
+	ProvidesLibs          []string `json:"provides_native_libs"`
+	RequiresLibs          []string `json:"requires_native_libs"`
+	BundleKeyInfo         []string `json:"bundle_key_info"`
+	ContainerKeyInfo      []string `json:"container_key_info"`
+	PackageName           string   `json:"package_name"`
+	SymbolsUsedByApex     string   `json:"symbols_used_by_apex"`
+	JavaSymbolsUsedByApex string   `json:"java_symbols_used_by_apex"`
+	BackingLibs           string   `json:"backing_libs"`
+	BundleFile            string   `json:"bundle_file"`
+	InstalledFiles        string   `json:"installed_files"`
 }
 
 // ParseResult returns a value obtained by parsing the result of the request's Starlark function.
 // The given rawString must correspond to the string output which was created by evaluating the
 // Starlark given in StarlarkFunctionBody.
-func (g getApexInfoType) ParseResult(rawString string) ApexInfo {
+func (g getApexInfoType) ParseResult(rawString string) (ApexInfo, error) {
 	var info ApexInfo
-	parseJson(rawString, &info)
-	return info
+	err := parseJson(rawString, &info)
+	return info, err
 }
 
 // getCcUnstrippedInfoType implements cqueryRequest interface. It handles the
 // interaction with `bazel cquery` to retrieve CcUnstrippedInfo provided
 // by the` cc_binary` and `cc_shared_library` rules.
-type getCcUnstippedInfoType struct{}
+type getCcUnstrippedInfoType struct{}
 
-func (g getCcUnstippedInfoType) Name() string {
+func (g getCcUnstrippedInfoType) Name() string {
 	return "getCcUnstrippedInfo"
 }
 
-func (g getCcUnstippedInfoType) StarlarkFunctionBody() string {
+func (g getCcUnstrippedInfoType) StarlarkFunctionBody() string {
 	return `unstripped_tag = "//build/bazel/rules/cc:stripped_cc_common.bzl%CcUnstrippedInfo"
 p = providers(target)
 output_path = target.files.to_list()[0].path
@@ -266,10 +298,10 @@ return json_encode({
 // ParseResult returns a value obtained by parsing the result of the request's Starlark function.
 // The given rawString must correspond to the string output which was created by evaluating the
 // Starlark given in StarlarkFunctionBody.
-func (g getCcUnstippedInfoType) ParseResult(rawString string) CcUnstrippedInfo {
+func (g getCcUnstrippedInfoType) ParseResult(rawString string) (CcUnstrippedInfo, error) {
 	var info CcUnstrippedInfo
-	parseJson(rawString, &info)
-	return info
+	err := parseJson(rawString, &info)
+	return info, err
 }
 
 type CcUnstrippedInfo struct {
@@ -289,10 +321,12 @@ func splitOrEmpty(s string, sep string) []string {
 
 // parseJson decodes json string into the fields of the receiver.
 // Unknown attribute name causes panic.
-func parseJson(jsonString string, info interface{}) {
+func parseJson(jsonString string, info interface{}) error {
 	decoder := json.NewDecoder(strings.NewReader(jsonString))
 	decoder.DisallowUnknownFields() //useful to detect typos, e.g. in unit tests
-	if err := decoder.Decode(info); err != nil {
-		panic(fmt.Errorf("cannot parse cquery result '%s': %s", jsonString, err))
+	err := decoder.Decode(info)
+	if err != nil {
+		return fmt.Errorf("cannot parse cquery result '%s': %s", jsonString, err)
 	}
+	return nil
 }

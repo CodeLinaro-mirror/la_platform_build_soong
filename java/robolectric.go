@@ -296,6 +296,7 @@ func (r *robolectricTest) AndroidMkEntries() []android.AndroidMkEntries {
 	entries.ExtraEntries = append(entries.ExtraEntries,
 		func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
 			entries.SetBool("LOCAL_UNINSTALLABLE_MODULE", true)
+			entries.AddStrings("LOCAL_COMPATIBILITY_SUITE", "robolectric-tests")
 		})
 
 	entries.ExtraFooters = []android.AndroidMkExtraFootersFunc{
@@ -327,13 +328,12 @@ func (r *robolectricTest) AndroidMkEntries() []android.AndroidMkEntries {
 
 func (r *robolectricTest) writeTestRunner(w io.Writer, module, name string, tests []string) {
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "include $(CLEAR_VARS)")
+	fmt.Fprintln(w, "include $(CLEAR_VARS)", " # java.robolectricTest")
 	fmt.Fprintln(w, "LOCAL_MODULE :=", name)
-	fmt.Fprintln(w, "LOCAL_JAVA_LIBRARIES :=", module)
-	fmt.Fprintln(w, "LOCAL_JAVA_LIBRARIES += ", strings.Join(r.libs, " "))
+	android.AndroidMkEmitAssignList(w, "LOCAL_JAVA_LIBRARIES", []string{module}, r.libs)
 	fmt.Fprintln(w, "LOCAL_TEST_PACKAGE :=", String(r.robolectricProperties.Instrumentation_for))
 	fmt.Fprintln(w, "LOCAL_INSTRUMENT_SRCJARS :=", r.roboSrcJar.String())
-	fmt.Fprintln(w, "LOCAL_ROBOTEST_FILES :=", strings.Join(tests, " "))
+	android.AndroidMkEmitAssignList(w, "LOCAL_ROBOTEST_FILES", tests)
 	if t := r.robolectricProperties.Test_options.Timeout; t != nil {
 		fmt.Fprintln(w, "LOCAL_ROBOTEST_TIMEOUT :=", *t)
 	}

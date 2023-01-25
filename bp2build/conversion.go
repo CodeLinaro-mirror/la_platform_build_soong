@@ -23,6 +23,9 @@ type BazelFile struct {
 func CreateSoongInjectionFiles(cfg android.Config, metrics CodegenMetrics) []BazelFile {
 	var files []BazelFile
 
+	files = append(files, newFile("android", GeneratedBuildFileName, "")) // Creates a //cc_toolchain package.
+	files = append(files, newFile("android", "constants.bzl", android.BazelCcToolchainVars(cfg)))
+
 	files = append(files, newFile("cc_toolchain", GeneratedBuildFileName, "")) // Creates a //cc_toolchain package.
 	files = append(files, newFile("cc_toolchain", "constants.bzl", cc_config.BazelCcToolchainVars(cfg)))
 
@@ -51,6 +54,10 @@ func CreateSoongInjectionFiles(cfg android.Config, metrics CodegenMetrics) []Baz
 	files = append(files, newFile("api_levels", GeneratedBuildFileName, `exports_files(["api_levels.json"])`))
 	files = append(files, newFile("api_levels", "api_levels.json", string(apiLevelsContent)))
 	files = append(files, newFile("api_levels", "api_levels.bzl", android.StarlarkApiLevelConfigs(cfg)))
+
+	// TODO(b/262781701): Create an alternate soong_build entrypoint for writing out these files only when requested
+	files = append(files, newFile("allowlists", "mixed_build_prod_allowlist.txt", strings.Join(android.GetBazelEnabledModules(android.BazelProdMode), "\n")+"\n"))
+	files = append(files, newFile("allowlists", "mixed_build_staging_allowlist.txt", strings.Join(android.GetBazelEnabledModules(android.BazelStagingMode), "\n")+"\n"))
 
 	return files
 }

@@ -139,6 +139,7 @@ func dumpMakeVars(ctx Context, config Config, goals, vars []string, write_soong_
 var BannerVars = []string{
 	"PLATFORM_VERSION_CODENAME",
 	"PLATFORM_VERSION",
+	"PRODUCT_INCLUDE_TAGS",
 	"TARGET_PRODUCT",
 	"TARGET_BUILD_VARIANT",
 	"TARGET_BUILD_APPS",
@@ -154,10 +155,7 @@ var BannerVars = []string{
 	"HOST_CROSS_OS",
 	"BUILD_ID",
 	"OUT_DIR",
-	"SOONG_SDK_SNAPSHOT_PREFER",
 	"SOONG_SDK_SNAPSHOT_TARGET_BUILD_RELEASE",
-	"SOONG_SDK_SNAPSHOT_USE_SOURCE_CONFIG_VAR",
-	"SOONG_SDK_SNAPSHOT_VERSION",
 }
 
 func Banner(make_vars map[string]string) string {
@@ -292,4 +290,5 @@ func runMakeProductConfig(ctx Context, config Config) {
 	config.SetBuildBrokenDupRules(makeVars["BUILD_BROKEN_DUP_RULES"] == "true")
 	config.SetBuildBrokenUsesNetwork(makeVars["BUILD_BROKEN_USES_NETWORK"] == "true")
 	config.SetBuildBrokenNinjaUsesEnvVars(strings.Fields(makeVars["BUILD_BROKEN_NINJA_USES_ENV_VARS"]))
+	config.SetIncludeTags(strings.Fields(makeVars["PRODUCT_INCLUDE_TAGS"]))
 }

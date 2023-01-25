@@ -110,6 +110,15 @@ func inList(s string, list []string) bool {
 	return indexList(s, list) != -1
 }
 
+func deleteStaleMetrics(metricsFilePathSlice []string) error {
+	for _, metricsFilePath := range metricsFilePathSlice {
+		if err := os.Remove(metricsFilePath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("Failed to remove %s\nError message: %w", metricsFilePath, err)
+		}
+	}
+	return nil
+}
+
 // Main execution of soong_ui. The command format is as follows:
 //
 //	soong_ui <command> [<arg 1> <arg 2> ... <arg n>]
@@ -183,6 +192,14 @@ func main() {
 	buildErrorFile := filepath.Join(logsDir, c.logsPrefix+"build_error")
 	rbeMetricsFile := filepath.Join(logsDir, c.logsPrefix+"rbe_metrics.pb")
 	soongMetricsFile := filepath.Join(logsDir, c.logsPrefix+"soong_metrics")
+	bp2buildMetricsFile := filepath.Join(logsDir, c.logsPrefix+"bp2build_metrics.pb")
+	soongBuildMetricsFile := filepath.Join(logsDir, c.logsPrefix+"soong_build_metrics.pb")
+
+	//Delete the stale metrics files
+	staleFileSlice := []string{buildErrorFile, rbeMetricsFile, soongMetricsFile, bp2buildMetricsFile, soongBuildMetricsFile}
+	if err := deleteStaleMetrics(staleFileSlice); err != nil {
+		log.Fatalln(err)
+	}
 
 	build.PrintOutDirWarning(buildCtx, config)
 
@@ -210,10 +227,15 @@ func main() {
 		files := []string{
 			buildErrorFile,           // build error strings
 			rbeMetricsFile,           // high level metrics related to remote build execution.
+			soongBuildMetricsFile,    // high level metrics related to soong build(except bp2build).
+			bp2buildMetricsFile,      // high level metrics related to bp2build.
 			soongMetricsFile,         // high level metrics related to this build system.
 			config.BazelMetricsDir(), // directory that contains a set of bazel metrics.
 		}
-		defer build.UploadMetrics(buildCtx, config, c.simpleOutput, buildStarted, files...)
+
+		if !config.SkipMetricsUpload() {
+			defer build.UploadMetrics(buildCtx, config, c.simpleOutput, buildStarted, files...)
+		}
 		defer met.Dump(soongMetricsFile)
 		defer build.CheckProdCreds(buildCtx, config)
 	}

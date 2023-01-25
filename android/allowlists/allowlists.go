@@ -49,9 +49,9 @@ var (
 		"art/runtime":                           Bp2BuildDefaultTrueRecursively,
 		"art/tools":                             Bp2BuildDefaultTrue,
 		"bionic":                                Bp2BuildDefaultTrueRecursively,
+		"bootable/recovery/applypatch":          Bp2BuildDefaultTrue,
 		"bootable/recovery/minadbd":             Bp2BuildDefaultTrue,
 		"bootable/recovery/minui":               Bp2BuildDefaultTrue,
-		"bootable/recovery/applypatch":          Bp2BuildDefaultTrue,
 		"bootable/recovery/recovery_utils":      Bp2BuildDefaultTrue,
 		"bootable/recovery/tools/recovery_l10n": Bp2BuildDefaultTrue,
 
@@ -69,6 +69,9 @@ var (
 		"build/soong/scripts":                Bp2BuildDefaultTrueRecursively,
 
 		"cts/common/device-side/nativetesthelper/jni": Bp2BuildDefaultTrueRecursively,
+
+		"dalvik/tools/dexdeps": Bp2BuildDefaultTrueRecursively,
+
 		"development/apps/DevelopmentSettings":        Bp2BuildDefaultTrue,
 		"development/apps/Fallback":                   Bp2BuildDefaultTrue,
 		"development/apps/WidgetPreview":              Bp2BuildDefaultTrue,
@@ -108,8 +111,8 @@ var (
 
 		"external/aac":                           Bp2BuildDefaultTrueRecursively,
 		"external/arm-optimized-routines":        Bp2BuildDefaultTrueRecursively,
-		"external/auto/android-annotation-stubs": Bp2BuildDefaultTrueRecursively,
 		"external/auto":                          Bp2BuildDefaultTrue,
+		"external/auto/android-annotation-stubs": Bp2BuildDefaultTrueRecursively,
 		"external/auto/common":                   Bp2BuildDefaultTrueRecursively,
 		"external/auto/service":                  Bp2BuildDefaultTrueRecursively,
 		"external/boringssl":                     Bp2BuildDefaultTrueRecursively,
@@ -161,8 +164,10 @@ var (
 		"external/lzma/C":                        Bp2BuildDefaultTrueRecursively,
 		"external/mdnsresponder":                 Bp2BuildDefaultTrueRecursively,
 		"external/minijail":                      Bp2BuildDefaultTrueRecursively,
+		"external/musl":                          Bp2BuildDefaultTrueRecursively,
 		"external/objenesis":                     Bp2BuildDefaultTrueRecursively,
 		"external/openscreen":                    Bp2BuildDefaultTrueRecursively,
+		"external/ow2-asm":                       Bp2BuildDefaultTrueRecursively,
 		"external/pcre":                          Bp2BuildDefaultTrueRecursively,
 		"external/protobuf":                      Bp2BuildDefaultTrueRecursively,
 		"external/python/six":                    Bp2BuildDefaultTrueRecursively,
@@ -176,19 +181,21 @@ var (
 		"external/zopfli":                        Bp2BuildDefaultTrueRecursively,
 		"external/zstd":                          Bp2BuildDefaultTrueRecursively,
 
-		"frameworks/av":                                      Bp2BuildDefaultTrue,
-		"frameworks/av/media/codecs":                         Bp2BuildDefaultTrueRecursively,
+		"frameworks/av": Bp2BuildDefaultTrue,
 		"frameworks/av/media/codec2/components/aom":          Bp2BuildDefaultTrueRecursively,
+		"frameworks/av/media/codecs":                         Bp2BuildDefaultTrueRecursively,
 		"frameworks/av/media/liberror":                       Bp2BuildDefaultTrueRecursively,
-		"frameworks/av/services/minijail":                    Bp2BuildDefaultTrueRecursively,
+		"frameworks/av/media/libshmem":                       Bp2BuildDefaultTrueRecursively,
+		"frameworks/av/media/audioaidlconversion":            Bp2BuildDefaultTrueRecursively,
 		"frameworks/av/media/module/minijail":                Bp2BuildDefaultTrueRecursively,
+		"frameworks/av/services/minijail":                    Bp2BuildDefaultTrueRecursively,
 		"frameworks/base/libs/androidfw":                     Bp2BuildDefaultTrue,
 		"frameworks/base/media/tests/MediaDump":              Bp2BuildDefaultTrue,
 		"frameworks/base/services/tests/servicestests/aidl":  Bp2BuildDefaultTrue,
 		"frameworks/base/startop/apps/test":                  Bp2BuildDefaultTrue,
 		"frameworks/base/tests/appwidgets/AppWidgetHostTest": Bp2BuildDefaultTrueRecursively,
-		"frameworks/base/tools/streaming_proto":              Bp2BuildDefaultTrueRecursively,
 		"frameworks/base/tools/aapt2":                        Bp2BuildDefaultTrue,
+		"frameworks/base/tools/streaming_proto":              Bp2BuildDefaultTrueRecursively,
 		"frameworks/native/libs/adbd_auth":                   Bp2BuildDefaultTrueRecursively,
 		"frameworks/native/libs/arect":                       Bp2BuildDefaultTrueRecursively,
 		"frameworks/native/libs/gui":                         Bp2BuildDefaultTrue,
@@ -200,6 +207,7 @@ var (
 		"frameworks/native/opengl/tests/testLatency":         Bp2BuildDefaultTrue,
 		"frameworks/native/opengl/tests/testPauseResume":     Bp2BuildDefaultTrue,
 		"frameworks/native/opengl/tests/testViewport":        Bp2BuildDefaultTrue,
+		"frameworks/native/libs/permission":                  Bp2BuildDefaultTrue,
 		"frameworks/native/services/batteryservice":          Bp2BuildDefaultTrue,
 		"frameworks/proto_logging/stats":                     Bp2BuildDefaultTrueRecursively,
 
@@ -208,10 +216,10 @@ var (
 		"hardware/interfaces/configstore/1.0":          Bp2BuildDefaultTrue,
 		"hardware/interfaces/configstore/1.1":          Bp2BuildDefaultTrue,
 		"hardware/interfaces/configstore/utils":        Bp2BuildDefaultTrue,
-		"hardware/interfaces/graphics/allocator/aidl":  Bp2BuildDefaultTrue,
 		"hardware/interfaces/graphics/allocator/2.0":   Bp2BuildDefaultTrue,
 		"hardware/interfaces/graphics/allocator/3.0":   Bp2BuildDefaultTrue,
 		"hardware/interfaces/graphics/allocator/4.0":   Bp2BuildDefaultTrue,
+		"hardware/interfaces/graphics/allocator/aidl":  Bp2BuildDefaultTrue,
 		"hardware/interfaces/graphics/bufferqueue/1.0": Bp2BuildDefaultTrue,
 		"hardware/interfaces/graphics/bufferqueue/2.0": Bp2BuildDefaultTrue,
 		"hardware/interfaces/graphics/common/1.0":      Bp2BuildDefaultTrue,
@@ -249,6 +257,7 @@ var (
 		"packages/apps/Protips":                            Bp2BuildDefaultTrue,
 		"packages/apps/SafetyRegulatoryInfo":               Bp2BuildDefaultTrue,
 		"packages/apps/WallpaperPicker":                    Bp2BuildDefaultTrue,
+		"packages/modules/NeuralNetworks/driver/cache":     Bp2BuildDefaultTrueRecursively,
 		"packages/modules/StatsD/lib/libstatssocket":       Bp2BuildDefaultTrueRecursively,
 		"packages/modules/adb":                             Bp2BuildDefaultTrue,
 		"packages/modules/adb/apex":                        Bp2BuildDefaultTrue,
@@ -259,7 +268,6 @@ var (
 		"packages/modules/adb/proto":                       Bp2BuildDefaultTrueRecursively,
 		"packages/modules/adb/tls":                         Bp2BuildDefaultTrueRecursively,
 		"packages/providers/MediaProvider/tools/dialogs":   Bp2BuildDefaultFalse, // TODO(b/242834374)
-		"packages/modules/NeuralNetworks/driver/cache":     Bp2BuildDefaultTrueRecursively,
 		"packages/screensavers/Basic":                      Bp2BuildDefaultTrue,
 		"packages/services/Car/tests/SampleRearViewCamera": Bp2BuildDefaultFalse, // TODO(b/242834321)
 
@@ -272,8 +280,8 @@ var (
 		"prebuilts/tools":                          Bp2BuildDefaultTrue,
 		"prebuilts/tools/common/m2":                Bp2BuildDefaultTrue,
 
-		"sdk/eventanalyzer": Bp2BuildDefaultTrue,
 		"sdk/dumpeventlog":  Bp2BuildDefaultTrue,
+		"sdk/eventanalyzer": Bp2BuildDefaultTrue,
 
 		"system/apex":                                            Bp2BuildDefaultFalse, // TODO(b/207466993): flaky failures
 		"system/apex/apexer":                                     Bp2BuildDefaultTrue,
@@ -300,6 +308,7 @@ var (
 		"system/core/property_service/libpropertyinfoparser":     Bp2BuildDefaultTrueRecursively,
 		"system/core/property_service/libpropertyinfoserializer": Bp2BuildDefaultTrueRecursively,
 		"system/extras/toolchain-extras":                         Bp2BuildDefaultTrue,
+		"system/hardware/interfaces/media":                       Bp2BuildDefaultTrueRecursively,
 		"system/incremental_delivery/incfs":                      Bp2BuildDefaultTrue,
 		"system/libartpalette":                                   Bp2BuildDefaultTrueRecursively,
 		"system/libbase":                                         Bp2BuildDefaultTrueRecursively,
@@ -344,6 +353,7 @@ var (
 		".":/*recursive = */ false,
 
 		"build/bazel":/* recursive = */ true,
+		"build/make/core":/* recursive = */ false,
 		"build/bazel_common_rules":/* recursive = */ true,
 		// build/make/tools/signapk BUILD file is generated, so build/make/tools is not recursive.
 		"build/make/tools":/* recursive = */ false,
@@ -359,6 +369,7 @@ var (
 		"external/guava":/* recursive = */ true,
 		"external/jsr305":/* recursive = */ true,
 		"external/protobuf":/* recursive = */ false,
+		"external/python/absl-py":/* recursive = */ true,
 
 		// this BUILD file is globbed by //external/icu/icu4c/source:icu4c_test_data's "data/**/*".
 		"external/icu/icu4c/source/data/unidata/norm2":/* recursive = */ false,
@@ -369,9 +380,12 @@ var (
 		"packages/apps/Music":/* recursive = */ true,
 		"packages/apps/QuickSearchBox":/* recursive = */ true,
 
+		"prebuilts/abi-dumps/platform":/* recursive = */ true,
+		"prebuilts/abi-dumps/ndk":/* recursive = */ true,
 		"prebuilts/bazel":/* recursive = */ true,
 		"prebuilts/bundletool":/* recursive = */ true,
 		"prebuilts/clang/host/linux-x86":/* recursive = */ false,
+		"prebuilts/clang-tools":/* recursive = */ true,
 		"prebuilts/gcc":/* recursive = */ true,
 		"prebuilts/build-tools":/* recursive = */ true,
 		"prebuilts/jdk/jdk11":/* recursive = */ false,
@@ -379,6 +393,11 @@ var (
 		"prebuilts/sdk":/* recursive = */ false,
 		"prebuilts/sdk/tools":/* recursive = */ false,
 		"prebuilts/r8":/* recursive = */ false,
+		"prebuilts/runtime":/* recursive = */ false,
+
+		// not recursive due to conflicting workspace paths in tools/atest/bazel/rules
+		"tools/asuite/atest":/* recursive = */ false,
+		"tools/asuite/atest/bazel/reporter":/* recursive = */ true,
 	}
 
 	Bp2buildModuleAlwaysConvertList = []string{
@@ -644,6 +663,10 @@ var (
 		"libcodec2_soft_avcenc",
 		"libcodec2_soft_aacdec",
 		"libcodec2_soft_common",
+
+		// kotlin srcs in java libs
+		"CtsPkgInstallerConstants",
+		"kotlinx_atomicfu",
 	}
 
 	Bp2buildModuleTypeAlwaysConvertList = []string{
@@ -714,9 +737,7 @@ var (
 		"platform_tools_properties", "build_tools_source_properties", // TODO(b/203369847): multiple genrules in the same package creating the same file
 
 		// aar support
-		"prebuilt_car-ui-androidx-core-common",         // TODO(b/224773339), genrule dependency creates an .aar, not a .jar
-		"prebuilt_platform-robolectric-4.4-prebuilt",   // aosp/1999250, needs .aar support in Jars
-		"prebuilt_platform-robolectric-4.5.1-prebuilt", // aosp/1999250, needs .aar support in Jars
+		"prebuilt_car-ui-androidx-core-common", // TODO(b/224773339), genrule dependency creates an .aar, not a .jar
 		// ERROR: The dependencies for the following 1 jar(s) are not complete.
 		// 1.bazel-out/android_target-fastbuild/bin/prebuilts/tools/common/m2/_aar/robolectric-monitor-1.0.2-alpha1/classes_and_libs_merged.jar
 		"prebuilt_robolectric-monitor-1.0.2-alpha1",
@@ -777,6 +798,7 @@ var (
 		"libstatslog",               // depends on unconverted modules: libstatspull, statsd-aidl-ndk
 		"libstatslog_art",           // depends on unconverted modules: statslog_art.cpp, statslog_art.h
 		"linker_reloc_bench_main",   // depends on unconverted modules: liblinker_reloc_bench_*
+		"malloc-rss-benchmark",      // depends on unconverted modules: libmeminfo
 		"pbtombstone", "crash_dump", // depends on libdebuggerd, libunwindstack
 		"robolectric-sqlite4java-0.282", // depends on unconverted modules: robolectric-sqlite4java-import, robolectric-sqlite4java-native
 		"static_crasher",                // depends on unconverted modules: libdebuggerd_handler
@@ -1289,6 +1311,9 @@ var (
 		// TODO(b/254476335): disable the following due to this bug
 		"libapexinfo",
 		"libapexinfo_tests",
+
+		// uses glob in $(locations)
+		"libc_musl_sysroot",
 	}
 
 	Bp2buildCcLibraryStaticOnlyList = []string{}
@@ -1334,14 +1359,23 @@ var (
 		"prebuilt_kotlin-stdlib-jdk8",
 		"prebuilt_kotlin-test",
 		// TODO(b/217750501) exclude_files property not supported
-		"prebuilt_platform-robolectric-4.4-prebuilt",
-		"prebuilt_platform-robolectric-4.5.1-prebuilt",
 		"prebuilt_currysrc_org.eclipse",
 	}
 
-	ProdMixedBuildsEnabledList = []string{}
+	// Bazel prod-mode allowlist. Modules in this list are built by Bazel
+	// in either prod mode or staging mode.
+	ProdMixedBuildsEnabledList = []string{
+		"com.android.tzdata",
+		"test1_com.android.tzdata",
+	}
 
-	// Staging builds should be entirely prod, plus some near-ready ones. Add the
-	// new ones to the first argument as needed.
-	StagingMixedBuildsEnabledList = append([]string{}, ProdMixedBuildsEnabledList...)
+	// Staging-mode allowlist. Modules in this list are only built
+	// by Bazel with --bazel-mode-staging. This list should contain modules
+	// which will soon be added to the prod allowlist.
+	// It is implicit that all modules in ProdMixedBuildsEnabledList will
+	// also be built - do not add them to this list.
+	StagingMixedBuildsEnabledList = []string{
+		"com.android.adbd",
+		"adbd_test",
+	}
 )

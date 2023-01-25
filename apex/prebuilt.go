@@ -24,6 +24,7 @@ import (
 	"android/soong/android"
 	"android/soong/java"
 	"android/soong/provenance"
+
 	"github.com/google/blueprint"
 	"github.com/google/blueprint/proptools"
 )
@@ -829,8 +830,11 @@ func (p *prebuiltApexExtractorModule) GenerateAndroidBuildActions(ctx android.Mo
 	srcsSupplier := func(ctx android.BaseModuleContext, prebuilt android.Module) []string {
 		return p.properties.prebuiltSrcs(ctx)
 	}
+	defaultAllowPrerelease := ctx.Config().IsEnvTrue("SOONG_ALLOW_PRERELEASE_APEXES")
 	apexSet := android.SingleSourcePathFromSupplier(ctx, srcsSupplier, "set")
 	p.extractedApex = android.PathForModuleOut(ctx, "extracted", apexSet.Base())
+	// Filter out NativeBridge archs (b/260115309)
+	abis := java.SupportedAbis(ctx, true)
 	ctx.Build(pctx,
 		android.BuildParams{
 			Rule:        extractMatchingApex,
@@ -838,8 +842,8 @@ func (p *prebuiltApexExtractorModule) GenerateAndroidBuildActions(ctx android.Mo
 			Inputs:      android.Paths{apexSet},
 			Output:      p.extractedApex,
 			Args: map[string]string{
-				"abis":              strings.Join(java.SupportedAbis(ctx), ","),
-				"allow-prereleased": strconv.FormatBool(proptools.Bool(p.properties.Prerelease)),
+				"abis":              strings.Join(abis, ","),
+				"allow-prereleased": strconv.FormatBool(proptools.BoolDefault(p.properties.Prerelease, defaultAllowPrerelease)),
 				"sdk-version":       ctx.Config().PlatformSdkVersion().String(),
 			},
 		})
@@ -910,6 +914,15 @@ func (a *ApexSet) hasSanitizedSource(sanitizer string) bool {
 	}
 
 	return false
+}
+
+func (a *ApexSet) OutputFiles(tag string) (android.Paths, error) {
+	switch tag {
+	case "":
+		return android.Paths{a.outputApex}, nil
+	default:
+		return nil, fmt.Errorf("unsupported module reference tag %q", tag)
+	}
 }
 
 // prebuilt_apex imports an `.apex` file into the build graph as if it was built with apex.

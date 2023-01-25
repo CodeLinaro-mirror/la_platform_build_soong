@@ -644,9 +644,11 @@ func binaryBp2buildAttrs(ctx android.TopDownMutatorContext, m *Module) binaryAtt
 		Features: baseAttrs.features,
 
 		sdkAttributes: bp2BuildParseSdkAttributes(m),
+
+		Native_coverage: baseAttrs.Native_coverage,
 	}
 
-	m.convertTidyAttributes(&attrs.tidyAttributes)
+	m.convertTidyAttributes(ctx, &attrs.tidyAttributes)
 
 	return attrs
 }
@@ -655,11 +657,12 @@ func binaryBp2build(ctx android.TopDownMutatorContext, m *Module) {
 	// shared with cc_test
 	binaryAttrs := binaryBp2buildAttrs(ctx, m)
 
+	tags := android.ApexAvailableTags(m)
 	ctx.CreateBazelTargetModule(bazel.BazelTargetModuleProperties{
 		Rule_class:        "cc_binary",
 		Bzl_load_location: "//build/bazel/rules/cc:cc_binary.bzl",
 	},
-		android.CommonAttributes{Name: m.Name()},
+		android.CommonAttributes{Name: m.Name(), Tags: tags},
 		&binaryAttrs)
 }
 
@@ -702,4 +705,6 @@ type binaryAttributes struct {
 	sdkAttributes
 
 	tidyAttributes
+
+	Native_coverage *bool
 }

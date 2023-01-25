@@ -455,9 +455,6 @@ type apexBundle struct {
 	// Processed file_contexts files
 	fileContexts android.WritablePath
 
-	// Path to notice file in html.gz format.
-	htmlGzNotice android.WritablePath
-
 	// The built APEX file. This is the main product.
 	// Could be .apex or .capex
 	outputFile android.WritablePath
@@ -737,12 +734,14 @@ func (a *apexBundle) combineProperties(ctx android.BottomUpMutatorContext) {
 	}
 }
 
-// getImageVariation returns the image variant name for this apexBundle. In most cases, it's simply
-// android.CoreVariation, but gets complicated for the vendor APEXes and the VNDK APEX.
-func (a *apexBundle) getImageVariation(ctx android.BottomUpMutatorContext) string {
-	deviceConfig := ctx.DeviceConfig()
+// getImageVariationPair returns a pair for the image variation name as its
+// prefix and suffix. The prefix indicates whether it's core/vendor/product and the
+// suffix indicates the vndk version when it's vendor or product.
+// getImageVariation can simply join the result of this function to get the
+// image variation name.
+func (a *apexBundle) getImageVariationPair(deviceConfig android.DeviceConfig) (string, string) {
 	if a.vndkApex {
-		return cc.VendorVariationPrefix + a.vndkVersion(deviceConfig)
+		return cc.VendorVariationPrefix, a.vndkVersion(deviceConfig)
 	}
 
 	var prefix string
@@ -760,10 +759,17 @@ func (a *apexBundle) getImageVariation(ctx android.BottomUpMutatorContext) strin
 		vndkVersion = deviceConfig.PlatformVndkVersion()
 	}
 	if vndkVersion != "" {
-		return prefix + vndkVersion
+		return prefix, vndkVersion
 	}
 
-	return android.CoreVariation // The usual case
+	return android.CoreVariation, "" // The usual case
+}
+
+// getImageVariation returns the image variant name for this apexBundle. In most cases, it's simply
+// android.CoreVariation, but gets complicated for the vendor APEXes and the VNDK APEX.
+func (a *apexBundle) getImageVariation(ctx android.BottomUpMutatorContext) string {
+	prefix, vndkVersion := a.getImageVariationPair(ctx.DeviceConfig())
+	return prefix + vndkVersion
 }
 
 func (a *apexBundle) DepsMutator(ctx android.BottomUpMutatorContext) {
@@ -1869,6 +1875,17 @@ func (a *apexBundle) QueueBazelCall(ctx android.BaseModuleContext) {
 	bazelCtx.QueueBazelRequest(a.GetBazelLabel(ctx, a), cquery.GetApexInfo, android.GetConfigKey(ctx))
 }
 
+// GetBazelLabel returns the bazel label of this apexBundle, or the label of the
+// override_apex module overriding this apexBundle. An apexBundle can be
+// overridden by different override_apex modules (e.g. Google or Go variants),
+// which is handled by the overrides mutators.
+func (a *apexBundle) GetBazelLabel(ctx android.BazelConversionPathContext, module blueprint.Module) string {
+	if _, ok := ctx.Module().(android.OverridableModule); ok {
+		return android.MaybeBp2buildLabelOfOverridingModule(ctx)
+	}
+	return a.BazelModuleBase.GetBazelLabel(ctx, a)
+}
+
 func (a *apexBundle) ProcessBazelQueryResponse(ctx android.ModuleContext) {
 	if !a.commonBuildActions(ctx) {
 		return
@@ -1893,24 +1910,28 @@ func (a *apexBundle) ProcessBazelQueryResponse(ctx android.ModuleContext) {
 	a.outputFile = a.outputApexFile
 	a.setCompression(ctx)
 
+	// TODO(b/257829940): These are used by the apex_keys_text singleton; would probably be a clearer
+	// interface if these were set in a provider rather than the module itself
 	a.publicKeyFile = android.PathForBazelOut(ctx, outputs.BundleKeyInfo[0])
 	a.privateKeyFile = android.PathForBazelOut(ctx, outputs.BundleKeyInfo[1])
 	a.containerCertificateFile = android.PathForBazelOut(ctx, outputs.ContainerKeyInfo[0])
 	a.containerPrivateKeyFile = android.PathForBazelOut(ctx, outputs.ContainerKeyInfo[1])
+
+	// Ensure ApexInfo.RequiresLibs are installed as part of a bundle build
+	for _, bazelLabel := range outputs.RequiresLibs {
+		// convert Bazel label back to Soong module name
+		a.requiredDeps = append(a.requiredDeps, android.ModuleFromBazelLabel(bazelLabel))
+	}
+
 	apexType := a.properties.ApexType
 	switch apexType {
 	case imageApex:
-		// TODO(asmundak): Bazel does not create these files yet.
-		// b/190817312
-		a.htmlGzNotice = android.PathForBazelOut(ctx, "NOTICE.html.gz")
-		// b/239081457
-		a.bundleModuleFile = android.PathForBazelOut(ctx, a.Name()+apexType.suffix()+"-base.zip")
-		// b/239081455
-		a.nativeApisUsedByModuleFile = android.ModuleOutPath(android.PathForBazelOut(ctx, a.Name()+"_using.txt"))
-		// b/239081456
-		a.nativeApisBackedByModuleFile = android.ModuleOutPath(android.PathForBazelOut(ctx, a.Name()+"_backing.txt"))
-		// b/239084755
-		a.javaApisUsedByModuleFile = android.ModuleOutPath(android.PathForBazelOut(ctx, a.Name()+"_using.xml"))
+		a.bundleModuleFile = android.PathForBazelOut(ctx, outputs.BundleFile)
+		a.nativeApisUsedByModuleFile = android.ModuleOutPath(android.PathForBazelOut(ctx, outputs.SymbolsUsedByApex))
+		a.nativeApisBackedByModuleFile = android.ModuleOutPath(android.PathForBazelOut(ctx, outputs.BackingLibs))
+		// TODO(b/239084755): Generate the java api using.xml file from Bazel.
+		a.javaApisUsedByModuleFile = android.ModuleOutPath(android.PathForBazelOut(ctx, outputs.JavaSymbolsUsedByApex))
+		a.installedFilesFile = android.ModuleOutPath(android.PathForBazelOut(ctx, outputs.InstalledFiles))
 		installSuffix := imageApexSuffix
 		if a.isCompressed {
 			installSuffix = imageCapexSuffix
@@ -2045,15 +2066,23 @@ type visitorContext struct {
 	requireNativeLibs []string
 
 	handleSpecialLibs bool
+
+	// if true, raise error on duplicate apexFile
+	checkDuplicate bool
 }
 
-func (vctx *visitorContext) normalizeFileInfo() {
+func (vctx *visitorContext) normalizeFileInfo(mctx android.ModuleContext) {
 	encountered := make(map[string]apexFile)
 	for _, f := range vctx.filesInfo {
 		dest := filepath.Join(f.installDir, f.builtFile.Base())
 		if e, ok := encountered[dest]; !ok {
 			encountered[dest] = f
 		} else {
+			if vctx.checkDuplicate && f.builtFile.String() != e.builtFile.String() {
+				mctx.ModuleErrorf("apex file %v is provided by two different files %v and %v",
+					dest, e.builtFile, f.builtFile)
+				return
+			}
 			// If a module is directly included and also transitively depended on
 			// consider it as directly included.
 			e.transitiveDep = e.transitiveDep && f.transitiveDep
@@ -2306,7 +2335,7 @@ func (a *apexBundle) depVisitor(vctx *visitorContext, ctx android.ModuleContext,
 				//
 				// Always include if we are a host-apex however since those won't have any
 				// system libraries.
-				if !am.DirectlyInAnyApex() {
+				if ch.IsStubsImplementationRequired() && !am.DirectlyInAnyApex() {
 					// we need a module name for Make
 					name := ch.ImplementationModuleNameForMake(ctx) + ch.Properties.SubName
 					if !android.InList(name, a.requiredDeps) {
@@ -2412,6 +2441,25 @@ func (a *apexBundle) depVisitor(vctx *visitorContext, ctx android.ModuleContext,
 	return false
 }
 
+func (a *apexBundle) shouldCheckDuplicate(ctx android.ModuleContext) bool {
+	// TODO(b/263308293) remove this
+	if a.properties.IsCoverageVariant {
+		return false
+	}
+	// TODO(b/263308515) remove this
+	if a.testApex {
+		return false
+	}
+	// TODO(b/263309864) remove this
+	if a.Host() {
+		return false
+	}
+	if a.Device() && ctx.DeviceConfig().DeviceArch() == "" {
+		return false
+	}
+	return true
+}
+
 // Creates build rules for an APEX. It consists of the following major steps:
 //
 // 1) do some validity checks such as apex_available, min_sdk_version, etc.
@@ -2432,9 +2480,12 @@ func (a *apexBundle) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 
 	// TODO(jiyong): do this using WalkPayloadDeps
 	// TODO(jiyong): make this clean!!!
-	vctx := visitorContext{handleSpecialLibs: !android.Bool(a.properties.Ignore_system_library_special_case)}
+	vctx := visitorContext{
+		handleSpecialLibs: !android.Bool(a.properties.Ignore_system_library_special_case),
+		checkDuplicate:    a.shouldCheckDuplicate(ctx),
+	}
 	ctx.WalkDepsBlueprint(func(child, parent blueprint.Module) bool { return a.depVisitor(&vctx, ctx, child, parent) })
-	vctx.normalizeFileInfo()
+	vctx.normalizeFileInfo(ctx)
 	if a.privateKeyFile == nil {
 		ctx.PropertyErrorf("key", "private_key for %q could not be found", String(a.overridableProperties.Key))
 		return
@@ -2507,7 +2558,8 @@ func apexBootclasspathFragmentFiles(ctx android.ModuleContext, module blueprint.
 		filesToAdd = append(filesToAdd, *af)
 	}
 
-	if pathInApex := bootclasspathFragmentInfo.ProfileInstallPathInApex(); pathInApex != "" {
+	pathInApex := bootclasspathFragmentInfo.ProfileInstallPathInApex()
+	if pathInApex != "" && !java.SkipDexpreoptBootJars(ctx) {
 		pathOnHost := bootclasspathFragmentInfo.ProfilePathOnHost()
 		tempPath := android.PathForModuleOut(ctx, "boot_image_profile", pathInApex)
 
@@ -2679,6 +2731,10 @@ func (o *OverrideApex) ConvertWithBp2build(ctx android.TopDownMutatorContext) {
 		panic(fmt.Errorf("Base module is not apex module: %s", baseApexModuleName))
 	}
 	attrs, props := convertWithBp2build(a, ctx)
+
+	// We just want the name, not module reference.
+	baseApexName := strings.TrimPrefix(baseApexModuleName, ":")
+	attrs.Base_apex_name = &baseApexName
 
 	for _, p := range o.GetProperties() {
 		overridableProperties, ok := p.(*overridableProperties)
@@ -3377,6 +3433,7 @@ type bazelApexBundleAttributes struct {
 	Package_name          *string
 	Logging_parent        *string
 	Tests                 bazel.LabelListAttribute
+	Base_apex_name        *string
 }
 
 type convertedNativeSharedLibs struct {
