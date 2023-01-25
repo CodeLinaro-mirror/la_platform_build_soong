@@ -15,6 +15,8 @@
 package cc
 
 import (
+	"android/soong/cc/config"
+	"strings"
 	"android/soong/android"
 
 	"github.com/google/blueprint/proptools"
@@ -110,6 +112,11 @@ func (lto *lto) flags(ctx BaseModuleContext, flags Flags) Flags {
 	}
 	if lto.Properties.LtoEnabled {
 		ltoCFlags := []string{"-flto=thin", "-fsplit-lto-unit"}
+		if lto.ThinLTO() && flags.Sdclang && !strings.Contains(config.SDClangPath, "9.0") {
+			// TODO(b/129607781) sdclang does not currently support
+			// the "-fsplit-lto-unit" option
+			ltoCFlags = []string{"-flto=thin"}
+		}
 		var ltoLdFlags []string
 
 		// The module did not explicitly turn on LTO. Only leverage LTO's

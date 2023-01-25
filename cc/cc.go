@@ -232,6 +232,7 @@ type Flags struct {
 	SystemIncludeFlags []string
 
 	Toolchain     config.Toolchain
+	Sdclang       bool
 	Tidy          bool // True if ninja .tidy rules should be generated.
 	NeedTidyFiles bool // True if module link should depend on .tidy files
 	GcovCoverage  bool // True if coverage files should be generated.
@@ -261,6 +262,9 @@ type Flags struct {
 type BaseProperties struct {
 	// Deprecated. true is the default, false is invalid.
 	Clang *bool `android:"arch_variant"`
+
+	// compile module with SDLLVM instead of AOSP LLVM
+	Sdclang *bool `android:"arch_variant"`
 
 	// The API level that this module is built against. The APIs of this API level will be
 	// visible at build time, but use of any APIs newer than min_sdk_version will render the
@@ -2233,6 +2237,7 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 	flags := Flags{
 		Toolchain: c.toolchain(ctx),
 		EmitXrefs: ctx.Config().EmitXrefRules(),
+		Sdclang:   c.sdclang(ctx),
 	}
 	for _, generator := range c.generators {
 		flags = generator.GeneratorFlags(ctx, flags, deps)
@@ -3162,6 +3167,21 @@ func findApexSdkVersion(ctx android.BaseModuleContext, apexInfo android.ApexInfo
 	}
 
 	return apexSdkVersion
+}
+
+func (c *Module) sdclang(ctx BaseModuleContext) bool {
+	sdclang := Bool(c.Properties.Sdclang)
+
+	// SDLLVM is not for host build
+	if ctx.Host() || config.ForceSDClangOff {
+		return false
+	}
+
+	if c.Properties.Sdclang == nil && config.SDClang {
+		return true
+	}
+
+	return sdclang
 }
 
 // Convert dependencies to paths.  Returns a PathDeps containing paths
