@@ -254,3 +254,10 @@ com.qualcomm.wfd
 com.qualcomm.wfd.service
 org.codeaurora.internal
 qcom.fmradio
+
+# Packages for Twowheeer
+codelinaro\.bike
+codelinaro\.bike\..*
+org\.codelinaro\.bike
+org\.codelinaro\.bike\..*
+
