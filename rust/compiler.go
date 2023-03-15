@@ -15,6 +15,7 @@
 package rust
 
 import (
+	"android/soong/cc"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -207,6 +208,10 @@ func (compiler *baseCompiler) SetDisabled() {
 	panic("baseCompiler does not implement SetDisabled()")
 }
 
+func (compiler *baseCompiler) noStdlibs() bool {
+	return Bool(compiler.Properties.No_stdlibs)
+}
+
 func (compiler *baseCompiler) coverageOutputZipPath() android.OptionalPath {
 	panic("baseCompiler does not implement coverageOutputZipPath()")
 }
@@ -264,6 +269,11 @@ func (compiler *baseCompiler) featureFlags(ctx ModuleContext, flags Flags) Flags
 func (compiler *baseCompiler) cfgFlags(ctx ModuleContext, flags Flags) Flags {
 	if ctx.RustModule().UseVndk() {
 		compiler.Properties.Cfgs = append(compiler.Properties.Cfgs, "android_vndk")
+		if ctx.RustModule().InVendor() {
+			compiler.Properties.Cfgs = append(compiler.Properties.Cfgs, "android_vendor")
+		} else if ctx.RustModule().InProduct() {
+			compiler.Properties.Cfgs = append(compiler.Properties.Cfgs, "android_product")
+		}
 	}
 
 	flags.RustFlags = append(flags.RustFlags, compiler.cfgsToFlags()...)
@@ -307,19 +317,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags) Flag
 	flags.EmitXrefs = ctx.Config().EmitXrefRules()
 
 	if ctx.Host() && !ctx.Windows() {
-		rpathPrefix := `\$$ORIGIN/`
-		if ctx.Darwin() {
-			rpathPrefix = "@loader_path/"
-		}
-
-		var rpath string
-		if ctx.toolchain().Is64Bit() {
-			rpath = "lib64"
-		} else {
-			rpath = "lib"
-		}
-		flags.LinkFlags = append(flags.LinkFlags, "-Wl,-rpath,"+rpathPrefix+rpath)
-		flags.LinkFlags = append(flags.LinkFlags, "-Wl,-rpath,"+rpathPrefix+"../"+rpath)
+		flags.LinkFlags = append(flags.LinkFlags, cc.RpathFlags(ctx)...)
 	}
 
 	return flags

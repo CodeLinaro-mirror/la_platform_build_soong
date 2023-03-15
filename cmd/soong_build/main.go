@@ -81,6 +81,7 @@ func init() {
 	flag.BoolVar(&cmdlineArgs.BazelMode, "bazel-mode", false, "use bazel for analysis of certain modules")
 	flag.BoolVar(&cmdlineArgs.BazelModeStaging, "bazel-mode-staging", false, "use bazel for analysis of certain near-ready modules")
 	flag.BoolVar(&cmdlineArgs.BazelModeDev, "bazel-mode-dev", false, "use bazel for analysis of a large number of modules (less stable)")
+	flag.BoolVar(&cmdlineArgs.UseBazelProxy, "use-bazel-proxy", false, "communicate with bazel using unix socket proxy instead of spawning subprocesses")
 
 	// Flags that probably shouldn't be flags of soong_build, but we haven't found
 	// the time to remove them yet
@@ -134,8 +135,8 @@ func runMixedModeBuild(ctx *android.Context, extraNinjaDeps []string) string {
 func runQueryView(queryviewDir, queryviewMarker string, ctx *android.Context) {
 	ctx.EventHandler.Begin("queryview")
 	defer ctx.EventHandler.End("queryview")
-	codegenContext := bp2build.NewCodegenContext(ctx.Config(), ctx, bp2build.QueryView)
-	err := createBazelWorkspace(codegenContext, shared.JoinPath(topDir, queryviewDir))
+	codegenContext := bp2build.NewCodegenContext(ctx.Config(), ctx, bp2build.QueryView, topDir)
+	err := createBazelWorkspace(codegenContext, shared.JoinPath(topDir, queryviewDir), false)
 	maybeQuit(err, "")
 	touch(shared.JoinPath(topDir, queryviewMarker))
 }
@@ -145,8 +146,10 @@ func runQueryView(queryviewDir, queryviewMarker string, ctx *android.Context) {
 func runApiBp2build(ctx *android.Context, extraNinjaDeps []string) string {
 	ctx.EventHandler.Begin("api_bp2build")
 	defer ctx.EventHandler.End("api_bp2build")
-	// Do not allow missing dependencies.
-	ctx.SetAllowMissingDependencies(false)
+	// api_bp2build does not run the typical pipeline of soong mutators.
+	// Hoevever, it still runs the defaults mutator which can create dependencies.
+	// These dependencies might not always exist (e.g. in tests)
+	ctx.SetAllowMissingDependencies(ctx.Config().AllowMissingDependencies())
 	ctx.RegisterForApiBazelConversion()
 
 	// Register the Android.bp files in the tree
@@ -169,14 +172,36 @@ func runApiBp2build(ctx *android.Context, extraNinjaDeps []string) string {
 	ninjaDeps = append(ninjaDeps, writeBuildGlobsNinjaFile(ctx)...)
 
 	// Run codegen to generate BUILD files
-	codegenContext := bp2build.NewCodegenContext(ctx.Config(), ctx, bp2build.ApiBp2build)
+	codegenContext := bp2build.NewCodegenContext(ctx.Config(), ctx, bp2build.ApiBp2build, topDir)
 	absoluteApiBp2buildDir := shared.JoinPath(topDir, cmdlineArgs.BazelApiBp2buildDir)
-	err := createBazelWorkspace(codegenContext, absoluteApiBp2buildDir)
+	// Always generate bp2build_all_srcs filegroups in api_bp2build.
+	// This is necessary to force each Android.bp file to create an equivalent BUILD file
+	// and prevent package boundray issues.
+	// e.g.
+	// Source
+	// f/b/Android.bp
+	// java_library{
+	//   name: "foo",
+	//   api: "api/current.txt",
+	// }
+	//
+	// f/b/api/Android.bp <- will cause package boundary issues
+	//
+	// Gen
+	// f/b/BUILD
+	// java_contribution{
+	//   name: "foo.contribution",
+	//   api: "//f/b/api:current.txt",
+	// }
+	//
+	// If we don't generate f/b/api/BUILD, foo.contribution will be unbuildable.
+	err := createBazelWorkspace(codegenContext, absoluteApiBp2buildDir, true)
 	maybeQuit(err, "")
 	ninjaDeps = append(ninjaDeps, codegenContext.AdditionalNinjaDeps()...)
 
 	// Create soong_injection repository
-	soongInjectionFiles := bp2build.CreateSoongInjectionFiles(ctx.Config(), bp2build.CreateCodegenMetrics())
+	soongInjectionFiles, err := bp2build.CreateSoongInjectionDirFiles(codegenContext, bp2build.CreateCodegenMetrics())
+	maybeQuit(err, "")
 	absoluteSoongInjectionDir := shared.JoinPath(topDir, ctx.Config().SoongOutDir(), bazel.SoongInjectionDirName)
 	for _, file := range soongInjectionFiles {
 		// The API targets in api_bp2build workspace do not have any dependency on api_bp2build.
@@ -189,7 +214,7 @@ func runApiBp2build(ctx *android.Context, extraNinjaDeps []string) string {
 
 	workspace := shared.JoinPath(ctx.Config().SoongOutDir(), "api_bp2build")
 	// Create the symlink forest
-	symlinkDeps := bp2build.PlantSymlinkForest(
+	symlinkDeps, _, _ := bp2build.PlantSymlinkForest(
 		ctx.Config().IsEnvTrue("BP2BUILD_VERBOSE"),
 		topDir,
 		workspace,
@@ -277,7 +302,7 @@ func runSoongOnlyBuild(ctx *android.Context, extraNinjaDeps []string) string {
 	switch ctx.Config().BuildMode {
 	case android.GenerateModuleGraph:
 		stopBefore = bootstrap.StopBeforeWriteNinja
-	case android.GenerateQueryView | android.GenerateDocFile:
+	case android.GenerateQueryView, android.GenerateDocFile:
 		stopBefore = bootstrap.StopBeforePrepareBuildActions
 	default:
 		stopBefore = bootstrap.DoEverything
@@ -445,6 +470,7 @@ func bazelArtifacts() []string {
 		"bazel-genfiles",
 		"bazel-out",
 		"bazel-testlogs",
+		"bazel-workspace",
 		"bazel-" + filepath.Base(topDir),
 	}
 }
@@ -459,8 +485,10 @@ func bazelArtifacts() []string {
 // symlink tree creation binary. Then the latter would not need to depend on
 // the very heavy-weight machinery of soong_build .
 func runSymlinkForestCreation(ctx *android.Context, extraNinjaDeps []string, metricsDir string) string {
+	var ninjaDeps []string
+	var mkdirCount, symlinkCount uint64
+
 	ctx.EventHandler.Do("symlink_forest", func() {
-		var ninjaDeps []string
 		ninjaDeps = append(ninjaDeps, extraNinjaDeps...)
 		verbose := ctx.Config().IsEnvTrue("BP2BUILD_VERBOSE")
 
@@ -469,15 +497,16 @@ func runSymlinkForestCreation(ctx *android.Context, extraNinjaDeps []string, met
 		// or file created/deleted under it would trigger an update of the symlink forest.
 		generatedRoot := shared.JoinPath(ctx.Config().SoongOutDir(), "bp2build")
 		workspaceRoot := shared.JoinPath(ctx.Config().SoongOutDir(), "workspace")
+		var symlinkForestDeps []string
 		ctx.EventHandler.Do("plant", func() {
-			symlinkForestDeps := bp2build.PlantSymlinkForest(
+			symlinkForestDeps, mkdirCount, symlinkCount = bp2build.PlantSymlinkForest(
 				verbose, topDir, workspaceRoot, generatedRoot, excludedFromSymlinkForest(ctx, verbose))
-			ninjaDeps = append(ninjaDeps, symlinkForestDeps...)
 		})
-
-		writeDepFile(cmdlineArgs.SymlinkForestMarker, ctx.EventHandler, ninjaDeps)
-		touch(shared.JoinPath(topDir, cmdlineArgs.SymlinkForestMarker))
+		ninjaDeps = append(ninjaDeps, symlinkForestDeps...)
 	})
+
+	writeDepFile(cmdlineArgs.SymlinkForestMarker, ctx.EventHandler, ninjaDeps)
+	touch(shared.JoinPath(topDir, cmdlineArgs.SymlinkForestMarker))
 	codegenMetrics := bp2build.ReadCodegenMetrics(metricsDir)
 	if codegenMetrics == nil {
 		m := bp2build.CreateCodegenMetrics()
@@ -486,6 +515,8 @@ func runSymlinkForestCreation(ctx *android.Context, extraNinjaDeps []string, met
 		//TODO (usta) we cannot determine if we loaded a stale file, i.e. from an unrelated prior
 		//invocation of codegen. We should simply use a separate .pb file
 	}
+	codegenMetrics.SetSymlinkCount(symlinkCount)
+	codegenMetrics.SetMkDirCount(mkdirCount)
 	writeBp2BuildMetrics(codegenMetrics, ctx.EventHandler, metricsDir)
 	return cmdlineArgs.SymlinkForestMarker
 }
@@ -586,7 +617,7 @@ func runBp2Build(ctx *android.Context, extraNinjaDeps []string, metricsDir strin
 
 		// Run the code-generation phase to convert BazelTargetModules to BUILD files
 		// and print conversion codegenMetrics to the user.
-		codegenContext := bp2build.NewCodegenContext(ctx.Config(), ctx, bp2build.Bp2Build)
+		codegenContext := bp2build.NewCodegenContext(ctx.Config(), ctx, bp2build.Bp2Build, topDir)
 		ctx.EventHandler.Do("codegen", func() {
 			codegenMetrics = bp2build.Codegen(codegenContext)
 		})

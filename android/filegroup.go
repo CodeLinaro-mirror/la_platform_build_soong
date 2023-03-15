@@ -78,6 +78,12 @@ type bazelAidlLibraryAttributes struct {
 	Strip_import_prefix *string
 }
 
+// api srcs can be contained in filegroups.
+// this should be generated in api_bp2build workspace as well.
+func (fg *fileGroup) ConvertWithApiBp2build(ctx TopDownMutatorContext) {
+	fg.ConvertWithBp2build(ctx)
+}
+
 // ConvertWithBp2build performs bp2build conversion of filegroup
 func (fg *fileGroup) ConvertWithBp2build(ctx TopDownMutatorContext) {
 	srcs := bazel.MakeLabelListAttribute(
@@ -232,7 +238,7 @@ func (fg *fileGroup) QueueBazelCall(ctx BaseModuleContext) {
 	bazelCtx.QueueBazelRequest(
 		fg.GetBazelLabel(ctx, fg),
 		cquery.GetOutputFiles,
-		configKey{Common.String(), CommonOS})
+		configKey{arch: Common.String(), osType: CommonOS})
 }
 
 func (fg *fileGroup) IsMixedBuildSupported(ctx BaseModuleContext) bool {
@@ -252,7 +258,7 @@ func (fg *fileGroup) ProcessBazelQueryResponse(ctx ModuleContext) {
 		relativeRoot = filepath.Join(relativeRoot, *fg.properties.Path)
 	}
 
-	filePaths, err := bazelCtx.GetOutputFiles(fg.GetBazelLabel(ctx, fg), configKey{Common.String(), CommonOS})
+	filePaths, err := bazelCtx.GetOutputFiles(fg.GetBazelLabel(ctx, fg), configKey{arch: Common.String(), osType: CommonOS})
 	if err != nil {
 		ctx.ModuleErrorf(err.Error())
 		return

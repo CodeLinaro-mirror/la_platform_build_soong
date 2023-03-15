@@ -61,7 +61,10 @@ func registerOverrideApexModuleTypes(ctx android.RegistrationContext) {
 	ctx.RegisterModuleType("android_app_certificate", java.AndroidAppCertificateFactory)
 	ctx.RegisterModuleType("filegroup", android.FileGroupFactory)
 	ctx.RegisterModuleType("apex", apex.BundleFactory)
+	ctx.RegisterModuleType("apex_defaults", apex.DefaultsFactory)
 	ctx.RegisterModuleType("prebuilt_etc", etc.PrebuiltEtcFactory)
+	ctx.RegisterModuleType("soong_config_module_type", android.SoongConfigModuleTypeFactory)
+	ctx.RegisterModuleType("soong_config_string_variable", android.SoongConfigStringVariableDummyFactory)
 }
 
 func TestApexBundleSimple(t *testing.T) {
@@ -1146,6 +1149,76 @@ apex {
 		}})
 }
 
+func TestApexWithStubLib(t *testing.T) {
+	runApexTestCase(t, Bp2buildTestCase{
+		Description:                "apex - static variant of stub lib should not have apex_available tag",
+		ModuleTypeUnderTest:        "apex",
+		ModuleTypeUnderTestFactory: apex.BundleFactory,
+		Filesystem:                 map[string]string{},
+		Blueprint: `
+cc_library{
+	name: "foo",
+	stubs: { symbol_file: "foo.map.txt", versions: ["28", "29", "current"] },
+	apex_available: ["myapex"],
+}
+
+cc_binary{
+	name: "bar",
+	static_libs: ["foo"],
+	apex_available: ["myapex"],
+}
+
+apex {
+	name: "myapex",
+	manifest: "myapex_manifest.json",
+	file_contexts: ":myapex-file_contexts",
+	binaries: ["bar"],
+	native_shared_libs: ["foo"],
+}
+` + simpleModuleDoNotConvertBp2build("filegroup", "myapex-file_contexts"),
+		ExpectedBazelTargets: []string{
+			MakeBazelTarget("cc_binary", "bar", AttrNameToString{
+				"local_includes": `["."]`,
+				"deps":           `[":foo_bp2build_cc_library_static"]`,
+				"tags":           `["apex_available=myapex"]`,
+			}),
+			MakeBazelTarget("cc_library_static", "foo_bp2build_cc_library_static", AttrNameToString{
+				"local_includes": `["."]`,
+			}),
+			MakeBazelTarget("cc_library_shared", "foo", AttrNameToString{
+				"local_includes":    `["."]`,
+				"stubs_symbol_file": `"foo.map.txt"`,
+				"tags":              `["apex_available=myapex"]`,
+			}),
+			MakeBazelTarget("cc_stub_suite", "foo_stub_libs", AttrNameToString{
+				"soname":         `"foo.so"`,
+				"source_library": `":foo"`,
+				"symbol_file":    `"foo.map.txt"`,
+				"versions": `[
+        "28",
+        "29",
+        "current",
+    ]`,
+			}),
+			MakeBazelTarget("apex", "myapex", AttrNameToString{
+				"file_contexts": `":myapex-file_contexts"`,
+				"manifest":      `"myapex_manifest.json"`,
+				"binaries":      `[":bar"]`,
+				"native_shared_libs_32": `select({
+        "//build/bazel/platforms/arch:arm": [":foo"],
+        "//build/bazel/platforms/arch:x86": [":foo"],
+        "//conditions:default": [],
+    })`,
+				"native_shared_libs_64": `select({
+        "//build/bazel/platforms/arch:arm64": [":foo"],
+        "//build/bazel/platforms/arch:x86_64": [":foo"],
+        "//conditions:default": [],
+    })`,
+			}),
+		},
+	})
+}
+
 func TestApexCertificateIsSrc(t *testing.T) {
 	runApexTestCase(t, Bp2buildTestCase{
 		Description:                "apex - certificate is src",
@@ -1286,6 +1359,90 @@ apex_test {
 				"manifest":      `"apex_manifest.json"`,
 				"testonly":      `True`,
 				"tests":         `[":cc_test_1"]`,
+			}),
+		}})
+}
+
+func TestApexBundle_overridePlusProductVars(t *testing.T) {
+	// Reproduction of b/271424349
+	// Tests that overriding an apex that uses product variables correctly copies the product var
+	// selects over to the override.
+	runOverrideApexTestCase(t, Bp2buildTestCase{
+		Description:                "apex - overriding a module that uses product vars",
+		ModuleTypeUnderTest:        "override_apex",
+		ModuleTypeUnderTestFactory: apex.OverrideApexFactory,
+		Blueprint: `
+soong_config_string_variable {
+    name: "library_linking_strategy",
+    values: [
+        "prefer_static",
+    ],
+}
+
+soong_config_module_type {
+    name: "library_linking_strategy_apex_defaults",
+    module_type: "apex_defaults",
+    config_namespace: "ANDROID",
+    variables: ["library_linking_strategy"],
+    properties: [
+        "manifest",
+        "min_sdk_version",
+    ],
+}
+
+library_linking_strategy_apex_defaults {
+    name: "higher_min_sdk_when_prefer_static",
+    soong_config_variables: {
+        library_linking_strategy: {
+            // Use the R min_sdk_version
+            prefer_static: {},
+            // Override the R min_sdk_version to min_sdk_version that supports dcla
+            conditions_default: {
+                min_sdk_version: "31",
+            },
+        },
+    },
+}
+
+filegroup {
+	name: "foo-file_contexts",
+	srcs: [
+		"com.android.apogee-file_contexts",
+	],
+	bazel_module: { bp2build_available: false },
+}
+
+apex {
+	name: "foo",
+	defaults: ["higher_min_sdk_when_prefer_static"],
+	min_sdk_version: "30",
+	package_name: "pkg_name",
+	file_contexts: ":foo-file_contexts",
+}
+override_apex {
+	name: "override_foo",
+	base: ":foo",
+	package_name: "override_pkg_name",
+}
+`,
+		ExpectedBazelTargets: []string{
+			MakeBazelTarget("apex", "foo", AttrNameToString{
+				"file_contexts": `":foo-file_contexts"`,
+				"manifest":      `"apex_manifest.json"`,
+				"min_sdk_version": `select({
+        "//build/bazel/product_variables:android__library_linking_strategy__prefer_static": "30",
+        "//conditions:default": "31",
+    })`,
+				"package_name": `"pkg_name"`,
+			}), MakeBazelTarget("apex", "override_foo", AttrNameToString{
+				"base_apex_name": `"foo"`,
+				"file_contexts":  `":foo-file_contexts"`,
+				"manifest":       `"apex_manifest.json"`,
+				"min_sdk_version": `select({
+        "//build/bazel/product_variables:android__library_linking_strategy__prefer_static": "30",
+        "//conditions:default": "31",
+    })`,
+				"package_name": `"override_pkg_name"`,
 			}),
 		}})
 }

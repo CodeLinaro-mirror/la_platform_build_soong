@@ -219,13 +219,32 @@ func (a *aapt) aapt2Flags(ctx android.ModuleContext, sdkContext android.SdkConte
 	linkFlags = append(linkFlags, android.JoinWithPrefix(assetDirStrings, "-A "))
 	linkDeps = append(linkDeps, assetDeps...)
 
-	// SDK version flags
-	minSdkVersion, err := sdkContext.MinSdkVersion(ctx).EffectiveVersionString(ctx)
-	if err != nil {
-		ctx.ModuleErrorf("invalid minSdkVersion: %s", err)
+	// Returns the effective version for {min|target}_sdk_version
+	effectiveVersionString := func(sdkVersion android.SdkSpec, minSdkVersion android.SdkSpec) string {
+		// If {min|target}_sdk_version is current, use sdk_version to determine the effective level
+		// This is necessary for vendor modules.
+		// The effective version does not _only_ depend on {min|target}_sdk_version(level),
+		// but also on the sdk_version (kind+level)
+		if minSdkVersion.ApiLevel.IsCurrent() {
+			ret, err := sdkVersion.EffectiveVersionString(ctx)
+			if err != nil {
+				ctx.ModuleErrorf("invalid sdk_version: %s", err)
+			}
+			return ret
+		}
+		ret, err := minSdkVersion.EffectiveVersionString(ctx)
+		if err != nil {
+			ctx.ModuleErrorf("invalid min_sdk_version: %s", err)
+		}
+		return ret
 	}
+	// SDK version flags
+	sdkVersion := sdkContext.SdkVersion(ctx)
+	minSdkVersion := effectiveVersionString(sdkVersion, sdkContext.MinSdkVersion(ctx))
 
 	linkFlags = append(linkFlags, "--min-sdk-version "+minSdkVersion)
+	// Use minSdkVersion for target-sdk-version, even if `target_sdk_version` is set
+	// This behavior has been copied from Make.
 	linkFlags = append(linkFlags, "--target-sdk-version "+minSdkVersion)
 
 	// Version code
@@ -651,6 +670,8 @@ type AARImport struct {
 	// Functionality common to Module and Import.
 	embeddableInModuleAndImport
 
+	providesTransitiveHeaderJars
+
 	properties AARImportProperties
 
 	classpathFile         android.WritablePath
@@ -897,8 +918,11 @@ func (a *AARImport) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		a.assetsPackage = mergedAssets
 	}
 
+	a.collectTransitiveHeaderJars(ctx)
 	ctx.SetProvider(JavaInfoProvider, JavaInfo{
 		HeaderJars:                     android.PathsIfNonNil(a.classpathFile),
+		TransitiveLibsHeaderJars:       a.transitiveLibsHeaderJars,
+		TransitiveStaticLibsHeaderJars: a.transitiveStaticLibsHeaderJars,
 		ImplementationAndResourcesJars: android.PathsIfNonNil(a.classpathFile),
 		ImplementationJars:             android.PathsIfNonNil(a.classpathFile),
 	})
@@ -1031,13 +1055,28 @@ func (a *AARImport) ConvertWithBp2build(ctx android.TopDownMutatorContext) {
 	ctx.CreateBazelTargetModule(
 		bazel.BazelTargetModuleProperties{
 			Rule_class:        "aar_import",
-			Bzl_load_location: "@rules_android//rules:rules.bzl",
+			Bzl_load_location: "//build/bazel/rules/android:rules.bzl",
 		},
 		android.CommonAttributes{Name: name},
 		&bazelAndroidLibraryImport{
 			Aar:     aars.Includes[0],
 			Deps:    bazel.MakeLabelListAttribute(deps),
 			Exports: bazel.MakeLabelListAttribute(exports),
+		},
+	)
+
+	neverlink := true
+	ctx.CreateBazelTargetModule(
+		bazel.BazelTargetModuleProperties{
+			Rule_class:        "android_library",
+			Bzl_load_location: "//build/bazel/rules/android:rules.bzl",
+		},
+		android.CommonAttributes{Name: name + "-neverlink"},
+		&bazelAndroidLibrary{
+			javaLibraryAttributes: &javaLibraryAttributes{
+				Neverlink: bazel.BoolAttribute{Value: &neverlink},
+				Exports:   bazel.MakeSingleLabelListAttribute(bazel.Label{Label: ":" + name}),
+			},
 		},
 	)
 
@@ -1053,13 +1092,15 @@ func (a *AndroidLibrary) ConvertWithBp2build(ctx android.TopDownMutatorContext) 
 	} else if !depLabels.Deps.IsEmpty() {
 		ctx.ModuleErrorf("Module has direct dependencies but no sources. Bazel will not allow this.")
 	}
+	name := a.Name()
+	props := bazel.BazelTargetModuleProperties{
+		Rule_class:        "android_library",
+		Bzl_load_location: "//build/bazel/rules/android:rules.bzl",
+	}
 
 	ctx.CreateBazelTargetModule(
-		bazel.BazelTargetModuleProperties{
-			Rule_class:        "android_library",
-			Bzl_load_location: "@rules_android//rules:rules.bzl",
-		},
-		android.CommonAttributes{Name: a.Name()},
+		props,
+		android.CommonAttributes{Name: name},
 		&bazelAndroidLibrary{
 			&javaLibraryAttributes{
 				javaCommonAttributes: commonAttrs,
@@ -1067,6 +1108,18 @@ func (a *AndroidLibrary) ConvertWithBp2build(ctx android.TopDownMutatorContext) 
 				Exports:              depLabels.StaticDeps,
 			},
 			a.convertAaptAttrsWithBp2Build(ctx),
+		},
+	)
+
+	neverlink := true
+	ctx.CreateBazelTargetModule(
+		props,
+		android.CommonAttributes{Name: name + "-neverlink"},
+		&bazelAndroidLibrary{
+			javaLibraryAttributes: &javaLibraryAttributes{
+				Neverlink: bazel.BoolAttribute{Value: &neverlink},
+				Exports:   bazel.MakeSingleLabelListAttribute(bazel.Label{Label: ":" + name}),
+			},
 		},
 	)
 }

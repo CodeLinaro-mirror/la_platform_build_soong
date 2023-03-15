@@ -17,7 +17,6 @@ package java
 import (
 	"fmt"
 	"reflect"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -294,7 +293,6 @@ func TestAndroidAppImport_DpiVariants(t *testing.T) {
 		},
 	}
 
-	jniRuleRe := regexp.MustCompile("^if \\(zipinfo (\\S+)")
 	for _, test := range testCases {
 		result := android.GroupFixturePreparers(
 			PrepareForTestWithJavaDefaultModules,
@@ -305,13 +303,9 @@ func TestAndroidAppImport_DpiVariants(t *testing.T) {
 		).RunTestWithBp(t, bp)
 
 		variant := result.ModuleForTests("foo", "android_common")
-		jniRuleCommand := variant.Output("jnis-uncompressed/foo.apk").RuleParams.Command
-		matches := jniRuleRe.FindStringSubmatch(jniRuleCommand)
-		if len(matches) != 2 {
-			t.Errorf("failed to extract the src apk path from %q", jniRuleCommand)
-		}
-		if strings.HasSuffix(matches[1], test.expected) {
-			t.Errorf("wrong src apk, expected: %q got: %q", test.expected, matches[1])
+		input := variant.Output("jnis-uncompressed/foo.apk").Input.String()
+		if strings.HasSuffix(input, test.expected) {
+			t.Errorf("wrong src apk, expected: %q got: %q", test.expected, input)
 		}
 
 		provenanceMetaDataRule := variant.Rule("genProvenanceMetaData")
@@ -369,11 +363,14 @@ func TestAndroidAppImport_Filename(t *testing.T) {
 
 		a := variant.Module().(*AndroidAppImport)
 		expectedValues := []string{test.expected}
-		actualValues := android.AndroidMkEntriesForTest(t, ctx, a)[0].EntryMap["LOCAL_INSTALLED_MODULE_STEM"]
+		entries := android.AndroidMkEntriesForTest(t, ctx, a)[0]
+		actualValues := entries.EntryMap["LOCAL_INSTALLED_MODULE_STEM"]
 		if !reflect.DeepEqual(actualValues, expectedValues) {
 			t.Errorf("Incorrect LOCAL_INSTALLED_MODULE_STEM value '%s', expected '%s'",
 				actualValues, expectedValues)
 		}
+		android.AssertStringEquals(t, "unexpected LOCAL_SOONG_MODULE_TYPE", "android_app_import", entries.EntryMap["LOCAL_SOONG_MODULE_TYPE"][0])
+
 		rule := variant.Rule("genProvenanceMetaData")
 		android.AssertStringEquals(t, "Invalid input", test.expectedArtifactPath, rule.Inputs[0].String())
 		android.AssertStringEquals(t, "Invalid output", test.expectedMetaDataPath, rule.Output.String())
@@ -456,7 +453,6 @@ func TestAndroidAppImport_ArchVariants(t *testing.T) {
 		},
 	}
 
-	jniRuleRe := regexp.MustCompile("^if \\(zipinfo (\\S+)")
 	for _, test := range testCases {
 		ctx, _ := testJava(t, test.bp)
 
@@ -469,13 +465,9 @@ func TestAndroidAppImport_ArchVariants(t *testing.T) {
 			android.AssertDeepEquals(t, "Provenance metadata is not empty", android.TestingBuildParams{}, rule)
 			continue
 		}
-		jniRuleCommand := variant.Output("jnis-uncompressed/foo.apk").RuleParams.Command
-		matches := jniRuleRe.FindStringSubmatch(jniRuleCommand)
-		if len(matches) != 2 {
-			t.Errorf("failed to extract the src apk path from %q", jniRuleCommand)
-		}
-		if strings.HasSuffix(matches[1], test.expected) {
-			t.Errorf("wrong src apk, expected: %q got: %q", test.expected, matches[1])
+		input := variant.Output("jnis-uncompressed/foo.apk").Input.String()
+		if strings.HasSuffix(input, test.expected) {
+			t.Errorf("wrong src apk, expected: %q got: %q", test.expected, input)
 		}
 		rule := variant.Rule("genProvenanceMetaData")
 		android.AssertStringEquals(t, "Invalid input", test.artifactPath, rule.Inputs[0].String())
@@ -571,6 +563,7 @@ func TestAndroidAppImport_frameworkRes(t *testing.T) {
 	} else if actualSoongResourceExportPackage[0] != expectedSoongResourceExportPackage {
 		t.Errorf("LOCAL_SOONG_RESOURCE_EXPORT_PACKAGE mismatch, actual: %s, expected: %s", actualSoongResourceExportPackage[0], expectedSoongResourceExportPackage)
 	}
+	android.AssertStringEquals(t, "unexpected LOCAL_SOONG_MODULE_TYPE", "android_app_import", entries.EntryMap["LOCAL_SOONG_MODULE_TYPE"][0])
 }
 
 func TestAndroidAppImport_relativeInstallPath(t *testing.T) {
@@ -686,8 +679,8 @@ func TestAndroidTestImport_NoJinUncompressForPresigned(t *testing.T) {
 		`)
 
 	variant := ctx.ModuleForTests("foo", "android_common")
-	jniRule := variant.Output("jnis-uncompressed/foo.apk").RuleParams.Command
-	if !strings.HasPrefix(jniRule, "if (zipinfo") {
+	jniRule := variant.Output("jnis-uncompressed/foo.apk").BuildParams.Rule.String()
+	if jniRule == android.Cp.String() {
 		t.Errorf("Unexpected JNI uncompress rule command: " + jniRule)
 	}
 

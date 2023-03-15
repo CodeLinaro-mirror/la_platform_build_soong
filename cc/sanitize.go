@@ -76,8 +76,11 @@ var (
 	minimalRuntimeFlags = []string{"-fsanitize-minimal-runtime", "-fno-sanitize-trap=integer,undefined",
 		"-fno-sanitize-recover=integer,undefined"}
 	hwasanGlobalOptions = []string{"heap_history_size=1023", "stack_history_size=512",
-		"export_memory_stats=0", "max_malloc_fill_size=4096", "malloc_fill_byte=0"}
+		"export_memory_stats=0", "max_malloc_fill_size=131072", "malloc_fill_byte=0"}
 	memtagStackCommonFlags = []string{"-march=armv8-a+memtag"}
+
+	hostOnlySanitizeFlags   = []string{"-fno-sanitize-recover=all"}
+	deviceOnlySanitizeFlags = []string{"-fsanitize-trap=all", "-ftrap-function=abort"}
 )
 
 type SanitizerType int
@@ -379,7 +382,12 @@ func (t libraryDependencyTag) SkipApexAllowedDependenciesCheck() bool {
 
 var _ android.SkipApexAllowedDependenciesCheck = (*libraryDependencyTag)(nil)
 
+var exportedVars = android.NewExportedVariables(pctx)
+
 func init() {
+	exportedVars.ExportStringListStaticVariable("HostOnlySanitizeFlags", hostOnlySanitizeFlags)
+	exportedVars.ExportStringList("DeviceOnlySanitizeFlags", deviceOnlySanitizeFlags)
+
 	android.RegisterMakeVarsProvider(pctx, cfiMakeVarsProvider)
 	android.RegisterMakeVarsProvider(pctx, hwasanMakeVarsProvider)
 }
@@ -869,9 +877,9 @@ func (s *sanitize) flags(ctx ModuleContext, flags Flags) Flags {
 			// When fuzzing, we wish to crash with diagnostics on any bug.
 			flags.Local.CFlags = append(flags.Local.CFlags, "-fno-sanitize-trap=all", "-fno-sanitize-recover=all")
 		} else if ctx.Host() {
-			flags.Local.CFlags = append(flags.Local.CFlags, "-fno-sanitize-recover=all")
+			flags.Local.CFlags = append(flags.Local.CFlags, hostOnlySanitizeFlags...)
 		} else {
-			flags.Local.CFlags = append(flags.Local.CFlags, "-fsanitize-trap=all", "-ftrap-function=abort")
+			flags.Local.CFlags = append(flags.Local.CFlags, deviceOnlySanitizeFlags...)
 		}
 
 		if enableMinimalRuntime(s) {
@@ -1708,9 +1716,9 @@ func (s *sanitizerStaticLibsMap) add(c LinkableInterface, name string) {
 // These are to be used by use_soong_sanitized_static_libraries.
 // See build/make/core/binary.mk for more details.
 func (s *sanitizerStaticLibsMap) exportToMake(ctx android.MakeVarsContext) {
-	for _, image := range android.SortedStringKeys(s.libsMap) {
+	for _, image := range android.SortedKeys(s.libsMap) {
 		archMap := s.libsMap[ImageVariantType(image)]
-		for _, arch := range android.SortedStringKeys(archMap) {
+		for _, arch := range android.SortedKeys(archMap) {
 			libs := archMap[arch]
 			sort.Strings(libs)
 
@@ -1786,4 +1794,8 @@ func cfiMakeVarsProvider(ctx android.MakeVarsContext) {
 
 func hwasanMakeVarsProvider(ctx android.MakeVarsContext) {
 	hwasanStaticLibs(ctx.Config()).exportToMake(ctx)
+}
+
+func BazelCcSanitizerToolchainVars(config android.Config) string {
+	return android.BazelToolchainVars(config, exportedVars)
 }

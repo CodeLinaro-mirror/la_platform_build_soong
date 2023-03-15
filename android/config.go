@@ -87,6 +87,8 @@ type CmdArgs struct {
 	BazelModeDev             bool
 	BazelModeStaging         bool
 	BazelForceEnabledModules string
+
+	UseBazelProxy bool
 }
 
 // Build modes that soong_build can run as.
@@ -251,6 +253,10 @@ type config struct {
 	// specified modules. They are passed via the command-line flag
 	// "--bazel-force-enabled-modules"
 	bazelForceEnabledModules map[string]struct{}
+
+	// If true, for any requests to Bazel, communicate with a Bazel proxy using
+	// unix sockets, instead of spawning Bazel as a subprocess.
+	UseBazelProxy bool
 }
 
 type deviceConfig struct {
@@ -397,11 +403,13 @@ product_var_constraints = _product_var_constraints
 arch_variant_product_var_constraints = _arch_variant_product_var_constraints
 `,
 	}
-	err = os.WriteFile(filepath.Join(dir, "product_variables.bzl"), []byte(strings.Join(bzl, "\n")), 0644)
+	err = pathtools.WriteFileIfChanged(filepath.Join(dir, "product_variables.bzl"),
+		[]byte(strings.Join(bzl, "\n")), 0644)
 	if err != nil {
 		return fmt.Errorf("Could not write .bzl config file %s", err)
 	}
-	err = os.WriteFile(filepath.Join(dir, "BUILD"), []byte(bazel.GeneratedBazelFileWarning), 0644)
+	err = pathtools.WriteFileIfChanged(filepath.Join(dir, "BUILD"),
+		[]byte(bazel.GeneratedBazelFileWarning), 0644)
 	if err != nil {
 		return fmt.Errorf("Could not write BUILD config file %s", err)
 	}
@@ -440,6 +448,8 @@ func NewConfig(cmdArgs CmdArgs, availableEnv map[string]string) (Config, error) 
 		mixedBuildDisabledModules: make(map[string]struct{}),
 		mixedBuildEnabledModules:  make(map[string]struct{}),
 		bazelForceEnabledModules:  make(map[string]struct{}),
+
+		UseBazelProxy: cmdArgs.UseBazelProxy,
 	}
 
 	config.deviceConfig = &deviceConfig{
@@ -521,27 +531,33 @@ func NewConfig(cmdArgs CmdArgs, availableEnv map[string]string) (Config, error) 
 		config.AndroidFirstDeviceTarget = FirstTarget(config.Targets[Android], "lib64", "lib32")[0]
 	}
 
-	if cmdArgs.SymlinkForestMarker != "" {
-		config.BuildMode = SymlinkForest
-	} else if cmdArgs.Bp2buildMarker != "" {
-		config.BuildMode = Bp2build
-	} else if cmdArgs.BazelQueryViewDir != "" {
-		config.BuildMode = GenerateQueryView
-	} else if cmdArgs.BazelApiBp2buildDir != "" {
-		config.BuildMode = ApiBp2build
-	} else if cmdArgs.ModuleGraphFile != "" {
-		config.BuildMode = GenerateModuleGraph
-	} else if cmdArgs.DocFile != "" {
-		config.BuildMode = GenerateDocFile
-	} else if cmdArgs.BazelModeDev {
-		config.BuildMode = BazelDevMode
-	} else if cmdArgs.BazelMode {
-		config.BuildMode = BazelProdMode
-	} else if cmdArgs.BazelModeStaging {
-		config.BuildMode = BazelStagingMode
-	} else {
-		config.BuildMode = AnalysisNoBazel
+	setBuildMode := func(arg string, mode SoongBuildMode) {
+		if arg != "" {
+			if config.BuildMode != AnalysisNoBazel {
+				fmt.Fprintf(os.Stderr, "buildMode is already set, illegal argument: %s", arg)
+				os.Exit(1)
+			}
+			config.BuildMode = mode
+		}
 	}
+	setBazelMode := func(arg bool, argName string, mode SoongBuildMode) {
+		if arg {
+			if config.BuildMode != AnalysisNoBazel {
+				fmt.Fprintf(os.Stderr, "buildMode is already set, illegal argument: %s", argName)
+				os.Exit(1)
+			}
+			config.BuildMode = mode
+		}
+	}
+	setBuildMode(cmdArgs.SymlinkForestMarker, SymlinkForest)
+	setBuildMode(cmdArgs.Bp2buildMarker, Bp2build)
+	setBuildMode(cmdArgs.BazelQueryViewDir, GenerateQueryView)
+	setBuildMode(cmdArgs.BazelApiBp2buildDir, ApiBp2build)
+	setBuildMode(cmdArgs.ModuleGraphFile, GenerateModuleGraph)
+	setBuildMode(cmdArgs.DocFile, GenerateDocFile)
+	setBazelMode(cmdArgs.BazelModeDev, "--bazel-mode-dev", BazelDevMode)
+	setBazelMode(cmdArgs.BazelMode, "--bazel-mode", BazelProdMode)
+	setBazelMode(cmdArgs.BazelModeStaging, "--bazel-mode-staging", BazelStagingMode)
 
 	config.BazelContext, err = NewBazelContext(config)
 	config.Bp2buildPackageConfig = GetBp2BuildAllowList()
@@ -583,32 +599,28 @@ func (c *config) mockFileSystem(bp string, fs map[string][]byte) {
 	c.mockBpList = blueprint.MockModuleListFile
 }
 
+// TODO(b/265062549): Add a field to our collected (and uploaded) metrics which
+// describes a reason that we fell back to non-mixed builds.
 // Returns true if "Bazel builds" is enabled. In this mode, part of build
 // analysis is handled by Bazel.
 func (c *config) IsMixedBuildsEnabled() bool {
 	globalMixedBuildsSupport := c.Once(OnceKey{"globalMixedBuildsSupport"}, func() interface{} {
 		if c.productVariables.DeviceArch != nil && *c.productVariables.DeviceArch == "riscv64" {
-			fmt.Fprintln(os.Stderr, "unsupported device arch 'riscv64' for Bazel: falling back to non-mixed build")
 			return false
 		}
 		if c.IsEnvTrue("GLOBAL_THINLTO") {
-			fmt.Fprintln(os.Stderr, "unsupported env var GLOBAL_THINLTO for Bazel: falling back to non-mixed build")
 			return false
 		}
 		if len(c.productVariables.SanitizeHost) > 0 {
-			fmt.Fprintln(os.Stderr, "unsupported product var SanitizeHost for Bazel: falling back to non-mixed build")
 			return false
 		}
 		if len(c.productVariables.SanitizeDevice) > 0 {
-			fmt.Fprintln(os.Stderr, "unsupported product var SanitizeDevice for Bazel: falling back to non-mixed build")
 			return false
 		}
 		if len(c.productVariables.SanitizeDeviceDiag) > 0 {
-			fmt.Fprintln(os.Stderr, "unsupported product var SanitizeDeviceDiag for Bazel: falling back to non-mixed build")
 			return false
 		}
 		if len(c.productVariables.SanitizeDeviceArch) > 0 {
-			fmt.Fprintln(os.Stderr, "unsupported product var SanitizeDeviceArch for Bazel: falling back to non-mixed build")
 			return false
 		}
 		return true
@@ -723,10 +735,6 @@ func (c *config) IsEnvFalse(key string) bool {
 	return value == "0" || value == "n" || value == "no" || value == "off" || value == "false"
 }
 
-func (c *config) TargetsJava17() bool {
-	return c.IsEnvTrue("EXPERIMENTAL_TARGET_JAVA_VERSION_17")
-}
-
 // EnvDeps returns the environment variables this build depends on. The first
 // call to this function blocks future reads from the environment.
 func (c *config) EnvDeps() map[string]string {
@@ -767,6 +775,13 @@ func (c *config) DeviceName() string {
 // NOTE: Do not base conditional logic on this value. It may break product inheritance.
 func (c *config) DeviceProduct() string {
 	return *c.productVariables.DeviceProduct
+}
+
+// HasDeviceProduct returns if the build has a product. A build will not
+// necessarily have a product when --skip-config is passed to soong, like it is
+// in prebuilts/build-tools/build-prebuilts.sh
+func (c *config) HasDeviceProduct() bool {
+	return c.productVariables.DeviceProduct != nil
 }
 
 func (c *config) DeviceResourceOverlays() []string {
@@ -868,6 +883,8 @@ func (c *config) AllSupportedApiLevels() []ApiLevel {
 // DefaultAppTargetSdk returns the API level that platform apps are targeting.
 // This converts a codename to the exact ApiLevel it represents.
 func (c *config) DefaultAppTargetSdk(ctx EarlyModuleContext) ApiLevel {
+	// This logic is replicated in starlark, if changing logic here update starlark code too
+	// https://cs.android.com/android/platform/superproject/+/master:build/bazel/rules/common/api.bzl;l=72;drc=231c7e8c8038fd478a79eb68aa5b9f5c64e0e061
 	if Bool(c.productVariables.Platform_sdk_final) {
 		return c.PlatformSdkVersion()
 	}
@@ -1491,6 +1508,10 @@ func (c *config) ApexCompressionEnabled() bool {
 	return Bool(c.productVariables.CompressedApex) && !c.UnbundledBuildApps()
 }
 
+func (c *config) ApexTrimEnabled() bool {
+	return Bool(c.productVariables.TrimmedApex)
+}
+
 func (c *config) EnforceSystemCertificate() bool {
 	return Bool(c.productVariables.EnforceSystemCertificate)
 }
@@ -1738,6 +1759,10 @@ func (c *deviceConfig) BuildBrokenTrebleSyspropNeverallow() bool {
 	return c.config.productVariables.BuildBrokenTrebleSyspropNeverallow
 }
 
+func (c *deviceConfig) BuildBrokenUsesSoongPython2Modules() bool {
+	return c.config.productVariables.BuildBrokenUsesSoongPython2Modules
+}
+
 func (c *deviceConfig) BuildDebugfsRestrictionsEnabled() bool {
 	return c.config.productVariables.BuildDebugfsRestrictionsEnabled
 }
@@ -1815,4 +1840,15 @@ func (c *config) LogMixedBuild(ctx BaseModuleContext, useBazel bool) {
 	} else {
 		c.mixedBuildDisabledModules[moduleName] = struct{}{}
 	}
+}
+
+// ApiSurfaces directory returns the source path inside the api_surfaces repo
+// (relative to workspace root).
+func (c *config) ApiSurfacesDir(s ApiSurface, version string) string {
+	return filepath.Join(
+		"build",
+		"bazel",
+		"api_surfaces",
+		s.String(),
+		version)
 }

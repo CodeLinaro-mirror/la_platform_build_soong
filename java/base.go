@@ -395,7 +395,6 @@ type Module struct {
 	android.ModuleBase
 	android.DefaultableModuleBase
 	android.ApexModuleBase
-	android.SdkBase
 	android.BazelModuleBase
 
 	// Functionality common to Module and Import.
@@ -1004,7 +1003,7 @@ func (j *Module) collectJavacFlags(
 					topLevelDirs[srcFileParts[0]] = true
 				}
 			}
-			patchPaths = append(patchPaths, android.SortedStringKeys(topLevelDirs)...)
+			patchPaths = append(patchPaths, android.SortedKeys(topLevelDirs)...)
 
 			classPath := flags.classpath.FormJavaClassPath("")
 			if classPath != "" {
@@ -1488,7 +1487,14 @@ func (j *Module) compile(ctx android.ModuleContext, aaptSrcJar android.Path) {
 			}
 			// Dex compilation
 			var dexOutputFile android.OutputPath
-			dexOutputFile = j.dexer.compileDex(ctx, flags, j.MinSdkVersion(ctx), implementationAndResourcesJar, jarName)
+			params := &compileDexParams{
+				flags:         flags,
+				sdkVersion:    j.SdkVersion(ctx),
+				minSdkVersion: j.MinSdkVersion(ctx),
+				classesJar:    implementationAndResourcesJar,
+				jarName:       jarName,
+			}
+			dexOutputFile = j.dexer.compileDex(ctx, params)
 			if ctx.Failed() {
 				return
 			}
@@ -1584,6 +1590,8 @@ func (j *Module) compile(ctx android.ModuleContext, aaptSrcJar android.Path) {
 
 	ctx.SetProvider(JavaInfoProvider, JavaInfo{
 		HeaderJars:                     android.PathsIfNonNil(j.headerJarFile),
+		TransitiveLibsHeaderJars:       j.transitiveLibsHeaderJars,
+		TransitiveStaticLibsHeaderJars: j.transitiveStaticLibsHeaderJars,
 		ImplementationAndResourcesJars: android.PathsIfNonNil(j.implementationAndResourcesJar),
 		ImplementationJars:             android.PathsIfNonNil(j.implementationJarFile),
 		ResourceJars:                   android.PathsIfNonNil(j.resourceJar),
@@ -1720,6 +1728,52 @@ func (j *Module) instrument(ctx android.ModuleContext, flags javaBuilderFlags,
 	return instrumentedJar
 }
 
+type providesTransitiveHeaderJars struct {
+	// set of header jars for all transitive libs deps
+	transitiveLibsHeaderJars *android.DepSet
+	// set of header jars for all transitive static libs deps
+	transitiveStaticLibsHeaderJars *android.DepSet
+}
+
+func (j *providesTransitiveHeaderJars) TransitiveLibsHeaderJars() *android.DepSet {
+	return j.transitiveLibsHeaderJars
+}
+
+func (j *providesTransitiveHeaderJars) TransitiveStaticLibsHeaderJars() *android.DepSet {
+	return j.transitiveStaticLibsHeaderJars
+}
+
+func (j *providesTransitiveHeaderJars) collectTransitiveHeaderJars(ctx android.ModuleContext) {
+	directLibs := android.Paths{}
+	directStaticLibs := android.Paths{}
+	transitiveLibs := []*android.DepSet{}
+	transitiveStaticLibs := []*android.DepSet{}
+	ctx.VisitDirectDeps(func(module android.Module) {
+		// don't add deps of the prebuilt version of the same library
+		if ctx.ModuleName() == android.RemoveOptionalPrebuiltPrefix(module.Name()) {
+			return
+		}
+
+		dep := ctx.OtherModuleProvider(module, JavaInfoProvider).(JavaInfo)
+		if dep.TransitiveLibsHeaderJars != nil {
+			transitiveLibs = append(transitiveLibs, dep.TransitiveLibsHeaderJars)
+		}
+		if dep.TransitiveStaticLibsHeaderJars != nil {
+			transitiveStaticLibs = append(transitiveStaticLibs, dep.TransitiveStaticLibsHeaderJars)
+		}
+
+		tag := ctx.OtherModuleDependencyTag(module)
+		_, isUsesLibDep := tag.(usesLibraryDependencyTag)
+		if tag == libTag || tag == r8LibraryJarTag || isUsesLibDep {
+			directLibs = append(directLibs, dep.HeaderJars...)
+		} else if tag == staticLibTag {
+			directStaticLibs = append(directStaticLibs, dep.HeaderJars...)
+		}
+	})
+	j.transitiveLibsHeaderJars = android.NewDepSet(android.POSTORDER, directLibs, transitiveLibs)
+	j.transitiveStaticLibsHeaderJars = android.NewDepSet(android.POSTORDER, directStaticLibs, transitiveStaticLibs)
+}
+
 func (j *Module) HeaderJars() android.Paths {
 	if j.headerJarFile == nil {
 		return nil
@@ -1791,15 +1845,18 @@ func (j *Module) DepIsInSameApex(ctx android.BaseModuleContext, dep android.Modu
 
 // Implements android.ApexModule
 func (j *Module) ShouldSupportSdkVersion(ctx android.BaseModuleContext, sdkVersion android.ApiLevel) error {
-	sdkSpec := j.MinSdkVersion(ctx)
-	if !sdkSpec.Specified() {
+	sdkVersionSpec := j.SdkVersion(ctx)
+	minSdkVersionSpec := j.MinSdkVersion(ctx)
+	if !minSdkVersionSpec.Specified() {
 		return fmt.Errorf("min_sdk_version is not specified")
 	}
-	if sdkSpec.Kind == android.SdkCore {
+	// If the module is compiling against core (via sdk_version), skip comparison check.
+	if sdkVersionSpec.Kind == android.SdkCore {
 		return nil
 	}
-	if sdkSpec.ApiLevel.GreaterThan(sdkVersion) {
-		return fmt.Errorf("newer SDK(%v)", sdkSpec.ApiLevel)
+	minSdkVersion := minSdkVersionSpec.ApiLevel
+	if minSdkVersion.GreaterThan(sdkVersion) {
+		return fmt.Errorf("newer SDK(%v)", minSdkVersion)
 	}
 	return nil
 }
@@ -1948,6 +2005,7 @@ func (j *Module) collectDeps(ctx android.ModuleContext) deps {
 
 	sdkLinkType, _ := j.getSdkLinkType(ctx, ctx.ModuleName())
 
+	j.collectTransitiveHeaderJars(ctx)
 	ctx.VisitDirectDeps(func(module android.Module) {
 		otherName := ctx.OtherModuleName(module)
 		tag := ctx.OtherModuleDependencyTag(module)
