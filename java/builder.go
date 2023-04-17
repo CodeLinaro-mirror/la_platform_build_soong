@@ -252,6 +252,18 @@ var (
 			Command:     `${config.Zip2ZipCmd} -i ${in} -o ${out} -x 'META-INF/services/**/*'`,
 			CommandDeps: []string{"${config.Zip2ZipCmd}"},
 		})
+	checkZipAlignment = pctx.AndroidStaticRule("checkzipalign",
+		blueprint.RuleParams{
+			Command: "if ! ${config.ZipAlign} -c -p 4 $in > /dev/null; then " +
+				"echo $in: Improper package alignment >&2; " +
+				"exit 1; " +
+				"else " +
+				"touch $out; " +
+				"fi",
+			CommandDeps: []string{"${config.ZipAlign}"},
+			Description: "Check zip alignment",
+		},
+	)
 )
 
 func init() {
