@@ -372,7 +372,7 @@ var (
 
 	// prebuilts/clang default settings.
 	ClangDefaultBase         = "prebuilts/clang/host"
-	ClangDefaultVersion      = "clang-r487747"
+	ClangDefaultVersion      = "clang-r487747c"
 	ClangDefaultShortVersion = "17"
 
 	// Directories with warnings from Android.bp files.
@@ -382,6 +382,9 @@ var (
 	}
 
 	VersionScriptFlagPrefix = "-Wl,--version-script,"
+
+	VisibilityHiddenFlag  = "-fvisibility=hidden"
+	VisibilityDefaultFlag = "-fvisibility=default"
 )
 
 // BazelCcToolchainVars generates bzl file content containing variables for
@@ -471,6 +474,9 @@ func init() {
 	exportedVars.ExportString("ExperimentalCppStdVersion", ExperimentalCppStdVersion)
 
 	exportedVars.ExportString("VersionScriptFlagPrefix", VersionScriptFlagPrefix)
+
+	exportedVars.ExportString("VisibilityHiddenFlag", VisibilityHiddenFlag)
+	exportedVars.ExportString("VisibilityDefaultFlag", VisibilityDefaultFlag)
 
 	// Everything in these lists is a crime against abstraction and dependency tracking.
 	// Do not add anything to this list.

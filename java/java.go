@@ -1611,7 +1611,7 @@ func (ap *JavaApiContribution) GenerateAndroidBuildActions(ctx android.ModuleCon
 }
 
 type JavaApiLibraryDepsInfo struct {
-	StubsJar    android.Path
+	JavaInfo
 	StubsSrcJar android.Path
 }
 
@@ -1820,7 +1820,7 @@ func (al *ApiLibrary) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 			staticLibs = append(staticLibs, provider.HeaderJars...)
 		case depApiSrcsTag:
 			provider := ctx.OtherModuleProvider(dep, JavaApiLibraryDepsProvider).(JavaApiLibraryDepsInfo)
-			classPaths = append(classPaths, provider.StubsJar)
+			classPaths = append(classPaths, provider.HeaderJars...)
 			depApiSrcsStubsSrcJar = provider.StubsSrcJar
 		}
 	})
@@ -1899,7 +1899,9 @@ func (al *ApiLibrary) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	})
 
 	ctx.SetProvider(JavaApiLibraryDepsProvider, JavaApiLibraryDepsInfo{
-		StubsJar:    al.stubsJar,
+		JavaInfo: JavaInfo{
+			HeaderJars: android.PathsIfNonNil(al.stubsJar),
+		},
 		StubsSrcJar: al.stubsSrcJar,
 	})
 }
@@ -2737,9 +2739,11 @@ func (m *Library) convertJavaResourcesAttributes(ctx android.TopDownMutatorConte
 type javaCommonAttributes struct {
 	*javaResourcesAttributes
 	*kotlinAttributes
-	Srcs      bazel.LabelListAttribute
-	Plugins   bazel.LabelListAttribute
-	Javacopts bazel.StringListAttribute
+	Srcs         bazel.LabelListAttribute
+	Plugins      bazel.LabelListAttribute
+	Javacopts    bazel.StringListAttribute
+	Sdk_version  bazel.StringAttribute
+	Java_version bazel.StringAttribute
 }
 
 type javaDependencyLabels struct {
@@ -2870,10 +2874,6 @@ func (m *Library) convertLibraryAttrsBp2Build(ctx android.TopDownMutatorContext)
 	if m.properties.Javacflags != nil {
 		javacopts = append(javacopts, m.properties.Javacflags...)
 	}
-	if m.properties.Java_version != nil {
-		javaVersion := normalizeJavaVersion(ctx, *m.properties.Java_version).String()
-		javacopts = append(javacopts, fmt.Sprintf("-source %s -target %s", javaVersion, javaVersion))
-	}
 
 	epEnabled := m.properties.Errorprone.Enabled
 	//TODO(b/227504307) add configuration that depends on RUN_ERROR_PRONE environment variable
@@ -2887,7 +2887,9 @@ func (m *Library) convertLibraryAttrsBp2Build(ctx android.TopDownMutatorContext)
 		Plugins: bazel.MakeLabelListAttribute(
 			android.BazelLabelForModuleDeps(ctx, m.properties.Plugins),
 		),
-		Javacopts: bazel.MakeStringListAttribute(javacopts),
+		Javacopts:    bazel.MakeStringListAttribute(javacopts),
+		Java_version: bazel.StringAttribute{Value: m.properties.Java_version},
+		Sdk_version:  bazel.StringAttribute{Value: m.deviceProperties.Sdk_version},
 	}
 
 	for axis, configToProps := range archVariantProps {
@@ -2904,10 +2906,6 @@ func (m *Library) convertLibraryAttrsBp2Build(ctx android.TopDownMutatorContext)
 		}
 	}
 
-	if m.properties.Static_libs != nil {
-		staticDeps.Append(android.BazelLabelForModuleDeps(ctx, android.LastUniqueStrings(android.CopyOf(m.properties.Static_libs))))
-	}
-
 	protoDepLabel := bp2buildProto(ctx, &m.Module, srcPartitions[protoSrcPartition])
 	// Soong does not differentiate between a java_library and the Bazel equivalent of
 	// a java_proto_library + proto_library pair. Instead, in Soong proto sources are
@@ -2919,7 +2917,18 @@ func (m *Library) convertLibraryAttrsBp2Build(ctx android.TopDownMutatorContext)
 
 	depLabels := &javaDependencyLabels{}
 	depLabels.Deps = deps
-	depLabels.StaticDeps = bazel.MakeLabelListAttribute(staticDeps)
+
+	for axis, configToProps := range archVariantProps {
+		for config, _props := range configToProps {
+			if archProps, ok := _props.(*CommonProperties); ok {
+				archStaticLibs := android.BazelLabelForModuleDeps(
+					ctx,
+					android.LastUniqueStrings(android.CopyOf(archProps.Static_libs)))
+				depLabels.StaticDeps.SetSelectValue(axis, config, archStaticLibs)
+			}
+		}
+	}
+	depLabels.StaticDeps.Value.Append(staticDeps)
 
 	hasKotlin := !kotlinSrcs.IsEmpty()
 	commonAttrs.kotlinAttributes = &kotlinAttributes{
@@ -2971,19 +2980,9 @@ func javaLibraryBp2Build(ctx android.TopDownMutatorContext, m *Library) {
 	deps := depLabels.Deps
 	if !commonAttrs.Srcs.IsEmpty() {
 		deps.Append(depLabels.StaticDeps) // we should only append these if there are sources to use them
-
-		sdkVersion := m.SdkVersion(ctx)
-		if sdkVersion.Kind == android.SdkPublic && sdkVersion.ApiLevel == android.FutureApiLevel {
-			// TODO(b/220869005) remove forced dependency on current public android.jar
-			deps.Add(bazel.MakeLabelAttribute("//prebuilts/sdk:public_current_android_sdk_java_import"))
-		} else if sdkVersion.Kind == android.SdkSystem && sdkVersion.ApiLevel == android.FutureApiLevel {
-			// TODO(b/215230098) remove forced dependency on current public android.jar
-			deps.Add(bazel.MakeLabelAttribute("//prebuilts/sdk:system_current_android_sdk_java_import"))
-		}
 	} else if !deps.IsEmpty() {
 		ctx.ModuleErrorf("Module has direct dependencies but no sources. Bazel will not allow this.")
 	}
-
 	var props bazel.BazelTargetModuleProperties
 	attrs := &javaLibraryAttributes{
 		javaCommonAttributes: commonAttrs,
@@ -3003,6 +3002,10 @@ func javaLibraryBp2Build(ctx android.TopDownMutatorContext, m *Library) {
 	neverLinkAttrs := &javaLibraryAttributes{
 		Exports:   bazel.MakeSingleLabelListAttribute(bazel.Label{Label: ":" + name}),
 		Neverlink: bazel.BoolAttribute{Value: &neverlinkProp},
+		javaCommonAttributes: &javaCommonAttributes{
+			Sdk_version:  bazel.StringAttribute{Value: m.deviceProperties.Sdk_version},
+			Java_version: bazel.StringAttribute{Value: m.properties.Java_version},
+		},
 	}
 	ctx.CreateBazelTargetModule(props, android.CommonAttributes{Name: name + "-neverlink"}, neverLinkAttrs)
 
@@ -3142,6 +3145,9 @@ func (i *Import) ConvertWithBp2build(ctx android.TopDownMutatorContext) {
 	neverlinkAttrs := &javaLibraryAttributes{
 		Neverlink: bazel.BoolAttribute{Value: &neverlink},
 		Exports:   bazel.MakeSingleLabelListAttribute(bazel.Label{Label: ":" + name}),
+		javaCommonAttributes: &javaCommonAttributes{
+			Sdk_version: bazel.StringAttribute{Value: proptools.StringPtr("none")},
+		},
 	}
 	ctx.CreateBazelTargetModule(
 		javaLibraryBazelTargetModuleProperties(),

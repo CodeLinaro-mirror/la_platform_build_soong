@@ -137,6 +137,10 @@ type apexBundleProperties struct {
 	// List of filesystem images that are embedded inside this APEX bundle.
 	Filesystems []string
 
+	// The minimum SDK version that this APEX must support at minimum. This is usually set to
+	// the SDK version that the APEX was first introduced.
+	Min_sdk_version *string
+
 	// Whether this APEX is considered updatable or not. When set to true, this will enforce
 	// additional rules for making sure that the APEX is truly updatable. To be updatable,
 	// min_sdk_version should be set as well. This will also disable the size optimizations like
@@ -380,10 +384,6 @@ type overridableProperties struct {
 
 	// Trim against a specific Dynamic Common Lib APEX
 	Trim_against *string
-
-	// The minimum SDK version that this APEX must support at minimum. This is usually set to
-	// the SDK version that the APEX was first introduced.
-	Min_sdk_version *string
 }
 
 type apexBundle struct {
@@ -1659,7 +1659,6 @@ func apexFileForNativeLibrary(ctx android.BaseModuleContext, ccMod *cc.Module, h
 	if ccMod.Target().NativeBridge == android.NativeBridgeEnabled {
 		dirInApex = filepath.Join(dirInApex, ccMod.Target().NativeBridgeRelativePath)
 	}
-	dirInApex = filepath.Join(dirInApex, ccMod.RelativeInstallPath())
 	if handleSpecialLibs && cc.InstallToBootstrap(ccMod.BaseModuleName(), ctx.Config()) {
 		// Special case for Bionic libs and other libs installed with them. This is to
 		// prevent those libs from being included in the search path
@@ -1672,6 +1671,10 @@ func apexFileForNativeLibrary(ctx android.BaseModuleContext, ccMod *cc.Module, h
 		// loading of them, which isn't supported.
 		dirInApex = filepath.Join(dirInApex, "bionic")
 	}
+	// This needs to go after the runtime APEX handling because otherwise we would get
+	// weird paths like lib64/rel_install_path/bionic rather than
+	// lib64/bionic/rel_install_path.
+	dirInApex = filepath.Join(dirInApex, ccMod.RelativeInstallPath())
 
 	fileToCopy := android.OutputFileForModule(ctx, ccMod, "")
 	androidMkModuleName := ccMod.BaseModuleName() + ccMod.Properties.SubName
@@ -2273,16 +2276,13 @@ func (a *apexBundle) depVisitor(vctx *visitorContext, ctx android.ModuleContext,
 				ctx.PropertyErrorf("sh_binaries", "%q is not a sh_binary module", depName)
 			}
 		case bcpfTag:
-			bcpfModule, ok := child.(*java.BootclasspathFragmentModule)
+			_, ok := child.(*java.BootclasspathFragmentModule)
 			if !ok {
 				ctx.PropertyErrorf("bootclasspath_fragments", "%q is not a bootclasspath_fragment module", depName)
 				return false
 			}
 
 			vctx.filesInfo = append(vctx.filesInfo, apexBootclasspathFragmentFiles(ctx, child)...)
-			for _, makeModuleName := range bcpfModule.BootImageDeviceInstallMakeModules() {
-				a.makeModulesToInstall = append(a.makeModulesToInstall, makeModuleName)
-			}
 			return true
 		case sscpfTag:
 			if _, ok := child.(*java.SystemServerClasspathModule); !ok {
@@ -2648,26 +2648,13 @@ func apexBootclasspathFragmentFiles(ctx android.ModuleContext, module blueprint.
 	bootclasspathFragmentInfo := ctx.OtherModuleProvider(module, java.BootclasspathFragmentApexContentInfoProvider).(java.BootclasspathFragmentApexContentInfo)
 	var filesToAdd []apexFile
 
-	// Add the boot image files, e.g. .art, .oat and .vdex files.
-	if bootclasspathFragmentInfo.ShouldInstallBootImageInApex() {
-		for arch, files := range bootclasspathFragmentInfo.AndroidBootImageFilesByArchType() {
-			dirInApex := filepath.Join("javalib", arch.String())
-			for _, f := range files {
-				androidMkModuleName := "javalib_" + arch.String() + "_" + filepath.Base(f.String())
-				// TODO(b/177892522) - consider passing in the bootclasspath fragment module here instead of nil
-				af := newApexFile(ctx, f, androidMkModuleName, dirInApex, etc, nil)
-				filesToAdd = append(filesToAdd, af)
-			}
-		}
-	}
-
 	// Add classpaths.proto config.
 	if af := apexClasspathFragmentProtoFile(ctx, module); af != nil {
 		filesToAdd = append(filesToAdd, *af)
 	}
 
 	pathInApex := bootclasspathFragmentInfo.ProfileInstallPathInApex()
-	if pathInApex != "" && !java.SkipDexpreoptBootJars(ctx) {
+	if pathInApex != "" {
 		pathOnHost := bootclasspathFragmentInfo.ProfilePathOnHost()
 		tempPath := android.PathForModuleOut(ctx, "boot_image_profile", pathInApex)
 
@@ -2937,7 +2924,7 @@ func (a *apexBundle) minSdkVersionValue(ctx android.EarlyModuleContext) string {
 	// Only override the minSdkVersion value on Apexes which already specify
 	// a min_sdk_version (it's optional for non-updatable apexes), and that its
 	// min_sdk_version value is lower than the one to override with.
-	minApiLevel := minSdkVersionFromValue(ctx, proptools.String(a.overridableProperties.Min_sdk_version))
+	minApiLevel := minSdkVersionFromValue(ctx, proptools.String(a.properties.Min_sdk_version))
 	if minApiLevel.IsNone() {
 		return ""
 	}
@@ -3588,8 +3575,8 @@ func convertWithBp2build(a *apexBundle, ctx android.TopDownMutatorContext) (baze
 	// TODO(b/219503907) this would need to be set to a.MinSdkVersionValue(ctx) but
 	// given it's coming via config, we probably don't want to put it in here.
 	var minSdkVersion bazel.StringAttribute
-	if a.overridableProperties.Min_sdk_version != nil {
-		minSdkVersion.SetValue(*a.overridableProperties.Min_sdk_version)
+	if a.properties.Min_sdk_version != nil {
+		minSdkVersion.SetValue(*a.properties.Min_sdk_version)
 	}
 	if props, ok := productVariableProps[minSdkVersionPropName]; ok {
 		for c, p := range props {
