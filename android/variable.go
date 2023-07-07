@@ -227,6 +227,7 @@ type productVariables struct {
 	Platform_sdk_extension_version            *int     `json:",omitempty"`
 	Platform_base_sdk_extension_version       *int     `json:",omitempty"`
 	Platform_version_active_codenames         []string `json:",omitempty"`
+	Platform_version_all_preview_codenames    []string `json:",omitempty"`
 	Platform_vndk_version                     *string  `json:",omitempty"`
 	Platform_systemsdk_versions               []string `json:",omitempty"`
 	Platform_security_patch                   *string  `json:",omitempty"`
@@ -245,6 +246,7 @@ type productVariables struct {
 	DeviceVndkVersion                     *string  `json:",omitempty"`
 	DeviceCurrentApiLevelForVendorModules *string  `json:",omitempty"`
 	DeviceSystemSdkVersions               []string `json:",omitempty"`
+	DeviceMaxPageSizeSupported            *string  `json:",omitempty"`
 
 	RecoverySnapshotVersion *string `json:",omitempty"`
 	RamdiskSnapshotVersion *string `json:",omitempty"`
@@ -343,6 +345,8 @@ type productVariables struct {
 	MemtagHeapExcludePaths      []string `json:",omitempty"`
 	MemtagHeapAsyncIncludePaths []string `json:",omitempty"`
 	MemtagHeapSyncIncludePaths  []string `json:",omitempty"`
+
+	HWASanIncludePaths []string `json:",omitempty"`
 
 	VendorPath    *string `json:",omitempty"`
 	OdmPath       *string `json:",omitempty"`
@@ -506,7 +510,14 @@ type productVariables struct {
 
 	IgnorePrefer32OnDevice bool `json:",omitempty"`
 
-	IncludeTags []string `json:",omitempty"`
+	IncludeTags    []string `json:",omitempty"`
+	SourceRootDirs []string `json:",omitempty"`
+
+	AfdoProfiles []string `json:",omitempty"`
+
+	ProductManufacturer string   `json:",omitempty"`
+	ProductBrand        string   `json:",omitempty"`
+	BuildVersionTags    []string `json:",omitempty"`
 }
 
 func boolPtr(v bool) *bool {
@@ -525,13 +536,14 @@ func (v *productVariables) SetDefaultConfig() {
 	*v = productVariables{
 		BuildNumberFile: stringPtr("build_number.txt"),
 
-		Platform_version_name:               stringPtr("S"),
-		Platform_base_sdk_extension_version: intPtr(30),
-		Platform_sdk_version:                intPtr(30),
-		Platform_sdk_codename:               stringPtr("S"),
-		Platform_sdk_final:                  boolPtr(false),
-		Platform_version_active_codenames:   []string{"S"},
-		Platform_vndk_version:               stringPtr("S"),
+		Platform_version_name:                  stringPtr("S"),
+		Platform_base_sdk_extension_version:    intPtr(30),
+		Platform_sdk_version:                   intPtr(30),
+		Platform_sdk_codename:                  stringPtr("S"),
+		Platform_sdk_final:                     boolPtr(false),
+		Platform_version_active_codenames:      []string{"S"},
+		Platform_version_all_preview_codenames: []string{"S"},
+		Platform_vndk_version:                  stringPtr("S"),
 
 		HostArch:                   stringPtr("x86_64"),
 		HostSecondaryArch:          stringPtr("x86"),
@@ -545,6 +557,7 @@ func (v *productVariables) SetDefaultConfig() {
 		DeviceSecondaryArchVariant: stringPtr("armv8-a"),
 		DeviceSecondaryCpuVariant:  stringPtr("generic"),
 		DeviceSecondaryAbi:         []string{"armeabi-v7a", "armeabi"},
+		DeviceMaxPageSizeSupported: stringPtr("4096"),
 
 		AAPTConfig:          []string{"normal", "large", "xlarge", "hdpi", "xhdpi", "xxhdpi"},
 		AAPTPreferredConfig: stringPtr("xhdpi"),

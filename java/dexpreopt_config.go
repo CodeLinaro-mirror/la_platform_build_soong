@@ -44,6 +44,8 @@ var (
 	bootImageConfigRawKey  = android.NewOnceKey("bootImageConfigRaw")
 	artBootImageName       = "art"
 	frameworkBootImageName = "boot"
+	mainlineBootImageName  = "mainline"
+	bootImageStem          = "boot"
 )
 
 func genBootImageConfigRaw(ctx android.PathContext) map[string]*bootImageConfig {
@@ -51,38 +53,50 @@ func genBootImageConfigRaw(ctx android.PathContext) map[string]*bootImageConfig 
 		global := dexpreopt.GetGlobalConfig(ctx)
 
 		artModules := global.ArtApexJars
-		frameworkModules := global.BootJars.RemoveList(artModules)
+		frameworkModules := global.BootJars // This includes `artModules`.
+		mainlineBcpModules := global.ApexBootJars
+		frameworkSubdir := "system/framework"
 
 		// ART config for the primary boot image in the ART apex.
 		// It includes the Core Libraries.
 		artCfg := bootImageConfig{
 			name:                     artBootImageName,
-			stem:                     "boot",
-			installDirOnHost:         "apex/art_boot_images/javalib",
-			installDirOnDevice:       "system/framework",
+			stem:                     bootImageStem,
+			installDir:               "apex/art_boot_images/javalib",
 			profileInstallPathInApex: "etc/boot-image.prof",
 			modules:                  artModules,
 			preloadedClassesFile:     "art/build/boot/preloaded-classes",
 			compilerFilter:           "speed-profile",
+			singleImage:              false,
 		}
 
 		// Framework config for the boot image extension.
 		// It includes framework libraries and depends on the ART config.
-		frameworkSubdir := "system/framework"
 		frameworkCfg := bootImageConfig{
-			extends:              &artCfg,
 			name:                 frameworkBootImageName,
-			stem:                 "boot",
-			installDirOnHost:     frameworkSubdir,
-			installDirOnDevice:   frameworkSubdir,
+			stem:                 bootImageStem,
+			installDir:           frameworkSubdir,
 			modules:              frameworkModules,
 			preloadedClassesFile: "frameworks/base/config/preloaded-classes",
 			compilerFilter:       "speed-profile",
+			singleImage:          false,
+			profileImports:       []*bootImageConfig{&artCfg},
+		}
+
+		mainlineCfg := bootImageConfig{
+			extends:        &frameworkCfg,
+			name:           mainlineBootImageName,
+			stem:           bootImageStem,
+			installDir:     frameworkSubdir,
+			modules:        mainlineBcpModules,
+			compilerFilter: "verify",
+			singleImage:    true,
 		}
 
 		return map[string]*bootImageConfig{
 			artBootImageName:       &artCfg,
 			frameworkBootImageName: &frameworkCfg,
+			mainlineBootImageName:  &mainlineCfg,
 		}
 	}).(map[string]*bootImageConfig)
 }
@@ -91,7 +105,8 @@ func genBootImageConfigRaw(ctx android.PathContext) map[string]*bootImageConfig 
 func genBootImageConfigs(ctx android.PathContext) map[string]*bootImageConfig {
 	return ctx.Config().Once(bootImageConfigKey, func() interface{} {
 		targets := dexpreoptTargets(ctx)
-		deviceDir := android.PathForOutput(ctx, ctx.Config().DeviceName())
+		archType := ctx.Config().Targets[android.Android][0].Arch.ArchType
+		deviceDir := android.PathForOutput(ctx, toDexpreoptDirName(archType))
 
 		configs := genBootImageConfigRaw(ctx)
 
@@ -114,12 +129,12 @@ func genBootImageConfigs(ctx android.PathContext) map[string]*bootImageConfig {
 			// Create target-specific variants.
 			for _, target := range targets {
 				arch := target.Arch.ArchType
-				imageDir := c.dir.Join(ctx, target.Os.String(), c.installDirOnHost, arch.String())
+				imageDir := c.dir.Join(ctx, target.Os.String(), c.installDir, arch.String())
 				variant := &bootImageVariant{
 					bootImageConfig:   c,
 					target:            target,
 					imagePathOnHost:   imageDir.Join(ctx, imageName),
-					imagePathOnDevice: filepath.Join("/", c.installDirOnDevice, arch.String(), imageName),
+					imagePathOnDevice: filepath.Join("/", c.installDir, arch.String(), imageName),
 					imagesDeps:        c.moduleFiles(ctx, imageDir, ".art", ".oat", ".vdex"),
 					dexLocations:      c.modules.DevicePaths(ctx.Config(), target.Os),
 				}
@@ -174,6 +189,10 @@ func defaultBootImageConfig(ctx android.PathContext) *bootImageConfig {
 	return genBootImageConfigs(ctx)[frameworkBootImageName]
 }
 
+func mainlineBootImageConfig(ctx android.PathContext) *bootImageConfig {
+	return genBootImageConfigs(ctx)[mainlineBootImageName]
+}
+
 // Apex boot config allows to access build/install paths of apex boot jars without going
 // through the usual trouble of registering dependencies on those modules and extracting build paths
 // from those dependencies.
@@ -199,8 +218,8 @@ var updatableBootConfigKey = android.NewOnceKey("apexBootConfig")
 func GetApexBootConfig(ctx android.PathContext) apexBootConfig {
 	return ctx.Config().Once(updatableBootConfigKey, func() interface{} {
 		apexBootJars := dexpreopt.GetGlobalConfig(ctx).ApexBootJars
-
-		dir := android.PathForOutput(ctx, ctx.Config().DeviceName(), "apex_bootjars")
+		archType := ctx.Config().Targets[android.Android][0].Arch.ArchType
+		dir := android.PathForOutput(ctx, toDexpreoptDirName(archType), "apex_bootjars")
 		dexPaths := apexBootJars.BuildPaths(ctx, dir)
 		dexPathsByModuleName := apexBootJars.BuildPathsByModule(ctx, dir)
 
@@ -239,4 +258,8 @@ func init() {
 
 func dexpreoptConfigMakevars(ctx android.MakeVarsContext) {
 	ctx.Strict("DEXPREOPT_BOOT_JARS_MODULES", strings.Join(defaultBootImageConfig(ctx).modules.CopyOfApexJarPairs(), ":"))
+}
+
+func toDexpreoptDirName(arch android.ArchType) string {
+	return "dexpreopt_" + arch.String()
 }
