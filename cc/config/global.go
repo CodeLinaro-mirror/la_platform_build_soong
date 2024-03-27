@@ -145,12 +145,6 @@ var (
 		// displaying logs in web browsers.
 		"-fmessage-length=0",
 
-		// Using simple template names reduces the size of debug builds.
-		"-gsimple-template-names",
-
-		// Use zstd to compress debug data.
-		"-gz=zstd",
-
 		// Make paths in deps files relative.
 		"-no-canonical-prefixes",
 	}
@@ -183,9 +177,6 @@ var (
 		"-Werror=format-security",
 		"-nostdlibinc",
 
-		// Enable MLGO for register allocation.
-		"-mllvm -regalloc-enable-advisor=release",
-
 		// Emit additional debug info for AutoFDO
 		"-fdebug-info-for-profiling",
 	}
@@ -214,13 +205,9 @@ var (
 		"-Wl,--exclude-libs,libgcc_stripped.a",
 		"-Wl,--exclude-libs,libunwind_llvm.a",
 		"-Wl,--exclude-libs,libunwind.a",
-		// Enable MLGO for register allocation.
-		"-Wl,-mllvm,-regalloc-enable-advisor=release",
 	}
 
-	deviceGlobalLldflags = append(append(deviceGlobalLdflags, commonGlobalLldflags...),
-		"-Wl,--compress-debug-sections=zstd",
-	)
+	deviceGlobalLldflags = append(deviceGlobalLdflags, commonGlobalLldflags...)
 
 	hostGlobalCflags = []string{}
 
@@ -483,14 +470,14 @@ func init() {
 		// Automatically initialize any uninitialized stack variables.
 		// Prefer zero-init if multiple options are set.
 		if ctx.Config().IsEnvTrue("AUTO_ZERO_INITIALIZE") {
-			flags = append(flags, "-ftrivial-auto-var-init=zero")
+			flags = append(flags, "-ftrivial-auto-var-init=zero -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang -Wno-unused-command-line-argument")
 		} else if ctx.Config().IsEnvTrue("AUTO_PATTERN_INITIALIZE") {
 			flags = append(flags, "-ftrivial-auto-var-init=pattern")
 		} else if ctx.Config().IsEnvTrue("AUTO_UNINITIALIZE") {
 			flags = append(flags, "-ftrivial-auto-var-init=uninitialized")
 		} else {
 			// Default to zero initialization.
-			flags = append(flags, "-ftrivial-auto-var-init=zero")
+			flags = append(flags, "-ftrivial-auto-var-init=zero -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang -Wno-unused-command-line-argument")
 		}
 
 		// Workaround for ccache with clang.
