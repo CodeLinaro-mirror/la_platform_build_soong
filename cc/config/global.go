@@ -174,9 +174,6 @@ var (
 		"-Werror=format-security",
 		"-nostdlibinc",
 
-		// Enable MLGO for register allocation.
-		"-mllvm -regalloc-enable-advisor=release",
-
 		// Emit additional debug info for AutoFDO
 		"-fdebug-info-for-profiling",
 	}
@@ -205,8 +202,6 @@ var (
 		"-Wl,--exclude-libs,libgcc_stripped.a",
 		"-Wl,--exclude-libs,libunwind_llvm.a",
 		"-Wl,--exclude-libs,libunwind.a",
-		// Enable MLGO for register allocation.
-		"-Wl,-mllvm,-regalloc-enable-advisor=release",
 	}
 
 	deviceGlobalLldflags = append(append(deviceGlobalLdflags, commonGlobalLldflags...),
@@ -369,9 +364,9 @@ var (
 	}
 
 	CStdVersion               = "gnu17"
-	CppStdVersion             = "gnu++17"
+	CppStdVersion             = "gnu++20"
 	ExperimentalCStdVersion   = "gnu2x"
-	ExperimentalCppStdVersion = "gnu++2a"
+	ExperimentalCppStdVersion = "gnu++2b"
 
 	// prebuilts/clang default settings.
 	ClangDefaultBase         = "prebuilts/clang/host"
@@ -389,12 +384,6 @@ var (
 	VisibilityHiddenFlag  = "-fvisibility=hidden"
 	VisibilityDefaultFlag = "-fvisibility=default"
 )
-
-// BazelCcToolchainVars generates bzl file content containing variables for
-// Bazel's cc_toolchain configuration.
-func BazelCcToolchainVars(config android.Config) string {
-	return android.BazelToolchainVars(config, exportedVars)
-}
 
 func ExportStringList(name string, value []string) {
 	exportedVars.ExportStringList(name, value)

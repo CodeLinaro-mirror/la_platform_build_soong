@@ -20,11 +20,11 @@ import (
 	"strconv"
 	"strings"
 
-	"android/soong/ui/metrics/bp2build_metrics_proto"
-
+	"github.com/google/blueprint"
 	"github.com/google/blueprint/pathtools"
 	"github.com/google/blueprint/proptools"
 
+	"android/soong/aconfig"
 	"android/soong/android"
 	"android/soong/dexpreopt"
 	"android/soong/java/config"
@@ -406,7 +406,6 @@ type Module struct {
 	android.ModuleBase
 	android.DefaultableModuleBase
 	android.ApexModuleBase
-	android.BazelModuleBase
 
 	// Functionality common to Module and Import.
 	embeddableInModuleAndImport
@@ -497,9 +496,6 @@ type Module struct {
 	// list of the xref extraction files
 	kytheFiles android.Paths
 
-	// Collect the module directory for IDE info in java/jdeps.go.
-	modulePaths []string
-
 	hideApexVariantFromMake bool
 
 	sdkVersion    android.SdkSpec
@@ -515,13 +511,8 @@ type Module struct {
 	// or the module should override Stem().
 	stem string
 
-	// Aconfig "cache files" that went directly into this module.  Transitive ones are
-	// tracked via JavaInfo.TransitiveAconfigFiles
-	// TODO: Extract to something standalone to propagate tags via GeneratedJavaLibraryModule
-	aconfigIntermediates android.Paths
-
-	// Aconfig files for all transitive deps.  Also exposed via JavaInfo
-	transitiveAconfigFiles *android.DepSet[android.Path]
+	// Single aconfig "cache file" merged from this module and all dependencies.
+	mergedAconfigFiles map[string]android.Paths
 }
 
 func (j *Module) CheckStableSdkVersion(ctx android.BaseModuleContext) error {
@@ -1044,37 +1035,6 @@ func (j *Module) collectJavacFlags(
 			// just adding a symlink under the root doesn't help.)
 			patchPaths := []string{".", ctx.Config().SoongOutDir()}
 
-			// b/150878007
-			//
-			// Workaround to support *Bazel-executed* JDK9 javac in Bazel's
-			// execution root for --patch-module. If this javac command line is
-			// invoked within Bazel's execution root working directory, the top
-			// level directories (e.g. libcore/, tools/, frameworks/) are all
-			// symlinks. JDK9 javac does not traverse into symlinks, which causes
-			// --patch-module to fail source file lookups when invoked in the
-			// execution root.
-			//
-			// Short of patching javac or enumerating *all* directories as possible
-			// input dirs, manually add the top level dir of the source files to be
-			// compiled.
-			topLevelDirs := map[string]bool{}
-			for _, srcFilePath := range srcFiles {
-				srcFileParts := strings.Split(srcFilePath.String(), "/")
-				// Ignore source files that are already in the top level directory
-				// as well as generated files in the out directory. The out
-				// directory may be an absolute path, which means srcFileParts[0] is the
-				// empty string, so check that as well. Note that "out" in Bazel's execution
-				// root is *not* a symlink, which doesn't cause problems for --patch-modules
-				// anyway, so it's fine to not apply this workaround for generated
-				// source files.
-				if len(srcFileParts) > 1 &&
-					srcFileParts[0] != "" &&
-					srcFileParts[0] != "out" {
-					topLevelDirs[srcFileParts[0]] = true
-				}
-			}
-			patchPaths = append(patchPaths, android.SortedKeys(topLevelDirs)...)
-
 			classPath := flags.classpath.FormJavaClassPath("")
 			if classPath != "" {
 				patchPaths = append(patchPaths, classPath)
@@ -1177,6 +1137,7 @@ func (j *Module) compile(ctx android.ModuleContext, extraSrcJars, extraClasspath
 	uniqueSrcFiles = append(uniqueSrcFiles, uniqueJavaFiles...)
 	uniqueSrcFiles = append(uniqueSrcFiles, uniqueKtFiles...)
 	j.uniqueSrcFiles = uniqueSrcFiles
+	ctx.SetProvider(blueprint.SrcsFileProviderKey, blueprint.SrcsFileProviderData{SrcPaths: uniqueSrcFiles.Strings()})
 
 	// We don't currently run annotation processors in turbine, which means we can't use turbine
 	// generated header jars when an annotation processor that generates API is enabled.  One
@@ -1618,7 +1579,7 @@ func (j *Module) compile(ctx android.ModuleContext, extraSrcJars, extraClasspath
 	if ctx.Device() && (Bool(j.properties.Installable) || Bool(compileDex)) {
 		if j.hasCode(ctx) {
 			if j.shouldInstrumentStatic(ctx) {
-				j.dexer.extraProguardFlagFiles = append(j.dexer.extraProguardFlagFiles,
+				j.dexer.extraProguardFlagsFiles = append(j.dexer.extraProguardFlagsFiles,
 					android.PathForSource(ctx, "build/make/core/proguard.jacoco.flags"))
 			}
 			// Dex compilation
@@ -1726,7 +1687,7 @@ func (j *Module) compile(ctx android.ModuleContext, extraSrcJars, extraClasspath
 
 	ctx.CheckbuildFile(outputFile)
 
-	j.collectTransitiveAconfigFiles(ctx)
+	aconfig.CollectDependencyAconfigFiles(ctx, &j.mergedAconfigFiles)
 
 	ctx.SetProvider(JavaInfoProvider, JavaInfo{
 		HeaderJars:                     android.PathsIfNonNil(j.headerJarFile),
@@ -1743,7 +1704,6 @@ func (j *Module) compile(ctx android.ModuleContext, extraSrcJars, extraClasspath
 		ExportedPluginClasses:          j.exportedPluginClasses,
 		ExportedPluginDisableTurbine:   j.exportedDisableTurbine,
 		JacocoReportClassesFile:        j.jacocoReportClassesFile,
-		TransitiveAconfigFiles:         j.transitiveAconfigFiles,
 	})
 
 	// Save the output file with no relative path so that it doesn't end up in a subdirectory when used as a resource
@@ -2015,7 +1975,6 @@ func (j *Module) IDEInfo(dpInfo *android.IdeInfo) {
 	if j.expandJarjarRules != nil {
 		dpInfo.Jarjar_rules = append(dpInfo.Jarjar_rules, j.expandJarjarRules.String())
 	}
-	dpInfo.Paths = append(dpInfo.Paths, j.modulePaths...)
 	dpInfo.Static_libs = append(dpInfo.Static_libs, j.properties.Static_libs...)
 	dpInfo.Libs = append(dpInfo.Libs, j.properties.Libs...)
 	dpInfo.SrcJars = append(dpInfo.SrcJars, j.annoSrcJars.Strings()...)
@@ -2083,34 +2042,6 @@ func (j *Module) collectTransitiveSrcFiles(ctx android.ModuleContext, mine andro
 
 func (j *Module) IsInstallable() bool {
 	return Bool(j.properties.Installable)
-}
-
-func (j *Module) collectTransitiveAconfigFiles(ctx android.ModuleContext) {
-	// Aconfig files from this module
-	mine := j.aconfigIntermediates
-
-	// Aconfig files from transitive dependencies
-	fromDeps := []*android.DepSet[android.Path]{}
-	ctx.VisitDirectDeps(func(module android.Module) {
-		dep := ctx.OtherModuleProvider(module, JavaInfoProvider).(JavaInfo)
-		if dep.TransitiveAconfigFiles != nil {
-			fromDeps = append(fromDeps, dep.TransitiveAconfigFiles)
-		}
-	})
-
-	// DepSet containing aconfig files myself and from dependencies
-	j.transitiveAconfigFiles = android.NewDepSet(android.POSTORDER, mine, fromDeps)
-}
-
-func (j *Module) AddAconfigIntermediate(path android.Path) {
-	j.aconfigIntermediates = append(j.aconfigIntermediates, path)
-}
-
-func (j *Module) getTransitiveAconfigFiles() *android.DepSet[android.Path] {
-	if j.transitiveAconfigFiles == nil {
-		panic(fmt.Errorf("java.Moduile: getTransitiveAconfigFiles called before collectTransitiveAconfigFiles module=%s", j.Name()))
-	}
-	return j.transitiveAconfigFiles
 }
 
 type sdkLinkType int
@@ -2414,22 +2345,3 @@ type ModuleWithStem interface {
 }
 
 var _ ModuleWithStem = (*Module)(nil)
-
-func (j *Module) ConvertWithBp2build(ctx android.Bp2buildMutatorContext) {
-	switch ctx.ModuleType() {
-	case "java_library", "java_library_host", "java_library_static", "tradefed_java_library_host":
-		if lib, ok := ctx.Module().(*Library); ok {
-			javaLibraryBp2Build(ctx, lib)
-		}
-	case "java_binary_host":
-		if binary, ok := ctx.Module().(*Binary); ok {
-			javaBinaryHostBp2Build(ctx, binary)
-		}
-	case "java_test_host":
-		if testHost, ok := ctx.Module().(*TestHost); ok {
-			javaTestHostBp2Build(ctx, testHost)
-		}
-	default:
-		ctx.MarkBp2buildUnconvertible(bp2build_metrics_proto.UnconvertedReasonType_TYPE_UNSUPPORTED, "")
-	}
-}

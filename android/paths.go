@@ -2208,6 +2208,19 @@ type DataPath struct {
 	SrcPath Path
 	// The install path of the data file, relative to the install root.
 	RelativeInstallPath string
+	// If WithoutRel is true, use SrcPath.Base() instead of SrcPath.Rel() as the filename.
+	WithoutRel bool
+}
+
+func (d *DataPath) ToRelativeInstallPath() string {
+	relPath := d.SrcPath.Rel()
+	if d.WithoutRel {
+		relPath = d.SrcPath.Base()
+	}
+	if d.RelativeInstallPath != "" {
+		relPath = filepath.Join(d.RelativeInstallPath, relPath)
+	}
+	return relPath
 }
 
 // PathsIfNonNil returns a Paths containing only the non-nil input arguments.

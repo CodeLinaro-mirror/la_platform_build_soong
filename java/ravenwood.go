@@ -16,6 +16,7 @@ package java
 import (
 	"android/soong/android"
 	"android/soong/tradefed"
+
 	"github.com/google/blueprint/proptools"
 )
 
@@ -52,7 +53,10 @@ func ravenwoodTestFactory() android.Module {
 	module.Module.dexpreopter.isTest = true
 	module.Module.linter.properties.Lint.Test = proptools.BoolPtr(true)
 
-	module.testProperties.Test_suites = []string{"ravenwood-tests"}
+	module.testProperties.Test_suites = []string{
+		"general-tests",
+		"ravenwood-tests",
+	}
 	module.testProperties.Test_options.Unit_test = proptools.BoolPtr(false)
 
 	InitJavaModule(module, android.DeviceSupported)
@@ -100,7 +104,7 @@ func (r *ravenwoodTest) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	r.Library.GenerateAndroidBuildActions(ctx)
 
 	// Start by depending on all files installed by dependancies
-	var installDeps android.Paths
+	var installDeps android.InstallPaths
 	for _, dep := range ctx.GetDirectDepsWithTag(ravenwoodTag) {
 		for _, installFile := range dep.FilesToInstall() {
 			installDeps = append(installDeps, installFile)
@@ -122,7 +126,8 @@ func (r *ravenwoodTest) AndroidMkEntries() []android.AndroidMkEntries {
 	entries.ExtraEntries = append(entries.ExtraEntries,
 		func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
 			entries.SetBool("LOCAL_UNINSTALLABLE_MODULE", true)
-			entries.AddStrings("LOCAL_COMPATIBILITY_SUITE", "ravenwood-tests")
+			entries.AddStrings("LOCAL_COMPATIBILITY_SUITE",
+				"general-tests", "ravenwood-tests")
 			if r.testConfig != nil {
 				entries.SetPath("LOCAL_FULL_TEST_CONFIG", r.testConfig)
 			}
@@ -156,7 +161,10 @@ func (r *ravenwoodLibgroup) InstallForceOS() (*android.OsType, *android.ArchType
 	return &r.forceOSType, &r.forceArchType
 }
 func (r *ravenwoodLibgroup) TestSuites() []string {
-	return []string{"ravenwood-tests"}
+	return []string{
+		"general-tests",
+		"ravenwood-tests",
+	}
 }
 
 func (r *ravenwoodLibgroup) DepsMutator(ctx android.BottomUpMutatorContext) {
