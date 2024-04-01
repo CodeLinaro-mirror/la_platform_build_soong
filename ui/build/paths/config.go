@@ -101,7 +101,6 @@ var Configuration = map[string]PathConfig{
 	"javap":          Allowed,
 	"lsof":           Allowed,
 	"openssl":        Allowed,
-	"perl":           Log,
 	"prodcertstatus": Allowed,
 	"pstree":         Allowed,
 	"rsync":          Allowed,

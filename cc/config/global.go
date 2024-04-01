@@ -258,13 +258,6 @@ var (
 		"-Wno-pointer-to-int-cast",
 		"-Werror=fortify-source",
 
-		// temporarily enabled
-		"-Wno-reorder-ctor",
-		"-Wno-unused-variable",
-		"-Wno-format",
-		"-Wno-missing-field-initializers",
-		"-Wno-packed-non-pod",
-
 		"-Werror=address-of-temporary",
 		"-Werror=incompatible-function-pointer-types",
 		"-Werror=null-dereference",
