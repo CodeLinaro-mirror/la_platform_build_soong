@@ -426,6 +426,7 @@ func osMutator(bpctx blueprint.BottomUpMutatorContext) {
 	// filters out non-Soong modules.  Now that we've handled them, create a
 	// normal android.BottomUpMutatorContext.
 	mctx := bottomUpMutatorContextFactory(bpctx, module, false)
+	defer bottomUpMutatorContextPool.Put(mctx)
 
 	base := module.base()
 
@@ -446,8 +447,10 @@ func osMutator(bpctx blueprint.BottomUpMutatorContext) {
 		}
 	}
 
+	createCommonOSVariant := base.commonProperties.CreateCommonOSVariant
+
 	// If there are no supported OSes then disable the module.
-	if len(moduleOSList) == 0 {
+	if len(moduleOSList) == 0 && !createCommonOSVariant {
 		base.Disable()
 		return
 	}
@@ -458,7 +461,6 @@ func osMutator(bpctx blueprint.BottomUpMutatorContext) {
 		osNames[i] = os.String()
 	}
 
-	createCommonOSVariant := base.commonProperties.CreateCommonOSVariant
 	if createCommonOSVariant {
 		// A CommonOS variant was requested so add it to the list of OS variants to
 		// create. It needs to be added to the end because it needs to depend on the
@@ -571,6 +573,7 @@ func archMutator(bpctx blueprint.BottomUpMutatorContext) {
 	// filters out non-Soong modules.  Now that we've handled them, create a
 	// normal android.BottomUpMutatorContext.
 	mctx := bottomUpMutatorContextFactory(bpctx, module, false)
+	defer bottomUpMutatorContextPool.Put(mctx)
 
 	base := module.base()
 
@@ -690,6 +693,7 @@ func addTargetProperties(m Module, target Target, multiTargets []Target, primary
 	m.base().commonProperties.CompileTarget = target
 	m.base().commonProperties.CompileMultiTargets = multiTargets
 	m.base().commonProperties.CompilePrimary = primaryTarget
+	m.base().commonProperties.ArchReady = true
 }
 
 // decodeMultilib returns the appropriate compile_multilib property for the module, or the default
@@ -976,7 +980,7 @@ func filterArchStruct(field reflect.StructField, prefix string) (bool, reflect.S
 			panic(fmt.Errorf("unexpected tag format %q", field.Tag))
 		}
 		// these tags don't need to be present in the runtime generated struct type.
-		values = RemoveListFromList(values, []string{"arch_variant", "variant_prepend", "path"})
+		values = RemoveListFromList(values, []string{"arch_variant", "variant_prepend", "path", "replace_instead_of_append"})
 		if len(values) > 0 {
 			panic(fmt.Errorf("unknown tags %q in field %q", values, prefix+field.Name))
 		}
@@ -1057,9 +1061,7 @@ func mergePropertyStruct(ctx ArchVariantContext, dst interface{}, srcValue refle
 	// order checks the `android:"variant_prepend"` tag to handle properties where the
 	// arch-specific value needs to come before the generic value, for example for lists of
 	// include directories.
-	order := func(property string,
-		dstField, srcField reflect.StructField,
-		dstValue, srcValue interface{}) (proptools.Order, error) {
+	order := func(dstField, srcField reflect.StructField) (proptools.Order, error) {
 		if proptools.HasTag(dstField, "android", "variant_prepend") {
 			return proptools.Prepend, nil
 		} else {

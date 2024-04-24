@@ -27,6 +27,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
+
+	"android/soong/shared"
 
 	"github.com/google/blueprint"
 	"github.com/google/blueprint/bootstrap"
@@ -89,8 +92,6 @@ type CmdArgs struct {
 	ModuleActionsFile string
 	DocFile           string
 
-	MultitreeBuild bool
-
 	BuildFromSourceStub bool
 
 	EnsureAllowlistIntegrity bool
@@ -113,9 +114,16 @@ const (
 	GenerateDocFile
 )
 
+const testKeyDir = "build/make/target/product/security"
+
 // SoongOutDir returns the build output directory for the configuration.
 func (c Config) SoongOutDir() string {
 	return c.soongOutDir
+}
+
+// tempDir returns the path to out/soong/.temp, which is cleared at the beginning of every build.
+func (c Config) tempDir() string {
+	return shared.TempDirForOutDir(c.soongOutDir)
 }
 
 func (c Config) OutDir() string {
@@ -162,7 +170,10 @@ func (c Config) DisableHiddenApiChecks() bool {
 // Thus, verify_overlaps is disabled when RELEASE_DEFAULT_MODULE_BUILD_FROM_SOURCE is set to false.
 // TODO(b/308174018): Re-enable verify_overlaps for both builr from source/mainline prebuilts.
 func (c Config) DisableVerifyOverlaps() bool {
-	return c.IsEnvTrue("DISABLE_VERIFY_OVERLAPS") || !c.ReleaseDefaultModuleBuildFromSource()
+	if c.IsEnvFalse("DISABLE_VERIFY_OVERLAPS") && c.ReleaseDisableVerifyOverlaps() {
+		panic("The current release configuration does not support verify_overlaps. DISABLE_VERIFY_OVERLAPS cannot be set to false")
+	}
+	return c.IsEnvTrue("DISABLE_VERIFY_OVERLAPS") || c.ReleaseDisableVerifyOverlaps() || !c.ReleaseDefaultModuleBuildFromSource()
 }
 
 // MaxPageSizeSupported returns the max page size supported by the device. This
@@ -203,9 +214,29 @@ func (c Config) ReleaseDefaultModuleBuildFromSource() bool {
 		Bool(c.config.productVariables.ReleaseDefaultModuleBuildFromSource)
 }
 
+func (c Config) ReleaseDisableVerifyOverlaps() bool {
+	return c.config.productVariables.GetBuildFlagBool("RELEASE_DISABLE_VERIFY_OVERLAPS_CHECK")
+}
+
+// Enables flagged apis annotated with READ_WRITE aconfig flags to be included in the stubs
+// and hiddenapi flags so that they are accessible at runtime
+func (c Config) ReleaseExportRuntimeApis() bool {
+	return Bool(c.config.productVariables.ExportRuntimeApis)
+}
+
 // Enables ABI monitoring of NDK libraries
 func (c Config) ReleaseNdkAbiMonitored() bool {
 	return c.config.productVariables.GetBuildFlagBool("RELEASE_NDK_ABI_MONITORED")
+}
+
+func (c Config) ReleaseHiddenApiExportableStubs() bool {
+	return c.config.productVariables.GetBuildFlagBool("RELEASE_HIDDEN_API_EXPORTABLE_STUBS") ||
+		Bool(c.config.productVariables.HiddenapiExportableStubs)
+}
+
+// Enable read flag from new storage
+func (c Config) ReleaseReadFromNewStorage() bool {
+	return c.config.productVariables.GetBuildFlagBool("RELEASE_READ_FROM_NEW_STORAGE")
 }
 
 // A DeviceConfig object represents the configuration for a particular device
@@ -270,10 +301,6 @@ type config struct {
 
 	BuildMode SoongBuildMode
 
-	// If MultitreeBuild is true then this is one inner tree of a multitree
-	// build directed by the multitree orchestrator.
-	MultitreeBuild bool
-
 	// If testAllowNonExistentPaths is true then PathForSource and PathForModuleSrc won't error
 	// in tests when a path doesn't exist.
 	TestAllowNonExistentPaths bool
@@ -310,6 +337,18 @@ func loadConfig(config *config) error {
 	return loadFromConfigFile(&config.productVariables, absolutePath(config.ProductVariablesFileName))
 }
 
+// Checks if the string is a valid go identifier. This is equivalent to blueprint's definition
+// of an identifier, so it will match the same identifiers as those that can be used in bp files.
+func isGoIdentifier(ident string) bool {
+	for i, r := range ident {
+		valid := r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) && i > 0
+		if !valid {
+			return false
+		}
+	}
+	return len(ident) > 0
+}
+
 // loadFromConfigFile loads and decodes configuration options from a JSON file
 // in the current working directory.
 func loadFromConfigFile(configurable *ProductVariables, filename string) error {
@@ -344,6 +383,20 @@ func loadFromConfigFile(configurable *ProductVariables, filename string) error {
 	configurable.Native_coverage = proptools.BoolPtr(
 		Bool(configurable.GcovCoverage) ||
 			Bool(configurable.ClangCoverage))
+
+	// The go scanner's definition of identifiers is c-style identifiers, but allowing unicode's
+	// definition of letters and digits. This is the same scanner that blueprint uses, so it
+	// will allow the same identifiers as are valid in bp files.
+	for namespace := range configurable.VendorVars {
+		if !isGoIdentifier(namespace) {
+			return fmt.Errorf("soong config namespaces must be valid identifiers: %q", namespace)
+		}
+		for variable := range configurable.VendorVars[namespace] {
+			if !isGoIdentifier(variable) {
+				return fmt.Errorf("soong config variables must be valid identifiers: %q", variable)
+			}
+		}
+	}
 
 	// when Platform_sdk_final is true (or PLATFORM_VERSION_CODENAME is REL), use Platform_sdk_version;
 	// if false (pre-released version, for example), use Platform_sdk_codename.
@@ -497,8 +550,6 @@ func NewConfig(cmdArgs CmdArgs, availableEnv map[string]string) (Config, error) 
 		moduleListFile: cmdArgs.ModuleListFile,
 		fs:             pathtools.NewOsFs(absSrcDir),
 
-		MultitreeBuild: cmdArgs.MultitreeBuild,
-
 		buildFromSourceStub: cmdArgs.BuildFromSourceStub,
 	}
 
@@ -614,6 +665,7 @@ func NewConfig(cmdArgs CmdArgs, availableEnv map[string]string) (Config, error) 
 		"framework-nfc":                     {},
 		"framework-ondevicepersonalization": {},
 		"framework-pdf":                     {},
+		"framework-pdf-v":                   {},
 		"framework-permission":              {},
 		"framework-permission-s":            {},
 		"framework-scheduling":              {},
@@ -796,6 +848,10 @@ func (c *config) BuildId() string {
 	return String(c.productVariables.BuildId)
 }
 
+func (c *config) DisplayBuildNumber() bool {
+	return Bool(c.productVariables.DisplayBuildNumber)
+}
+
 // BuildNumberFile returns the path to a text file containing metadata
 // representing the current build's number.
 //
@@ -805,6 +861,23 @@ func (c *config) BuildId() string {
 // rebuild on every incremental build when the build number changes.
 func (c *config) BuildNumberFile(ctx PathContext) Path {
 	return PathForOutput(ctx, String(c.productVariables.BuildNumberFile))
+}
+
+// BuildHostnameFile returns the path to a text file containing metadata
+// representing the current build's host name.
+func (c *config) BuildHostnameFile(ctx PathContext) Path {
+	return PathForOutput(ctx, String(c.productVariables.BuildHostnameFile))
+}
+
+// BuildThumbprintFile returns the path to a text file containing metadata
+// representing the current build's thumbprint.
+//
+// Rules that want to reference the build thumbprint should read from this file
+// without depending on it. They will run whenever their other dependencies
+// require them to run and get the current build thumbprint. This ensures they
+// don't rebuild on every incremental build when the build thumbprint changes.
+func (c *config) BuildThumbprintFile(ctx PathContext) Path {
+	return PathForArbitraryOutput(ctx, "target", "product", c.DeviceName(), String(c.productVariables.BuildThumbprintFile))
 }
 
 // DeviceName returns the name of the current device target.
@@ -828,12 +901,20 @@ func (c *config) HasDeviceProduct() bool {
 	return c.productVariables.DeviceProduct != nil
 }
 
+func (c *config) DeviceAbi() []string {
+	return c.productVariables.DeviceAbi
+}
+
 func (c *config) DeviceResourceOverlays() []string {
 	return c.productVariables.DeviceResourceOverlays
 }
 
 func (c *config) ProductResourceOverlays() []string {
 	return c.productVariables.ProductResourceOverlays
+}
+
+func (c *config) PlatformDisplayVersionName() string {
+	return String(c.productVariables.Platform_display_version_name)
 }
 
 func (c *config) PlatformVersionName() string {
@@ -993,7 +1074,7 @@ func (c *config) DefaultAppCertificateDir(ctx PathContext) SourcePath {
 	if defaultCert != "" {
 		return PathForSource(ctx, filepath.Dir(defaultCert))
 	}
-	return PathForSource(ctx, "build/make/target/product/security")
+	return PathForSource(ctx, testKeyDir)
 }
 
 func (c *config) DefaultAppCertificate(ctx PathContext) (pem, key SourcePath) {
@@ -1005,10 +1086,18 @@ func (c *config) DefaultAppCertificate(ctx PathContext) (pem, key SourcePath) {
 	return defaultDir.Join(ctx, "testkey.x509.pem"), defaultDir.Join(ctx, "testkey.pk8")
 }
 
+func (c *config) BuildKeys() string {
+	defaultCert := String(c.productVariables.DefaultAppCertificate)
+	if defaultCert == "" || defaultCert == filepath.Join(testKeyDir, "testkey") {
+		return "test-keys"
+	}
+	return "dev-keys"
+}
+
 func (c *config) ApexKeyDir(ctx ModuleContext) SourcePath {
 	// TODO(b/121224311): define another variable such as TARGET_APEX_KEY_OVERRIDE
 	defaultCert := String(c.productVariables.DefaultAppCertificate)
-	if defaultCert == "" || filepath.Dir(defaultCert) == "build/make/target/product/security" {
+	if defaultCert == "" || filepath.Dir(defaultCert) == testKeyDir {
 		// When defaultCert is unset or is set to the testkeys path, use the APEX keys
 		// that is under the module dir
 		return pathForModuleSrc(ctx)
@@ -1065,6 +1154,10 @@ func (c *config) Debuggable() bool {
 
 func (c *config) Eng() bool {
 	return Bool(c.productVariables.Eng)
+}
+
+func (c *config) BuildType() string {
+	return String(c.productVariables.BuildType)
 }
 
 // DevicePrimaryArchType returns the ArchType for the first configured device architecture, or
@@ -1302,6 +1395,34 @@ func (c *config) VendorApiLevel() string {
 	return String(c.productVariables.VendorApiLevel)
 }
 
+func (c *config) PrevVendorApiLevel() string {
+	vendorApiLevel, err := strconv.Atoi(c.VendorApiLevel())
+	if err != nil {
+		panic(fmt.Errorf("Cannot parse vendor API level %s to an integer: %s",
+			c.VendorApiLevel(), err))
+	}
+	// The version before trunk stable is 34.
+	if vendorApiLevel == 202404 {
+		return "34"
+	}
+	if vendorApiLevel >= 1 && vendorApiLevel <= 34 {
+		return strconv.Itoa(vendorApiLevel - 1)
+	}
+	if vendorApiLevel < 202404 || vendorApiLevel%100 != 4 {
+		panic("Unknown vendor API level " + c.VendorApiLevel())
+	}
+	return strconv.Itoa(vendorApiLevel - 100)
+}
+
+func IsTrunkStableVendorApiLevel(level string) bool {
+	levelInt, err := strconv.Atoi(level)
+	return err == nil && levelInt >= 202404
+}
+
+func (c *config) VendorApiLevelFrozen() bool {
+	return c.productVariables.GetBuildFlagBool("RELEASE_BOARD_API_LEVEL_FROZEN")
+}
+
 func (c *deviceConfig) Arches() []Arch {
 	var arches []Arch
 	for _, target := range c.config.Targets[Android] {
@@ -1325,20 +1446,12 @@ func (c *deviceConfig) VendorPath() string {
 	return "vendor"
 }
 
-func (c *deviceConfig) VndkVersion() string {
-	return String(c.config.productVariables.DeviceVndkVersion)
-}
-
 func (c *deviceConfig) RecoverySnapshotVersion() string {
 	return String(c.config.productVariables.RecoverySnapshotVersion)
 }
 
 func (c *deviceConfig) CurrentApiLevelForVendorModules() string {
 	return StringDefault(c.config.productVariables.DeviceCurrentApiLevelForVendorModules, "current")
-}
-
-func (c *deviceConfig) PlatformVndkVersion() string {
-	return String(c.config.productVariables.Platform_vndk_version)
 }
 
 func (c *deviceConfig) ExtraVndkVersions() []string {
@@ -1455,18 +1568,18 @@ func (c *deviceConfig) PgoAdditionalProfileDirs() []string {
 }
 
 // AfdoProfile returns fully qualified path associated to the given module name
-func (c *deviceConfig) AfdoProfile(name string) (*string, error) {
+func (c *deviceConfig) AfdoProfile(name string) (string, error) {
 	for _, afdoProfile := range c.config.productVariables.AfdoProfiles {
 		split := strings.Split(afdoProfile, ":")
 		if len(split) != 3 {
-			return nil, fmt.Errorf("AFDO_PROFILES has invalid value: %s. "+
+			return "", fmt.Errorf("AFDO_PROFILES has invalid value: %s. "+
 				"The expected format is <module>:<fully-qualified-path-to-fdo_profile>", afdoProfile)
 		}
 		if split[0] == name {
-			return proptools.StringPtr(strings.Join([]string{split[1], split[2]}, ":")), nil
+			return strings.Join([]string{split[1], split[2]}, ":"), nil
 		}
 	}
-	return nil, nil
+	return "", nil
 }
 
 func (c *deviceConfig) VendorSepolicyDirs() []string {
@@ -1695,10 +1808,6 @@ func (c *deviceConfig) PlatformSepolicyVersion() string {
 	return String(c.config.productVariables.PlatformSepolicyVersion)
 }
 
-func (c *deviceConfig) TotSepolicyVersion() string {
-	return String(c.config.productVariables.TotSepolicyVersion)
-}
-
 func (c *deviceConfig) PlatformSepolicyCompatVersions() []string {
 	return c.config.productVariables.PlatformSepolicyCompatVersions
 }
@@ -1846,6 +1955,10 @@ func (c *deviceConfig) BuildBrokenInputDir(name string) bool {
 	return InList(name, c.config.productVariables.BuildBrokenInputDirModules)
 }
 
+func (c *deviceConfig) BuildBrokenDontCheckSystemSdk() bool {
+	return c.config.productVariables.BuildBrokenDontCheckSystemSdk
+}
+
 func (c *config) BuildWarningBadOptionalUsesLibsAllowlist() []string {
 	return c.productVariables.BuildWarningBadOptionalUsesLibsAllowlist
 }
@@ -1876,6 +1989,10 @@ func (c *deviceConfig) SepolicyFreezeTestExtraPrebuiltDirs() []string {
 
 func (c *deviceConfig) GenerateAidlNdkPlatformBackend() bool {
 	return c.config.productVariables.GenerateAidlNdkPlatformBackend
+}
+
+func (c *deviceConfig) AconfigContainerValidation() string {
+	return c.config.productVariables.AconfigContainerValidation
 }
 
 func (c *config) IgnorePrefer32OnDevice() bool {
@@ -1954,44 +2071,46 @@ func (c *deviceConfig) CheckVendorSeappViolations() bool {
 	return Bool(c.config.productVariables.CheckVendorSeappViolations)
 }
 
-func (c *deviceConfig) NextReleaseHideFlaggedApi() bool {
-	return Bool(c.config.productVariables.NextReleaseHideFlaggedApi)
-}
-
-func (c *deviceConfig) ReleaseExposeFlaggedApi() bool {
-	return Bool(c.config.productVariables.Release_expose_flagged_api)
-}
-
-func (c *deviceConfig) HideFlaggedApis() bool {
-	return c.NextReleaseHideFlaggedApi() && !c.ReleaseExposeFlaggedApi()
-}
-
 func (c *config) GetBuildFlag(name string) (string, bool) {
 	val, ok := c.productVariables.BuildFlags[name]
 	return val, ok
 }
 
+func (c *config) UseResourceProcessorByDefault() bool {
+	return c.productVariables.GetBuildFlagBool("RELEASE_USE_RESOURCE_PROCESSOR_BY_DEFAULT")
+}
+
 var (
 	mainlineApexContributionBuildFlags = []string{
+		"RELEASE_APEX_CONTRIBUTIONS_ADBD",
 		"RELEASE_APEX_CONTRIBUTIONS_ADSERVICES",
 		"RELEASE_APEX_CONTRIBUTIONS_APPSEARCH",
 		"RELEASE_APEX_CONTRIBUTIONS_ART",
 		"RELEASE_APEX_CONTRIBUTIONS_BLUETOOTH",
+		"RELEASE_APEX_CONTRIBUTIONS_CAPTIVEPORTALLOGIN",
+		"RELEASE_APEX_CONTRIBUTIONS_CELLBROADCAST",
 		"RELEASE_APEX_CONTRIBUTIONS_CONFIGINFRASTRUCTURE",
 		"RELEASE_APEX_CONTRIBUTIONS_CONNECTIVITY",
 		"RELEASE_APEX_CONTRIBUTIONS_CONSCRYPT",
 		"RELEASE_APEX_CONTRIBUTIONS_CRASHRECOVERY",
 		"RELEASE_APEX_CONTRIBUTIONS_DEVICELOCK",
+		"RELEASE_APEX_CONTRIBUTIONS_DOCUMENTSUIGOOGLE",
+		"RELEASE_APEX_CONTRIBUTIONS_EXTSERVICES",
 		"RELEASE_APEX_CONTRIBUTIONS_HEALTHFITNESS",
 		"RELEASE_APEX_CONTRIBUTIONS_IPSEC",
 		"RELEASE_APEX_CONTRIBUTIONS_MEDIA",
 		"RELEASE_APEX_CONTRIBUTIONS_MEDIAPROVIDER",
+		"RELEASE_APEX_CONTRIBUTIONS_NETWORKSTACKGOOGLE",
+		"RELEASE_APEX_CONTRIBUTIONS_NEURALNETWORKS",
 		"RELEASE_APEX_CONTRIBUTIONS_ONDEVICEPERSONALIZATION",
 		"RELEASE_APEX_CONTRIBUTIONS_PERMISSION",
 		"RELEASE_APEX_CONTRIBUTIONS_REMOTEKEYPROVISIONING",
+		"RELEASE_APEX_CONTRIBUTIONS_RESOLV",
 		"RELEASE_APEX_CONTRIBUTIONS_SCHEDULING",
 		"RELEASE_APEX_CONTRIBUTIONS_SDKEXTENSIONS",
+		"RELEASE_APEX_CONTRIBUTIONS_SWCODEC",
 		"RELEASE_APEX_CONTRIBUTIONS_STATSD",
+		"RELEASE_APEX_CONTRIBUTIONS_TZDATA",
 		"RELEASE_APEX_CONTRIBUTIONS_UWB",
 		"RELEASE_APEX_CONTRIBUTIONS_WIFI",
 	}
@@ -2007,4 +2126,24 @@ func (c *config) AllApexContributions() []string {
 		}
 	}
 	return ret
+}
+
+func (c *config) BuildIgnoreApexContributionContents() *bool {
+	return c.productVariables.BuildIgnoreApexContributionContents
+}
+
+func (c *config) ProductLocales() []string {
+	return c.productVariables.ProductLocales
+}
+
+func (c *config) ProductDefaultWifiChannels() []string {
+	return c.productVariables.ProductDefaultWifiChannels
+}
+
+func (c *config) BoardUseVbmetaDigestInFingerprint() bool {
+	return Bool(c.productVariables.BoardUseVbmetaDigestInFingerprint)
+}
+
+func (c *config) OemProperties() []string {
+	return c.productVariables.OemProperties
 }

@@ -15,7 +15,6 @@
 package cc
 
 import (
-	"fmt"
 	"path/filepath"
 
 	"android/soong/android"
@@ -45,7 +44,7 @@ func init() {
 }
 
 // Returns the NDK base include path for use with sdk_version current. Usable with -I.
-func getCurrentIncludePath(ctx android.ModuleContext) android.InstallPath {
+func getCurrentIncludePath(ctx android.ModuleContext) android.OutputPath {
 	return getNdkSysrootBase(ctx).Join(ctx, "usr/include")
 }
 
@@ -87,7 +86,7 @@ type headerModule struct {
 }
 
 func getHeaderInstallDir(ctx android.ModuleContext, header android.Path, from string,
-	to string) android.InstallPath {
+	to string) android.OutputPath {
 	// Output path is the sysroot base + "usr/include" + to directory + directory component
 	// of the file without the leading from directory stripped.
 	//
@@ -129,13 +128,12 @@ func (m *headerModule) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	for _, header := range m.srcPaths {
 		installDir := getHeaderInstallDir(ctx, header, String(m.properties.From),
 			String(m.properties.To))
-		installedPath := ctx.InstallFile(installDir, header.Base(), header)
 		installPath := installDir.Join(ctx, header.Base())
-		if installPath != installedPath {
-			panic(fmt.Sprintf(
-				"expected header install path (%q) not equal to actual install path %q",
-				installPath, installedPath))
-		}
+		ctx.Build(pctx, android.BuildParams{
+			Rule:   android.Cp,
+			Input:  header,
+			Output: installPath,
+		})
 		m.installPaths = append(m.installPaths, installPath)
 	}
 
@@ -182,7 +180,7 @@ type versionedHeaderProperties struct {
 }
 
 // Like ndk_headers, but preprocesses the headers with the bionic versioner:
-// https://android.googlesource.com/platform/bionic/+/master/tools/versioner/README.md.
+// https://android.googlesource.com/platform/bionic/+/main/tools/versioner/README.md.
 //
 // Unlike ndk_headers, we don't operate on a list of sources but rather a whole directory, the
 // module does not have the srcs property, and operates on a full directory (the `from` property).
@@ -267,7 +265,7 @@ func processHeadersWithVersioner(ctx android.ModuleContext, srcDir, outDir andro
 }
 
 // versioned_ndk_headers preprocesses the headers with the bionic versioner:
-// https://android.googlesource.com/platform/bionic/+/master/tools/versioner/README.md.
+// https://android.googlesource.com/platform/bionic/+/main/tools/versioner/README.md.
 // Unlike the ndk_headers soong module, versioned_ndk_headers operates on a
 // directory level specified in `from` property. This is only used to process
 // the bionic/libc/include directory.

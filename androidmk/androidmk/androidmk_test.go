@@ -511,6 +511,22 @@ endif # b==false
 		`,
 	},
 	{
+		// Unsupported function case because that doesn't work in bp
+		desc: "error for unsupported functions",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_SRC_FILES := $(filter-out filter-out-file.java ,$(call all-java-files-under, src))
+LOCAL_PACKAGE_NAME := foo
+include $(BUILD_PACKAGE)
+`,
+		expected: `
+android_app {
+	name: "foo",
+	srcs: ["UNSUPPORTED FUNCTION:filter-out filter-out-file.java  src/**/*.java"],
+}
+		`,
+	},
+	{
 		desc: "ignore all-makefiles-under",
 		in: `
 include $(call all-makefiles-under,$(LOCAL_PATH))
@@ -809,6 +825,26 @@ include $(CLEAR_VARS)
 LOCAL_PACKAGE_NAME := FooTest
 LOCAL_COMPATIBILITY_SUITE := cts
 LOCAL_CTS_TEST_PACKAGE := foo.bar
+LOCAL_COMPATIBILITY_SUPPORT_FILES := file1
+include $(BUILD_CTS_PACKAGE)
+`,
+		expected: `
+android_test {
+    name: "FooTest",
+    defaults: ["cts_defaults"],
+    test_suites: ["cts"],
+
+    data: ["file1"],
+}
+`,
+	},
+	{
+		desc: "IGNORE_LOCAL_XTS_TEST_PACKAGE",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_PACKAGE_NAME := FooTest
+LOCAL_COMPATIBILITY_SUITE := cts
+LOCAL_XTS_TEST_PACKAGE := foo.bar
 LOCAL_COMPATIBILITY_SUPPORT_FILES := file1
 include $(BUILD_CTS_PACKAGE)
 `,
@@ -1707,9 +1743,34 @@ android_test {
 }
 `,
 	},
+	{
+		desc: "LOCAL_PROTO_JAVA_OUTPUT_PARAMS",
+		in: `
+include $(CLEAR_VARS)
+LOCAL_MODULE := foo
+LOCAL_PROTO_JAVA_OUTPUT_PARAMS := enum_style=java, parcelable_messages=true
+LOCAL_PROTOC_FLAGS := --proto_path=$(LOCAL_PATH)/protos
+include $(BUILD_PACKAGE)
+		`,
+		expected: `
+android_app {
+	name: "foo",
+	proto: {
+        output_params: [
+            "enum_style=java",
+            "parcelable_messages=true",
+        ],
+		local_include_dirs: ["protos"],
+    },
+}
+`,
+	},
 }
 
 func TestEndToEnd(t *testing.T) {
+	// Skip checking Android.mk path with cleaning "ANDROID_BUILD_TOP"
+	t.Setenv("ANDROID_BUILD_TOP", "")
+
 	for i, test := range testCases {
 		expected, err := bpfix.Reformat(test.expected)
 		if err != nil {

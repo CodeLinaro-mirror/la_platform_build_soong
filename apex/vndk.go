@@ -45,16 +45,12 @@ func vndkApexBundleFactory() android.Module {
 	return bundle
 }
 
-func (a *apexBundle) vndkVersion(config android.DeviceConfig) string {
-	vndkVersion := proptools.StringDefault(a.vndkProperties.Vndk_version, "current")
-	if vndkVersion == "current" {
-		vndkVersion = config.PlatformVndkVersion()
-	}
-	return vndkVersion
+func (a *apexBundle) vndkVersion() string {
+	return proptools.StringDefault(a.vndkProperties.Vndk_version, "current")
 }
 
 type apexVndkProperties struct {
-	// Indicates VNDK version of which this VNDK APEX bundles VNDK libs. Default is Platform VNDK Version.
+	// Indicates VNDK version of which this VNDK APEX bundles VNDK libs.
 	Vndk_version *string
 }
 
@@ -64,25 +60,20 @@ func apexVndkMutator(mctx android.TopDownMutatorContext) {
 			mctx.PropertyErrorf("native_bridge_supported", "%q doesn't support native bridge binary.", mctx.ModuleType())
 		}
 
-		vndkVersion := ab.vndkVersion(mctx.DeviceConfig())
-		apiLevel, err := android.ApiLevelFromUser(mctx, vndkVersion)
-		if err != nil {
-			mctx.PropertyErrorf("vndk_version", "%s", err.Error())
-			return
-		}
+		vndkVersion := ab.vndkVersion()
+		if vndkVersion != "" {
+			apiLevel, err := android.ApiLevelFromUser(mctx, vndkVersion)
+			if err != nil {
+				mctx.PropertyErrorf("vndk_version", "%s", err.Error())
+				return
+			}
 
-		targets := mctx.MultiTargets()
-		if len(targets) > 0 && apiLevel.LessThan(cc.MinApiForArch(mctx, targets[0].Arch.ArchType)) &&
-			vndkVersion != mctx.DeviceConfig().PlatformVndkVersion() {
-			// Disable VNDK APEXes for VNDK versions less than the minimum supported API
-			// level for the primary architecture. This validation is skipped if the VNDK
-			// version matches the platform VNDK version, which can occur when the device
-			// config targets the 'current' VNDK (see `vndkVersion`).
-			ab.Disable()
-		}
-		if proptools.String(ab.vndkProperties.Vndk_version) != "" &&
-			apiLevel.GreaterThanOrEqualTo(android.ApiLevelOrPanic(mctx, mctx.DeviceConfig().PlatformVndkVersion())) {
-			ab.Disable()
+			targets := mctx.MultiTargets()
+			if len(targets) > 0 && apiLevel.LessThan(cc.MinApiForArch(mctx, targets[0].Arch.ArchType)) {
+				// Disable VNDK APEXes for VNDK versions less than the minimum supported API
+				// level for the primary architecture.
+				ab.Disable()
+			}
 		}
 	}
 }
@@ -90,15 +81,11 @@ func apexVndkMutator(mctx android.TopDownMutatorContext) {
 func apexVndkDepsMutator(mctx android.BottomUpMutatorContext) {
 	if m, ok := mctx.Module().(*cc.Module); ok && cc.IsForVndkApex(mctx, m) {
 		vndkVersion := m.VndkVersion()
-		// For VNDK-Lite device, we gather core-variants of VNDK-Sp libraries, which doesn't have VNDK version defined
+
 		if vndkVersion == "" {
-			vndkVersion = mctx.DeviceConfig().PlatformVndkVersion()
+			return
 		}
-		if vndkVersion == mctx.DeviceConfig().PlatformVndkVersion() {
-			vndkVersion = "current"
-		} else {
-			vndkVersion = "v" + vndkVersion
-		}
+		vndkVersion = "v" + vndkVersion
 
 		vndkApexName := "com.android.vndk." + vndkVersion
 
