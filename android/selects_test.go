@@ -546,6 +546,24 @@ func TestSelects(t *testing.T) {
 			},
 		},
 		{
+			name: "Unhandled string value",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_string: select(soong_config_variable("my_namespace", "my_variable"), {
+					"foo": "a",
+					"bar": "b",
+				}),
+			}
+			`,
+			vendorVars: map[string]map[string]string{
+				"my_namespace": {
+					"my_variable": "baz",
+				},
+			},
+			expectedError: `my_string: soong_config_variable\("my_namespace", "my_variable"\) had value "baz", which was not handled by the select statement`,
+		},
+		{
 			name: "Select on boolean",
 			bp: `
 			my_module_type {
@@ -596,7 +614,7 @@ func TestSelects(t *testing.T) {
 				}),
 			}
 			`,
-			expectedError: "foo",
+			expectedError: `my_string: boolean_var_for_testing\(\) had value undefined, which was not handled by the select statement`,
 		},
 		{
 			name: "Select on boolean undefined with default",
@@ -687,6 +705,29 @@ func TestSelects(t *testing.T) {
 			}
 			`,
 			expectedError: `can't assign select statement to non-configurable property "my_nonconfigurable_string_list"`,
+		},
+		{
+			name: "Select in variable",
+			bp: `
+			my_second_variable = ["after.cpp"]
+			my_variable = select(soong_config_variable("my_namespace", "my_variable"), {
+				"a": ["a.cpp"],
+				"b": ["b.cpp"],
+				default: ["c.cpp"],
+			}) + my_second_variable
+			my_module_type {
+				name: "foo",
+				my_string_list: ["before.cpp"] + my_variable,
+			}
+			`,
+			provider: selectsTestProvider{
+				my_string_list: &[]string{"before.cpp", "a.cpp", "after.cpp"},
+			},
+			vendorVars: map[string]map[string]string{
+				"my_namespace": {
+					"my_variable": "a",
+				},
+			},
 		},
 	}
 
@@ -792,13 +833,21 @@ type selectsMockModule struct {
 	properties selectsMockModuleProperties
 }
 
+func optionalToPtr[T any](o proptools.ConfigurableOptional[T]) *T {
+	if o.IsEmpty() {
+		return nil
+	}
+	x := o.Get()
+	return &x
+}
+
 func (p *selectsMockModule) GenerateAndroidBuildActions(ctx ModuleContext) {
 	SetProvider(ctx, selectsTestProviderKey, selectsTestProvider{
-		my_bool:                        p.properties.My_bool.Get(ctx),
-		my_string:                      p.properties.My_string.Get(ctx),
-		my_string_list:                 p.properties.My_string_list.Get(ctx),
-		my_paths:                       p.properties.My_paths.Get(ctx),
-		replacing_string_list:          p.properties.Replacing_string_list.Get(ctx),
+		my_bool:                        optionalToPtr(p.properties.My_bool.Get(ctx)),
+		my_string:                      optionalToPtr(p.properties.My_string.Get(ctx)),
+		my_string_list:                 optionalToPtr(p.properties.My_string_list.Get(ctx)),
+		my_paths:                       optionalToPtr(p.properties.My_paths.Get(ctx)),
+		replacing_string_list:          optionalToPtr(p.properties.Replacing_string_list.Get(ctx)),
 		my_nonconfigurable_bool:        p.properties.My_nonconfigurable_bool,
 		my_nonconfigurable_string:      p.properties.My_nonconfigurable_string,
 		my_nonconfigurable_string_list: p.properties.My_nonconfigurable_string_list,
