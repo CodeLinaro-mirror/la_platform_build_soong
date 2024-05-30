@@ -2,8 +2,8 @@ package codegen
 
 import (
 	"fmt"
+	"strconv"
 
-	"android/soong/aconfig"
 	"android/soong/android"
 	"android/soong/rust"
 
@@ -24,6 +24,7 @@ type RustAconfigLibraryProperties struct {
 	// default mode is "production", the other accepted modes are:
 	// "test": to generate test mode version of the library
 	// "exported": to generate exported mode version of the library
+	// "force-read-only": to generate force-read-only mode version of the library
 	// an error will be thrown if the mode is not supported
 	Mode *string
 }
@@ -65,7 +66,7 @@ func (a *aconfigDecorator) GenerateSource(ctx rust.ModuleContext, deps rust.Path
 	if len(declarationsModules) != 1 {
 		panic(fmt.Errorf("Exactly one aconfig_declarations property required"))
 	}
-	declarations := ctx.OtherModuleProvider(declarationsModules[0], aconfig.DeclarationsProviderKey).(aconfig.DeclarationsProviderData)
+	declarations, _ := android.OtherModuleProvider(ctx, declarationsModules[0], android.AconfigDeclarationsProviderKey)
 
 	mode := proptools.StringDefault(a.Properties.Mode, "production")
 	if !isModeSupported(mode) {
@@ -82,16 +83,29 @@ func (a *aconfigDecorator) GenerateSource(ctx rust.ModuleContext, deps rust.Path
 		Args: map[string]string{
 			"gendir": generatedDir.String(),
 			"mode":   mode,
+			"debug":  strconv.FormatBool(ctx.Config().ReleaseReadFromNewStorage()),
 		},
 	})
 	a.BaseSourceProvider.OutputFiles = android.Paths{generatedSource}
+
+	android.SetProvider(ctx, android.CodegenInfoProvider, android.CodegenInfo{
+		ModeInfos: map[string]android.ModeInfo{
+			ctx.ModuleName(): {
+				Container: declarations.Container,
+				Mode:      mode,
+			}},
+	})
+
 	return generatedSource
 }
 
 func (a *aconfigDecorator) SourceProviderDeps(ctx rust.DepsContext, deps rust.Deps) rust.Deps {
 	deps = a.BaseSourceProvider.SourceProviderDeps(ctx, deps)
+	deps.Rustlibs = append(deps.Rustlibs, "libaconfig_storage_read_api")
 	deps.Rustlibs = append(deps.Rustlibs, "libflags_rust")
 	deps.Rustlibs = append(deps.Rustlibs, "liblazy_static")
+	deps.Rustlibs = append(deps.Rustlibs, "liblogger")
+	deps.Rustlibs = append(deps.Rustlibs, "liblog_rust")
 	ctx.AddDependency(ctx.Module(), rustDeclarationsTag, a.Properties.Aconfig_declarations)
 	return deps
 }

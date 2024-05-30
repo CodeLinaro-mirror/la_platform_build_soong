@@ -3,7 +3,6 @@ package cc
 import (
 	"android/soong/android"
 	"android/soong/fuzz"
-	"android/soong/snapshot"
 
 	"github.com/google/blueprint"
 )
@@ -63,55 +62,9 @@ type PlatformSanitizeable interface {
 // implementation should handle tags from both.
 type SantizableDependencyTagChecker func(tag blueprint.DependencyTag) bool
 
-// Snapshottable defines those functions necessary for handling module snapshots.
-type Snapshottable interface {
-	snapshot.VendorSnapshotModuleInterface
-	snapshot.RecoverySnapshotModuleInterface
-
-	// SnapshotHeaders returns a list of header paths provided by this module.
-	SnapshotHeaders() android.Paths
-
-	// SnapshotLibrary returns true if this module is a snapshot library.
-	IsSnapshotLibrary() bool
-
-	// EffectiveLicenseFiles returns the list of License files for this module.
-	EffectiveLicenseFiles() android.Paths
-
-	// SnapshotRuntimeLibs returns a list of libraries needed by this module at runtime but which aren't build dependencies.
-	SnapshotRuntimeLibs() []string
-
-	// SnapshotSharedLibs returns the list of shared library dependencies for this module.
-	SnapshotSharedLibs() []string
-
-	// SnapshotStaticLibs returns the list of static library dependencies for this module.
-	SnapshotStaticLibs() []string
-
-	// SnapshotDylibs returns the list of dylib library dependencies for this module.
-	SnapshotDylibs() []string
-
-	// SnapshotRlibs returns the list of rlib library dependencies for this module.
-	SnapshotRlibs() []string
-
-	// IsSnapshotPrebuilt returns true if this module is a snapshot prebuilt.
-	IsSnapshotPrebuilt() bool
-
-	// IsSnapshotSanitizer returns true if this snapshot module implements SnapshotSanitizer.
-	IsSnapshotSanitizer() bool
-
-	// IsSnapshotSanitizerAvailable returns true if this snapshot module has a sanitizer source available (cfi, hwasan).
-	IsSnapshotSanitizerAvailable(t SanitizerType) bool
-
-	// SetSnapshotSanitizerVariation sets the sanitizer variation type for this snapshot module.
-	SetSnapshotSanitizerVariation(t SanitizerType, enabled bool)
-
-	// IsSnapshotUnsanitizedVariant returns true if this is the unsanitized snapshot module variant.
-	IsSnapshotUnsanitizedVariant() bool
-}
-
 // LinkableInterface is an interface for a type of module that is linkable in a C++ library.
 type LinkableInterface interface {
 	android.Module
-	Snapshottable
 
 	Module() android.Module
 	CcLibrary() bool
@@ -218,6 +171,7 @@ type LinkableInterface interface {
 	ProductSpecific() bool
 	InProduct() bool
 	SdkAndPlatformVariantVisibleToMake() bool
+	InVendorOrProduct() bool
 
 	// SubName returns the modules SubName, used for image and NDK/SDK variations.
 	SubName() string
@@ -368,7 +322,7 @@ type SharedLibraryInfo struct {
 	TransitiveStaticLibrariesForOrdering *android.DepSet[android.Path]
 }
 
-var SharedLibraryInfoProvider = blueprint.NewProvider(SharedLibraryInfo{})
+var SharedLibraryInfoProvider = blueprint.NewProvider[SharedLibraryInfo]()
 
 // SharedStubLibrary is a struct containing information about a stub shared library.
 // Stub libraries are used for cross-APEX dependencies; when a library is to depend on a shared
@@ -391,7 +345,7 @@ type SharedLibraryStubsInfo struct {
 	IsLLNDK bool
 }
 
-var SharedLibraryStubsProvider = blueprint.NewProvider(SharedLibraryStubsInfo{})
+var SharedLibraryStubsProvider = blueprint.NewProvider[SharedLibraryStubsInfo]()
 
 // StaticLibraryInfo is a provider to propagate information about a static C++ library.
 type StaticLibraryInfo struct {
@@ -410,14 +364,14 @@ type StaticLibraryInfo struct {
 	TransitiveStaticLibrariesForOrdering *android.DepSet[android.Path]
 }
 
-var StaticLibraryInfoProvider = blueprint.NewProvider(StaticLibraryInfo{})
+var StaticLibraryInfoProvider = blueprint.NewProvider[StaticLibraryInfo]()
 
 // HeaderLibraryInfo is a marker provider that identifies a module as a header library.
 type HeaderLibraryInfo struct {
 }
 
 // HeaderLibraryInfoProvider is a marker provider that identifies a module as a header library.
-var HeaderLibraryInfoProvider = blueprint.NewProvider(HeaderLibraryInfo{})
+var HeaderLibraryInfoProvider = blueprint.NewProvider[HeaderLibraryInfo]()
 
 // FlagExporterInfo is a provider to propagate transitive library information
 // pertaining to exported include paths and flags.
@@ -429,4 +383,4 @@ type FlagExporterInfo struct {
 	GeneratedHeaders  android.Paths
 }
 
-var FlagExporterInfoProvider = blueprint.NewProvider(FlagExporterInfo{})
+var FlagExporterInfoProvider = blueprint.NewProvider[FlagExporterInfo]()

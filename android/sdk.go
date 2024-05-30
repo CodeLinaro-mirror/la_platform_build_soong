@@ -860,11 +860,19 @@ type ExportedComponentsInfo struct {
 	Components []string
 }
 
-var ExportedComponentsInfoProvider = blueprint.NewProvider(ExportedComponentsInfo{})
+var ExportedComponentsInfoProvider = blueprint.NewProvider[ExportedComponentsInfo]()
 
 // AdditionalSdkInfo contains additional properties to add to the generated SDK info file.
 type AdditionalSdkInfo struct {
 	Properties map[string]interface{}
 }
 
-var AdditionalSdkInfoProvider = blueprint.NewProvider(AdditionalSdkInfo{})
+var AdditionalSdkInfoProvider = blueprint.NewProvider[AdditionalSdkInfo]()
+
+var apiFingerprintPathKey = NewOnceKey("apiFingerprintPathKey")
+
+func ApiFingerprintPath(ctx PathContext) OutputPath {
+	return ctx.Config().Once(apiFingerprintPathKey, func() interface{} {
+		return PathForOutput(ctx, "api_fingerprint.txt")
+	}).(OutputPath)
+}

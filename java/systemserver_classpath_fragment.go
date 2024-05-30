@@ -189,7 +189,7 @@ func (b systemServerClasspathFragmentContentDependencyTag) SdkMemberType(child a
 		return javaSdkLibrarySdkMemberType
 	}
 
-	return javaSystemserverLibsSdkMemberType
+	return JavaSystemserverLibsSdkMemberType
 }
 
 func (b systemServerClasspathFragmentContentDependencyTag) ExportMember() bool {
@@ -311,6 +311,10 @@ func (module *prebuiltSystemServerClasspathModule) Name() string {
 
 func (module *prebuiltSystemServerClasspathModule) RequiredFilesFromPrebuiltApex(ctx android.BaseModuleContext) []string {
 	return nil
+}
+
+func (module *prebuiltSystemServerClasspathModule) UseProfileGuidedDexpreopt() bool {
+	return false
 }
 
 var _ android.RequiredFilesFromPrebuiltApex = (*prebuiltSystemServerClasspathModule)(nil)
