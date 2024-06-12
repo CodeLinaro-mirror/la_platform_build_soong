@@ -15,6 +15,7 @@
 package android
 
 import (
+	"maps"
 	"strings"
 
 	"github.com/google/blueprint"
@@ -55,6 +56,9 @@ type fileGroup struct {
 	DefaultableModuleBase
 	properties fileGroupProperties
 	srcs       Paths
+
+	// Aconfig files for all transitive deps.  Also exposed via TransitiveDeclarationsInfo
+	mergedAconfigFiles map[string]Paths
 }
 
 var _ SourceFileProducer = (*fileGroup)(nil)
@@ -92,7 +96,27 @@ func (fg *fileGroup) GenerateAndroidBuildActions(ctx ModuleContext) {
 	if fg.properties.Path != nil {
 		fg.srcs = PathsWithModuleSrcSubDir(ctx, fg.srcs, String(fg.properties.Path))
 	}
-	ctx.SetProvider(blueprint.SrcsFileProviderKey, blueprint.SrcsFileProviderData{SrcPaths: fg.srcs.Strings()})
+	SetProvider(ctx, blueprint.SrcsFileProviderKey, blueprint.SrcsFileProviderData{SrcPaths: fg.srcs.Strings()})
+	CollectDependencyAconfigFiles(ctx, &fg.mergedAconfigFiles)
+
+	var aconfigDeclarations []string
+	var intermediateCacheOutputPaths Paths
+	var srcjars Paths
+	modeInfos := make(map[string]ModeInfo)
+	ctx.VisitDirectDeps(func(module Module) {
+		if dep, ok := OtherModuleProvider(ctx, module, CodegenInfoProvider); ok {
+			aconfigDeclarations = append(aconfigDeclarations, dep.AconfigDeclarations...)
+			intermediateCacheOutputPaths = append(intermediateCacheOutputPaths, dep.IntermediateCacheOutputPaths...)
+			srcjars = append(srcjars, dep.Srcjars...)
+			maps.Copy(modeInfos, dep.ModeInfos)
+		}
+	})
+	SetProvider(ctx, CodegenInfoProvider, CodegenInfo{
+		AconfigDeclarations:          aconfigDeclarations,
+		IntermediateCacheOutputPaths: intermediateCacheOutputPaths,
+		Srcjars:                      srcjars,
+		ModeInfos:                    modeInfos,
+	})
 }
 
 func (fg *fileGroup) Srcs() Paths {

@@ -75,6 +75,8 @@ type compiler interface {
 	strippedOutputFilePath() android.OptionalPath
 
 	checkedCrateRootPath() (android.Path, error)
+
+	Aliases() map[string]string
 }
 
 func (compiler *baseCompiler) edition() string {
@@ -139,6 +141,12 @@ type BaseCompilerProperties struct {
 
 	// flags to pass to the linker
 	Ld_flags []string `android:"arch_variant"`
+
+	// Rust crate dependencies to rename. Each entry should be a string of the form "dependencyname:alias".
+	//
+	// "dependencyname" here should be the name of the crate, not the Android module. This is
+	// equivalent to writing `alias = { package = "dependencyname" }` in a `Cargo.toml`.
+	Aliases []string
 
 	// list of rust rlib crate dependencies
 	Rlibs []string `android:"arch_variant"`
@@ -281,6 +289,18 @@ func (compiler *baseCompiler) preferRlib() bool {
 	return Bool(compiler.Properties.Prefer_rlib)
 }
 
+func (compiler *baseCompiler) Aliases() map[string]string {
+	aliases := map[string]string{}
+	for _, entry := range compiler.Properties.Aliases {
+		dep, alias, found := strings.Cut(entry, ":")
+		if !found {
+			panic(fmt.Errorf("invalid aliases entry %q missing ':'", entry))
+		}
+		aliases[dep] = alias
+	}
+	return aliases
+}
+
 func (compiler *baseCompiler) stdLinkage(ctx *depsContext) RustLinkage {
 	// For devices, we always link stdlibs in as dylibs by default.
 	if compiler.preferRlib() {
@@ -332,7 +352,7 @@ func (compiler *baseCompiler) featureFlags(ctx ModuleContext, flags Flags) Flags
 }
 
 func (compiler *baseCompiler) cfgFlags(ctx ModuleContext, flags Flags) Flags {
-	if ctx.RustModule().UseVndk() {
+	if ctx.RustModule().InVendorOrProduct() {
 		compiler.Properties.Cfgs = append(compiler.Properties.Cfgs, "android_vndk")
 		if ctx.RustModule().InVendor() {
 			compiler.Properties.Cfgs = append(compiler.Properties.Cfgs, "android_vendor")
@@ -520,7 +540,7 @@ func (compiler *baseCompiler) installDir(ctx ModuleContext) android.InstallPath 
 		dir = filepath.Join(dir, ctx.Arch().ArchType.String())
 	}
 
-	if compiler.location == InstallInData && ctx.RustModule().UseVndk() {
+	if compiler.location == InstallInData && ctx.RustModule().InVendorOrProduct() {
 		if ctx.RustModule().InProduct() {
 			dir = filepath.Join(dir, "product")
 		} else if ctx.RustModule().InVendor() {

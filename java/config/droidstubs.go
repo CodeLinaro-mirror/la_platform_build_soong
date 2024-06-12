@@ -51,13 +51,6 @@ var (
 	}
 
 	MetalavaAnnotationsWarningsFlags = strings.Join(metalavaAnnotationsWarningsFlags, " ")
-
-	metalavaHideFlaggedApis = []string{
-		"--revert-annotation",
-		"android.annotation.FlaggedApi",
-	}
-
-	MetalavaHideFlaggedApis = strings.Join(metalavaHideFlaggedApis, " ")
 )
 
 const (
@@ -65,13 +58,7 @@ const (
 )
 
 func init() {
-	exportedVars.ExportStringList("MetalavaFlags", metalavaFlags)
+	pctx.StaticVariable("MetalavaAnnotationsFlags", strings.Join(metalavaAnnotationsFlags, " "))
 
-	exportedVars.ExportString("MetalavaAddOpens", MetalavaAddOpens)
-
-	exportedVars.ExportStringList("MetalavaHideFlaggedApis", metalavaHideFlaggedApis)
-
-	exportedVars.ExportStringListStaticVariable("MetalavaAnnotationsFlags", metalavaAnnotationsFlags)
-
-	exportedVars.ExportStringListStaticVariable("MetalavaAnnotationWarningsFlags", metalavaAnnotationsWarningsFlags)
+	pctx.StaticVariable("MetalavaAnnotationWarningsFlags", strings.Join(metalavaAnnotationsWarningsFlags, " "))
 }

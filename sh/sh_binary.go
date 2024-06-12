@@ -20,12 +20,12 @@ import (
 	"strings"
 
 	"android/soong/testing"
+
 	"github.com/google/blueprint"
 	"github.com/google/blueprint/proptools"
 
 	"android/soong/android"
 	"android/soong/cc"
-	"android/soong/snapshot"
 	"android/soong/tradefed"
 )
 
@@ -270,7 +270,7 @@ func (s *ShBinary) generateAndroidBuildActions(ctx android.ModuleContext) {
 		Output: s.outputFilePath,
 		Input:  s.sourceFilePath,
 	})
-	ctx.SetProvider(blueprint.SrcsFileProviderKey, blueprint.SrcsFileProviderData{SrcPaths: []string{s.sourceFilePath.String()}})
+	android.SetProvider(ctx, blueprint.SrcsFileProviderKey, blueprint.SrcsFileProviderData{SrcPaths: []string{s.sourceFilePath.String()}})
 }
 
 func (s *ShBinary) GenerateAndroidBuildActions(ctx android.ModuleContext) {
@@ -457,7 +457,7 @@ func (s *ShTest) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	installedData := ctx.InstallTestData(s.installDir, s.data)
 	s.installedFile = ctx.InstallExecutable(s.installDir, s.outputFilePath.Base(), s.outputFilePath, installedData...)
 
-	ctx.SetProvider(testing.TestModuleProviderKey, testing.TestModuleProviderData{})
+	android.SetProvider(ctx, testing.TestModuleProviderKey, testing.TestModuleProviderData{})
 }
 
 func (s *ShTest) InstallInData() bool {
@@ -535,5 +535,3 @@ func ShTestHostFactory() android.Module {
 }
 
 var Bool = proptools.Bool
-
-var _ snapshot.RelativeInstallPath = (*ShBinary)(nil)

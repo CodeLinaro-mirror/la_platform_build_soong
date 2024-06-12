@@ -15,7 +15,6 @@
 package android
 
 import (
-	"android/soong/bazel"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -23,16 +22,21 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
+	"android/soong/bazel"
+
 	"github.com/google/blueprint"
+	"github.com/google/blueprint/parser"
 	"github.com/google/blueprint/proptools"
 )
 
 var (
 	DeviceSharedLibrary = "shared_library"
 	DeviceStaticLibrary = "static_library"
+	jarJarPrefixHandler func(ctx ModuleContext)
 )
 
 type Module interface {
@@ -77,6 +81,8 @@ type Module interface {
 	InstallInDebugRamdisk() bool
 	InstallInRecovery() bool
 	InstallInRoot() bool
+	InstallInOdm() bool
+	InstallInProduct() bool
 	InstallInVendor() bool
 	InstallForceOS() (*OsType, *ArchType)
 	PartitionTag(DeviceConfig) string
@@ -118,6 +124,8 @@ type Module interface {
 	// TransitivePackagingSpecs returns the PackagingSpecs for this module and any transitive
 	// dependencies with dependency tags for which IsInstallDepNeeded() returns true.
 	TransitivePackagingSpecs() []PackagingSpec
+
+	ConfigurableEvaluator(ctx ConfigAndErrorContext) proptools.ConfigurableEvaluator
 }
 
 // Qualified id for a module
@@ -323,7 +331,7 @@ type commonProperties struct {
 	// defaults module, use the `defaults_visibility` property on the defaults module;
 	// not to be confused with the `default_visibility` property on the package module.
 	//
-	// See https://android.googlesource.com/platform/build/soong/+/master/README.md#visibility for
+	// See https://android.googlesource.com/platform/build/soong/+/main/README.md#visibility for
 	// more details.
 	Visibility []string
 
@@ -428,6 +436,10 @@ type commonProperties struct {
 	// Set by osMutator
 	CompileOS OsType `blueprint:"mutated"`
 
+	// Set to true after the arch mutator has run on this module and set CompileTarget,
+	// CompileMultiTargets, and CompilePrimary
+	ArchReady bool `blueprint:"mutated"`
+
 	// The Target of artifacts that this module variant is responsible for creating.
 	//
 	// Set by archMutator
@@ -516,6 +528,9 @@ type commonProperties struct {
 	// trace, but influence modules among products.
 	SoongConfigTrace     soongConfigTrace `blueprint:"mutated"`
 	SoongConfigTraceHash string           `blueprint:"mutated"`
+
+	// The team (defined by the owner/vendor) who owns the property.
+	Team *string `android:"path"`
 }
 
 type distProperties struct {
@@ -527,6 +542,21 @@ type distProperties struct {
 	// distribution directory (default: $OUT/dist, configurable with $DIST_DIR)
 	Dists []Dist `android:"arch_variant"`
 }
+
+type TeamDepTagType struct {
+	blueprint.BaseDependencyTag
+}
+
+var teamDepTag = TeamDepTagType{}
+
+// Dependency tag for required, host_required, and target_required modules.
+var RequiredDepTag = struct {
+	blueprint.BaseDependencyTag
+	InstallAlwaysNeededDependencyTag
+	// Requiring disabled module has been supported (as a side effect of this being implemented
+	// in Make). We may want to make it an error, but for now, let's keep the existing behavior.
+	AlwaysAllowDisabledModuleDependencyTag
+}{}
 
 // CommonTestOptions represents the common `test_options` properties in
 // Android.bp.
@@ -837,8 +867,12 @@ type ModuleBase struct {
 	// katiInstalls tracks the install rules that were created by Soong but are being exported
 	// to Make to convert to ninja rules so that Make can add additional dependencies.
 	katiInstalls katiInstalls
-	katiSymlinks katiInstalls
-	testData     []DataPath
+	// katiInitRcInstalls and katiVintfInstalls track the install rules created by Soong that are
+	// allowed to have duplicates across modules and variants.
+	katiInitRcInstalls katiInstalls
+	katiVintfInstalls  katiInstalls
+	katiSymlinks       katiInstalls
+	testData           []DataPath
 
 	// The files to copy to the dist as explicitly specified in the .bp file.
 	distFiles TaggedDistFiles
@@ -861,12 +895,19 @@ type ModuleBase struct {
 	initRcPaths         Paths
 	vintfFragmentsPaths Paths
 
+	installedInitRcPaths         InstallPaths
+	installedVintfFragmentsPaths InstallPaths
+
 	// set of dependency module:location mappings used to populate the license metadata for
 	// apex containers.
 	licenseInstallMap []string
 
 	// The path to the generated license metadata file for the module.
 	licenseMetadataFile WritablePath
+
+	// moduleInfoJSON can be filled out by GenerateAndroidBuildActions to write a JSON file that will
+	// be included in the final module-info.json produced by Make.
+	moduleInfoJSON *ModuleInfoJSON
 }
 
 func (m *ModuleBase) AddJSONData(d *map[string]interface{}) {
@@ -977,6 +1018,101 @@ func sliceReflectionValue(value reflect.Value) []string {
 func (m *ModuleBase) ComponentDepsMutator(BottomUpMutatorContext) {}
 
 func (m *ModuleBase) DepsMutator(BottomUpMutatorContext) {}
+
+func (m *ModuleBase) baseDepsMutator(ctx BottomUpMutatorContext) {
+	if m.Team() != "" {
+		ctx.AddDependency(ctx.Module(), teamDepTag, m.Team())
+	}
+
+	// TODO(jiyong): remove below case. This is to work around build errors happening
+	// on branches with reduced manifest like aosp_kernel-build-tools.
+	// In the branch, a build error occurs as follows.
+	// 1. aosp_kernel-build-tools is a reduced manifest branch. It doesn't have some git
+	// projects like external/bouncycastle
+	// 2. `boot_signer` is `required` by modules like `build_image` which is explicitly list as
+	// the top-level build goal (in the shell file that invokes Soong).
+	// 3. `boot_signer` depends on `bouncycastle-unbundled` which is in the missing git project.
+	// 4. aosp_kernel-build-tools invokes soong with `--skip-make`. Therefore, the absence of
+	// ALLOW_MISSING_DEPENDENCIES didn't cause a problem.
+	// 5. Now, since Soong understands `required` deps, it tries to build `boot_signer` and the
+	// absence of external/bouncycastle fails the build.
+	//
+	// Unfortunately, there's no way for Soong to correctly determine if it's running in a
+	// reduced manifest branch. Instead, here, we use the absence of DeviceArch or DeviceName as
+	// a strong signal, because that's very common across reduced manifest branches.
+	pv := ctx.Config().productVariables
+	fullManifest := pv.DeviceArch != nil && pv.DeviceName != nil
+	if fullManifest {
+		m.addRequiredDeps(ctx)
+	}
+}
+
+// addRequiredDeps adds required, target_required, and host_required as dependencies.
+func (m *ModuleBase) addRequiredDeps(ctx BottomUpMutatorContext) {
+	addDep := func(target Target, depName string) {
+		if !ctx.OtherModuleExists(depName) {
+			if ctx.Config().AllowMissingDependencies() {
+				return
+			}
+		}
+
+		// If Android native module requires another Android native module, ensure that
+		// they have the same bitness. This mimics the policy in select-bitness-of-required-modules
+		// in build/make/core/main.mk.
+		// TODO(jiyong): the Make-side does this only when the required module is a shared
+		// library or a native test.
+		bothInAndroid := m.Device() && target.Os.Class == Device
+		nativeArch := InList(m.Arch().ArchType.Multilib, []string{"lib32", "lib64"})
+		sameBitness := m.Arch().ArchType.Multilib == target.Arch.ArchType.Multilib
+		if bothInAndroid && nativeArch && !sameBitness {
+			return
+		}
+
+		variation := target.Variations()
+		if ctx.OtherModuleFarDependencyVariantExists(variation, depName) {
+			ctx.AddFarVariationDependencies(variation, RequiredDepTag, depName)
+		}
+	}
+
+	var deviceTargets []Target
+	deviceTargets = append(deviceTargets, ctx.Config().Targets[Android]...)
+	deviceTargets = append(deviceTargets, ctx.Config().AndroidCommonTarget)
+
+	var hostTargets []Target
+	hostTargets = append(hostTargets, ctx.Config().Targets[ctx.Config().BuildOS]...)
+	hostTargets = append(hostTargets, ctx.Config().BuildOSCommonTarget)
+
+	if m.Device() {
+		for _, depName := range m.RequiredModuleNames() {
+			for _, target := range deviceTargets {
+				addDep(target, depName)
+			}
+		}
+		for _, depName := range m.HostRequiredModuleNames() {
+			for _, target := range hostTargets {
+				addDep(target, depName)
+			}
+		}
+	}
+
+	if m.Host() {
+		for _, depName := range m.RequiredModuleNames() {
+			for _, target := range hostTargets {
+				// When a host module requires another host module, don't make a
+				// dependency if they have different OSes (i.e. hostcross).
+				if m.Target().HostCross != target.HostCross {
+					continue
+				}
+				addDep(target, depName)
+			}
+		}
+		for _, depName := range m.TargetRequiredModuleNames() {
+			for _, target := range deviceTargets {
+				addDep(target, depName)
+			}
+		}
+	}
+}
 
 // AddProperties "registers" the provided props
 // each value in props MUST be a pointer to a struct
@@ -1103,6 +1239,10 @@ func (m *ModuleBase) GenerateTaggedDistFiles(ctx BaseModuleContext) TaggedDistFi
 	}
 
 	return distFiles
+}
+
+func (m *ModuleBase) ArchReady() bool {
+	return m.commonProperties.ArchReady
 }
 
 func (m *ModuleBase) Target() Target {
@@ -1399,6 +1539,14 @@ func (m *ModuleBase) InstallInRecovery() bool {
 	return Bool(m.commonProperties.Recovery)
 }
 
+func (m *ModuleBase) InstallInOdm() bool {
+	return false
+}
+
+func (m *ModuleBase) InstallInProduct() bool {
+	return false
+}
+
 func (m *ModuleBase) InstallInVendor() bool {
 	return Bool(m.commonProperties.Vendor) || Bool(m.commonProperties.Soc_specific) || Bool(m.commonProperties.Proprietary)
 }
@@ -1413,6 +1561,10 @@ func (m *ModuleBase) InstallForceOS() (*OsType, *ArchType) {
 
 func (m *ModuleBase) Owner() string {
 	return String(m.commonProperties.Owner)
+}
+
+func (m *ModuleBase) Team() string {
+	return String(m.commonProperties.Team)
 }
 
 func (m *ModuleBase) setImageVariation(variant string) {
@@ -1600,12 +1752,30 @@ func (m *ModuleBase) earlyModuleContextFactory(ctx blueprint.EarlyModuleContext)
 func (m *ModuleBase) baseModuleContextFactory(ctx blueprint.BaseModuleContext) baseModuleContext {
 	return baseModuleContext{
 		bp:                 ctx,
+		archModuleContext:  m.archModuleContextFactory(ctx),
 		earlyModuleContext: m.earlyModuleContextFactory(ctx),
-		os:                 m.commonProperties.CompileOS,
-		target:             m.commonProperties.CompileTarget,
-		targetPrimary:      m.commonProperties.CompilePrimary,
-		multiTargets:       m.commonProperties.CompileMultiTargets,
 	}
+}
+
+func (m *ModuleBase) archModuleContextFactory(ctx blueprint.IncomingTransitionContext) archModuleContext {
+	config := ctx.Config().(Config)
+	target := m.Target()
+	primaryArch := false
+	if len(config.Targets[target.Os]) <= 1 {
+		primaryArch = true
+	} else {
+		primaryArch = target.Arch.ArchType == config.Targets[target.Os][0].Arch.ArchType
+	}
+
+	return archModuleContext{
+		ready:         m.commonProperties.ArchReady,
+		os:            m.commonProperties.CompileOS,
+		target:        m.commonProperties.CompileTarget,
+		targetPrimary: m.commonProperties.CompilePrimary,
+		multiTargets:  m.commonProperties.CompileMultiTargets,
+		primaryArch:   primaryArch,
+	}
+
 }
 
 func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) {
@@ -1648,7 +1818,7 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 	if !ctx.PrimaryArch() {
 		suffix = append(suffix, ctx.Arch().ArchType.String())
 	}
-	if apexInfo := ctx.Provider(ApexInfoProvider).(ApexInfo); !apexInfo.IsForPlatform() {
+	if apexInfo, _ := ModuleProvider(ctx, ApexInfoProvider); !apexInfo.IsForPlatform() {
 		suffix = append(suffix, apexInfo.ApexVariationName)
 	}
 
@@ -1670,13 +1840,55 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 		// ensure all direct android.Module deps are enabled
 		ctx.VisitDirectDepsBlueprint(func(bm blueprint.Module) {
 			if m, ok := bm.(Module); ok {
-				ctx.validateAndroidModule(bm, ctx.OtherModuleDependencyTag(m), ctx.baseModuleContext.strictVisitDeps)
+				ctx.validateAndroidModule(bm, ctx.OtherModuleDependencyTag(m), ctx.baseModuleContext.strictVisitDeps, false)
 			}
 		})
+
+		if m.Device() {
+			// Handle any init.rc and vintf fragment files requested by the module.  All files installed by this
+			// module will automatically have a dependency on the installed init.rc or vintf fragment file.
+			// The same init.rc or vintf fragment file may be requested by multiple modules or variants,
+			// so instead of installing them now just compute the install path and store it for later.
+			// The full list of all init.rc and vintf fragment install rules will be deduplicated later
+			// so only a single rule is created for each init.rc or vintf fragment file.
+
+			if !m.InVendorRamdisk() {
+				m.initRcPaths = PathsForModuleSrc(ctx, m.commonProperties.Init_rc)
+				rcDir := PathForModuleInstall(ctx, "etc", "init")
+				for _, src := range m.initRcPaths {
+					installedInitRc := rcDir.Join(ctx, src.Base())
+					m.katiInitRcInstalls = append(m.katiInitRcInstalls, katiInstall{
+						from: src,
+						to:   installedInitRc,
+					})
+					ctx.PackageFile(rcDir, src.Base(), src)
+					m.installedInitRcPaths = append(m.installedInitRcPaths, installedInitRc)
+				}
+			}
+
+			m.vintfFragmentsPaths = PathsForModuleSrc(ctx, m.commonProperties.Vintf_fragments)
+			vintfDir := PathForModuleInstall(ctx, "etc", "vintf", "manifest")
+			for _, src := range m.vintfFragmentsPaths {
+				installedVintfFragment := vintfDir.Join(ctx, src.Base())
+				m.katiVintfInstalls = append(m.katiVintfInstalls, katiInstall{
+					from: src,
+					to:   installedVintfFragment,
+				})
+				ctx.PackageFile(vintfDir, src.Base(), src)
+				m.installedVintfFragmentsPaths = append(m.installedVintfFragmentsPaths, installedVintfFragment)
+			}
+		}
 
 		licensesPropertyFlattener(ctx)
 		if ctx.Failed() {
 			return
+		}
+
+		if jarJarPrefixHandler != nil {
+			jarJarPrefixHandler(ctx)
+			if ctx.Failed() {
+				return
+			}
 		}
 
 		m.module.GenerateAndroidBuildActions(ctx)
@@ -1684,16 +1896,9 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 			return
 		}
 
-		m.initRcPaths = PathsForModuleSrc(ctx, m.commonProperties.Init_rc)
-		rcDir := PathForModuleInstall(ctx, "etc", "init")
-		for _, src := range m.initRcPaths {
-			ctx.PackageFile(rcDir, filepath.Base(src.String()), src)
-		}
-
-		m.vintfFragmentsPaths = PathsForModuleSrc(ctx, m.commonProperties.Vintf_fragments)
-		vintfDir := PathForModuleInstall(ctx, "etc", "vintf", "manifest")
-		for _, src := range m.vintfFragmentsPaths {
-			ctx.PackageFile(vintfDir, filepath.Base(src.String()), src)
+		aconfigUpdateAndroidBuildActions(ctx)
+		if ctx.Failed() {
+			return
 		}
 
 		// Create the set of tagged dist files after calling GenerateAndroidBuildActions
@@ -1731,9 +1936,95 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 
 	buildLicenseMetadata(ctx, m.licenseMetadataFile)
 
+	if m.moduleInfoJSON != nil {
+		var installed InstallPaths
+		installed = append(installed, m.katiInstalls.InstallPaths()...)
+		installed = append(installed, m.katiSymlinks.InstallPaths()...)
+		installed = append(installed, m.katiInitRcInstalls.InstallPaths()...)
+		installed = append(installed, m.katiVintfInstalls.InstallPaths()...)
+		installedStrings := installed.Strings()
+
+		var targetRequired, hostRequired []string
+		if ctx.Host() {
+			targetRequired = m.commonProperties.Target_required
+		} else {
+			hostRequired = m.commonProperties.Host_required
+		}
+
+		var data []string
+		for _, d := range m.testData {
+			data = append(data, d.ToRelativeInstallPath())
+		}
+
+		if m.moduleInfoJSON.Uninstallable {
+			installedStrings = nil
+			if len(m.moduleInfoJSON.CompatibilitySuites) == 1 && m.moduleInfoJSON.CompatibilitySuites[0] == "null-suite" {
+				m.moduleInfoJSON.CompatibilitySuites = nil
+				m.moduleInfoJSON.TestConfig = nil
+				m.moduleInfoJSON.AutoTestConfig = nil
+				data = nil
+			}
+		}
+
+		m.moduleInfoJSON.core = CoreModuleInfoJSON{
+			RegisterName:       m.moduleInfoRegisterName(ctx, m.moduleInfoJSON.SubName),
+			Path:               []string{ctx.ModuleDir()},
+			Installed:          installedStrings,
+			ModuleName:         m.BaseModuleName() + m.moduleInfoJSON.SubName,
+			SupportedVariants:  []string{m.moduleInfoVariant(ctx)},
+			TargetDependencies: targetRequired,
+			HostDependencies:   hostRequired,
+			Data:               data,
+		}
+		SetProvider(ctx, ModuleInfoJSONProvider, m.moduleInfoJSON)
+	}
+
 	m.buildParams = ctx.buildParams
 	m.ruleParams = ctx.ruleParams
 	m.variables = ctx.variables
+}
+
+func SetJarJarPrefixHandler(handler func(ModuleContext)) {
+	if jarJarPrefixHandler != nil {
+		panic("jarJarPrefixHandler already set")
+	}
+	jarJarPrefixHandler = handler
+}
+
+func (m *ModuleBase) moduleInfoRegisterName(ctx ModuleContext, subName string) string {
+	name := m.BaseModuleName()
+
+	prefix := ""
+	if ctx.Host() {
+		if ctx.Os() != ctx.Config().BuildOS {
+			prefix = "host_cross_"
+		}
+	}
+	suffix := ""
+	arches := slices.Clone(ctx.Config().Targets[ctx.Os()])
+	arches = slices.DeleteFunc(arches, func(target Target) bool {
+		return target.NativeBridge != ctx.Target().NativeBridge
+	})
+	if len(arches) > 0 && ctx.Arch().ArchType != arches[0].Arch.ArchType {
+		if ctx.Arch().ArchType.Multilib == "lib32" {
+			suffix = "_32"
+		} else {
+			suffix = "_64"
+		}
+	}
+	return prefix + name + subName + suffix
+}
+
+func (m *ModuleBase) moduleInfoVariant(ctx ModuleContext) string {
+	variant := "DEVICE"
+	if ctx.Host() {
+		if ctx.Os() != ctx.Config().BuildOS {
+			variant = "HOST_CROSS"
+		} else {
+			variant = "HOST"
+		}
+	}
+	return variant
 }
 
 // Check the supplied dist structure to make sure that it is valid.
@@ -1828,6 +2119,65 @@ func (m *ModuleBase) IsNativeBridgeSupported() bool {
 	return proptools.Bool(m.commonProperties.Native_bridge_supported)
 }
 
+type ConfigAndErrorContext interface {
+	Config() Config
+	OtherModulePropertyErrorf(module Module, property string, fmt string, args ...interface{})
+}
+
+type configurationEvalutor struct {
+	ctx ConfigAndErrorContext
+	m   Module
+}
+
+func (m *ModuleBase) ConfigurableEvaluator(ctx ConfigAndErrorContext) proptools.ConfigurableEvaluator {
+	return configurationEvalutor{
+		ctx: ctx,
+		m:   m.module,
+	}
+}
+
+func (e configurationEvalutor) PropertyErrorf(property string, fmt string, args ...interface{}) {
+	e.ctx.OtherModulePropertyErrorf(e.m, property, fmt, args)
+}
+
+func (e configurationEvalutor) EvaluateConfiguration(ty parser.SelectType, property, condition string) (string, bool) {
+	ctx := e.ctx
+	m := e.m
+	switch ty {
+	case parser.SelectTypeReleaseVariable:
+		if v, ok := ctx.Config().productVariables.BuildFlags[condition]; ok {
+			return v, true
+		}
+		return "", false
+	case parser.SelectTypeProductVariable:
+		// TODO(b/323382414): Might add these on a case-by-case basis
+		ctx.OtherModulePropertyErrorf(m, property, "TODO(b/323382414): Product variables are not yet supported in selects")
+		return "", false
+	case parser.SelectTypeSoongConfigVariable:
+		parts := strings.Split(condition, ":")
+		namespace := parts[0]
+		variable := parts[1]
+		if n, ok := ctx.Config().productVariables.VendorVars[namespace]; ok {
+			if v, ok := n[variable]; ok {
+				return v, true
+			}
+		}
+		return "", false
+	case parser.SelectTypeVariant:
+		if condition == "arch" {
+			if !m.base().ArchReady() {
+				ctx.OtherModulePropertyErrorf(m, property, "A select on arch was attempted before the arch mutator ran")
+				return "", false
+			}
+			return m.base().Arch().ArchType.Name, true
+		}
+		ctx.OtherModulePropertyErrorf(m, property, "Unknown variant %s", condition)
+		return "", false
+	default:
+		panic("Should be unreachable")
+	}
+}
+
 // ModuleNameWithPossibleOverride returns the name of the OverrideModule that overrides the current
 // variant of this OverridableModule, or ctx.ModuleName() if this module is not an OverridableModule
 // or if this variant is not overridden.
@@ -1907,6 +2257,7 @@ func isUnqualifiedModuleName(module string) bool {
 // caused by prebuilt_ prefix, or fully qualified module names.
 type sourceOrOutputDependencyTag struct {
 	blueprint.BaseDependencyTag
+	AlwaysPropagateAconfigValidationDependencyTag
 
 	// The name of the module.
 	moduleName string

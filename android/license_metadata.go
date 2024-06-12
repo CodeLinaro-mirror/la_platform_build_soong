@@ -77,9 +77,13 @@ func buildLicenseMetadata(ctx ModuleContext, licenseMetadataFile WritablePath) {
 		if ctx.OtherModuleDependencyTag(dep) == DefaultsDepTag {
 			return
 		}
+		// The required dependencies just say modules A and B should be installed together.
+		// It doesn't mean that one is built using the other.
+		if ctx.OtherModuleDependencyTag(dep) == RequiredDepTag {
+			return
+		}
 
-		if ctx.OtherModuleHasProvider(dep, LicenseMetadataProvider) {
-			info := ctx.OtherModuleProvider(dep, LicenseMetadataProvider).(*LicenseMetadataInfo)
+		if info, ok := OtherModuleProvider(ctx, dep, LicenseMetadataProvider); ok {
 			allDepMetadataFiles = append(allDepMetadataFiles, info.LicenseMetadataPath)
 			if isContainer || isInstallDepNeeded(dep, ctx.OtherModuleDependencyTag(dep)) {
 				allDepMetadataDepSets = append(allDepMetadataDepSets, info.LicenseMetadataDepSet)
@@ -175,7 +179,7 @@ func buildLicenseMetadata(ctx ModuleContext, licenseMetadataFile WritablePath) {
 		},
 	})
 
-	ctx.SetProvider(LicenseMetadataProvider, &LicenseMetadataInfo{
+	SetProvider(ctx, LicenseMetadataProvider, &LicenseMetadataInfo{
 		LicenseMetadataPath:   licenseMetadataFile,
 		LicenseMetadataDepSet: NewDepSet(TOPOLOGICAL, Paths{licenseMetadataFile}, allDepMetadataDepSets),
 	})
@@ -200,7 +204,7 @@ func isContainerFromFileExtensions(installPaths InstallPaths, builtPaths Paths) 
 }
 
 // LicenseMetadataProvider is used to propagate license metadata paths between modules.
-var LicenseMetadataProvider = blueprint.NewProvider(&LicenseMetadataInfo{})
+var LicenseMetadataProvider = blueprint.NewProvider[*LicenseMetadataInfo]()
 
 // LicenseMetadataInfo stores the license metadata path for a module.
 type LicenseMetadataInfo struct {
