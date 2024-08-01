@@ -15,8 +15,9 @@
 package java
 
 import (
-	"android/soong/android"
 	"testing"
+
+	"android/soong/android"
 )
 
 func TestAarImportProducesJniPackages(t *testing.T) {
@@ -98,6 +99,7 @@ func TestLibraryFlagsPackages(t *testing.T) {
 		aconfig_declarations {
 			name: "bar",
 			package: "com.example.package.bar",
+			container: "com.android.foo",
 			srcs: [
 				"bar.aconfig",
 			],
@@ -105,6 +107,7 @@ func TestLibraryFlagsPackages(t *testing.T) {
 		aconfig_declarations {
 			name: "baz",
 			package: "com.example.package.baz",
+			container: "com.android.foo",
 			srcs: [
 				"baz.aconfig",
 			],
@@ -136,18 +139,19 @@ func TestAndroidLibraryOutputFilesRel(t *testing.T) {
 		android_library {
 			name: "foo",
 			srcs: ["a.java"],
+			java_resources: ["foo.txt"],
 		}
 
 		android_library_import {
 			name: "bar",
-			aars: ["bar.aar"],
+			aars: ["bar_prebuilt.aar"],
 
 		}
 
 		android_library_import {
 			name: "baz",
-			aars: ["baz.aar"],
-			static_libs: ["bar"],
+			aars: ["baz_prebuilt.aar"],
+			static_libs: ["foo", "bar"],
 		}
 	`)
 
@@ -160,11 +164,11 @@ func TestAndroidLibraryOutputFilesRel(t *testing.T) {
 	bazOutputPath := android.OutputFileForModule(android.PathContext(nil), baz.Module(), "")
 
 	android.AssertPathRelativeToTopEquals(t, "foo output path",
-		"out/soong/.intermediates/foo/android_common/javac/foo.jar", fooOutputPath)
+		"out/soong/.intermediates/foo/android_common/withres/foo.jar", fooOutputPath)
 	android.AssertPathRelativeToTopEquals(t, "bar output path",
 		"out/soong/.intermediates/bar/android_common/aar/bar.jar", barOutputPath)
 	android.AssertPathRelativeToTopEquals(t, "baz output path",
-		"out/soong/.intermediates/baz/android_common/combined/baz.jar", bazOutputPath)
+		"out/soong/.intermediates/baz/android_common/withres/baz.jar", bazOutputPath)
 
 	android.AssertStringEquals(t, "foo relative output path",
 		"foo.jar", fooOutputPath.Rel())

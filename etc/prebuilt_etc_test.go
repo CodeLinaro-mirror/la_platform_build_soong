@@ -287,6 +287,48 @@ func TestPrebuiltPrebuiltUserHyphenDataInstallDirPath(t *testing.T) {
 	android.AssertPathRelativeToTopEquals(t, "install dir", expected, p.installDirPath)
 }
 
+func TestPrebuiltPrebuiltUserKeyLayoutInstallDirPath(t *testing.T) {
+	result := prepareForPrebuiltEtcTest.RunTestWithBp(t, `
+	prebuilt_usr_keylayout {
+			name: "foo.conf",
+			src: "foo.conf",
+			sub_dir: "bar",
+		}
+	`)
+
+	p := result.Module("foo.conf", "android_arm64_armv8-a").(*PrebuiltEtc)
+	expected := "out/soong/target/product/test_device/system/usr/keylayout/bar"
+	android.AssertPathRelativeToTopEquals(t, "install dir", expected, p.installDirPath)
+}
+
+func TestPrebuiltPrebuiltUserKeyCharsInstallDirPath(t *testing.T) {
+	result := prepareForPrebuiltEtcTest.RunTestWithBp(t, `
+	prebuilt_usr_keychars {
+			name: "foo.conf",
+			src: "foo.conf",
+			sub_dir: "bar",
+		}
+	`)
+
+	p := result.Module("foo.conf", "android_arm64_armv8-a").(*PrebuiltEtc)
+	expected := "out/soong/target/product/test_device/system/usr/keychars/bar"
+	android.AssertPathRelativeToTopEquals(t, "install dir", expected, p.installDirPath)
+}
+
+func TestPrebuiltPrebuiltUserIdcInstallDirPath(t *testing.T) {
+	result := prepareForPrebuiltEtcTest.RunTestWithBp(t, `
+	prebuilt_usr_idc {
+			name: "foo.conf",
+			src: "foo.conf",
+			sub_dir: "bar",
+		}
+	`)
+
+	p := result.Module("foo.conf", "android_arm64_armv8-a").(*PrebuiltEtc)
+	expected := "out/soong/target/product/test_device/system/usr/idc/bar"
+	android.AssertPathRelativeToTopEquals(t, "install dir", expected, p.installDirPath)
+}
+
 func TestPrebuiltFontInstallDirPath(t *testing.T) {
 	result := prepareForPrebuiltEtcTest.RunTestWithBp(t, `
 		prebuilt_font {
@@ -297,6 +339,19 @@ func TestPrebuiltFontInstallDirPath(t *testing.T) {
 
 	p := result.Module("foo.conf", "android_arm64_armv8-a").(*PrebuiltEtc)
 	expected := "out/soong/target/product/test_device/system/fonts"
+	android.AssertPathRelativeToTopEquals(t, "install dir", expected, p.installDirPath)
+}
+
+func TestPrebuiltOverlayInstallDirPath(t *testing.T) {
+	result := prepareForPrebuiltEtcTest.RunTestWithBp(t, `
+		prebuilt_overlay {
+			name: "foo.conf",
+			src: "foo.conf",
+		}
+	`)
+
+	p := result.Module("foo.conf", "android_arm64_armv8-a").(*PrebuiltEtc)
+	expected := "out/soong/target/product/test_device/system/overlay"
 	android.AssertPathRelativeToTopEquals(t, "install dir", expected, p.installDirPath)
 }
 

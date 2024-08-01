@@ -56,6 +56,9 @@ type LTOProperties struct {
 
 	// Use -fwhole-program-vtables cflag.
 	Whole_program_vtables *bool
+
+	// Use --lto-O0 flag.
+	Lto_O0 *bool
 }
 
 type lto struct {
@@ -113,12 +116,8 @@ func (lto *lto) flags(ctx ModuleContext, flags Flags) Flags {
 		}
 		var ltoLdFlags []string
 
-		// The module did not explicitly turn on LTO. Only leverage LTO's
-		// better dead code elimination and CFG simplification, but do
-		// not perform costly optimizations for a balance between compile
-		// time, binary size and performance.
-		// Apply the same for Eng builds as well.
-		if !lto.ThinLTO() || ctx.Config().Eng() {
+		// Do not perform costly LTO optimizations for Eng builds.
+		if Bool(lto.Properties.Lto_O0) || ctx.Config().Eng() {
 			ltoLdFlags = append(ltoLdFlags, "-Wl,--lto-O0")
 		}
 
@@ -151,7 +150,7 @@ func (lto *lto) flags(ctx ModuleContext, flags Flags) Flags {
 
 		if !ctx.Config().IsEnvFalse("THINLTO_USE_MLGO") {
 			// Register allocation MLGO flags for ARM64.
-			if ctx.Arch().ArchType == android.Arm64 {
+			if ctx.Arch().ArchType == android.Arm64 && !ctx.optimizeForSize() {
 				ltoLdFlags = append(ltoLdFlags, "-Wl,-mllvm,-regalloc-enable-advisor=release")
 			}
 			// Flags for training MLGO model.

@@ -126,7 +126,7 @@ type generatorProperties struct {
 	//  $(out): a single output file.
 	//  $(genDir): the sandbox directory for this tool; contains $(out).
 	//  $$: a literal $
-	Cmd *string
+	Cmd proptools.Configurable[string] `android:"replace_instead_of_append"`
 
 	// name of the modules (if any) that produces the host executable.   Leave empty for
 	// prebuilts or scripts that do not need a module to build them.
@@ -180,9 +180,6 @@ type Module struct {
 
 	subName string
 	subDir  string
-
-	// Aconfig files for all transitive deps.  Also exposed via TransitiveDeclarationsInfo
-	mergedAconfigFiles map[string]android.Paths
 }
 
 type taskFunc func(ctx android.ModuleContext, rawCommand string, srcFiles android.Paths) []generateTask
@@ -299,7 +296,7 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 				case android.HostToolProvider:
 					// A HostToolProvider provides the path to a tool, which will be copied
 					// into the sandbox.
-					if !t.(android.Module).Enabled() {
+					if !t.(android.Module).Enabled(ctx) {
 						if ctx.Config().AllowMissingDependencies() {
 							ctx.AddMissingDependencies([]string{tool})
 						} else {
@@ -406,7 +403,7 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 	var outputFiles android.WritablePaths
 	var zipArgs strings.Builder
 
-	cmd := String(g.properties.Cmd)
+	cmd := g.properties.Cmd.GetOrDefault(ctx, "")
 	if g.CmdModifier != nil {
 		cmd = g.CmdModifier(ctx, cmd)
 	}
@@ -588,24 +585,6 @@ func (g *Module) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		})
 		g.outputDeps = android.Paths{phonyFile}
 	}
-	android.CollectDependencyAconfigFiles(ctx, &g.mergedAconfigFiles)
-}
-
-func (g *Module) AndroidMkEntries() []android.AndroidMkEntries {
-	ret := android.AndroidMkEntries{
-		OutputFile: android.OptionalPathForPath(g.outputFiles[0]),
-		ExtraEntries: []android.AndroidMkExtraEntriesFunc{
-			func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
-				android.SetAconfigFileMkEntries(g.AndroidModuleBase(), entries, g.mergedAconfigFiles)
-			},
-		},
-	}
-
-	return []android.AndroidMkEntries{ret}
-}
-
-func (g *Module) AndroidModuleBase() *android.ModuleBase {
-	return &g.ModuleBase
 }
 
 // Collect information for opening IDE project files in java/jdeps.go.
@@ -671,7 +650,7 @@ func (x noopImageInterface) VendorRamdiskVariantNeeded(android.BaseModuleContext
 func (x noopImageInterface) DebugRamdiskVariantNeeded(android.BaseModuleContext) bool    { return false }
 func (x noopImageInterface) RecoveryVariantNeeded(android.BaseModuleContext) bool        { return false }
 func (x noopImageInterface) ExtraImageVariations(ctx android.BaseModuleContext) []string { return nil }
-func (x noopImageInterface) SetImageVariation(ctx android.BaseModuleContext, variation string, module android.Module) {
+func (x noopImageInterface) SetImageVariation(ctx android.BaseModuleContext, variation string) {
 }
 
 func NewGenSrcs() *Module {
@@ -714,13 +693,13 @@ func NewGenSrcs() *Module {
 			rule := getSandboxedRuleBuilder(ctx, android.NewRuleBuilder(pctx, ctx).Sbox(genDir, nil))
 
 			for _, in := range shard {
-				outFile := android.GenPathWithExt(ctx, finalSubDir, in, String(properties.Output_extension))
+				outFile := android.GenPathWithExtAndTrimExt(ctx, finalSubDir, in, String(properties.Output_extension), String(properties.Trim_extension))
 
 				// If sharding is enabled, then outFile is the path to the output file in
 				// the shard directory, and copyTo is the path to the output file in the
 				// final directory.
 				if len(shards) > 1 {
-					shardFile := android.GenPathWithExt(ctx, genSubDir, in, String(properties.Output_extension))
+					shardFile := android.GenPathWithExtAndTrimExt(ctx, genSubDir, in, String(properties.Output_extension), String(properties.Trim_extension))
 					copyTo = append(copyTo, outFile)
 					outFile = shardFile
 				}
@@ -786,6 +765,9 @@ type genSrcsProperties struct {
 
 	// Additional files needed for build that are not tooling related.
 	Data []string `android:"path"`
+
+	// Trim the matched extension for each input file, and it should start with ".".
+	Trim_extension *string
 }
 
 const defaultShardSize = 50
