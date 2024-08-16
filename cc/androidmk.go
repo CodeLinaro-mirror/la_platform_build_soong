@@ -88,7 +88,7 @@ func (c *Module) AndroidMkEntries() []android.AndroidMkEntries {
 		ExtraEntries: []android.AndroidMkExtraEntriesFunc{
 			func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
 				if len(c.Properties.Logtags) > 0 {
-					entries.AddStrings("LOCAL_LOGTAGS_FILES", c.Properties.Logtags...)
+					entries.AddStrings("LOCAL_SOONG_LOGTAGS_FILES", c.logtagsPaths.Strings()...)
 				}
 				// Note: Pass the exact value of AndroidMkSystemSharedLibs to the Make
 				// world, even if it is an empty list. In the Make world,
@@ -104,31 +104,18 @@ func (c *Module) AndroidMkEntries() []android.AndroidMkEntries {
 					entries.AddStrings("LOCAL_RUNTIME_LIBRARIES", c.Properties.AndroidMkRuntimeLibs...)
 				}
 				entries.SetString("LOCAL_SOONG_LINK_TYPE", c.makeLinkType)
-				if c.InVendorOrProduct() {
-					if c.IsVndk() && !c.static() {
-						entries.SetString("LOCAL_SOONG_VNDK_VERSION", c.VndkVersion())
-						// VNDK libraries available to vendor are not installed because
-						// they are packaged in VNDK APEX and installed by APEX packages (apex/apex.go)
-						if !c.IsVndkExt() {
-							entries.SetBool("LOCAL_UNINSTALLABLE_MODULE", true)
-						}
-					}
-				}
 				if c.InVendor() {
 					entries.SetBool("LOCAL_IN_VENDOR", true)
 				} else if c.InProduct() {
 					entries.SetBool("LOCAL_IN_PRODUCT", true)
 				}
-				if c.Properties.IsSdkVariant && c.Properties.SdkAndPlatformVariantVisibleToMake {
-					// Make the SDK variant uninstallable so that there are not two rules to install
-					// to the same location.
-					entries.SetBool("LOCAL_UNINSTALLABLE_MODULE", true)
+				if c.Properties.SdkAndPlatformVariantVisibleToMake {
 					// Add the unsuffixed name to SOONG_SDK_VARIANT_MODULES so that Make can rewrite
 					// dependencies to the .sdk suffix when building a module that uses the SDK.
 					entries.SetString("SOONG_SDK_VARIANT_MODULES",
 						"$(SOONG_SDK_VARIANT_MODULES) $(patsubst %.sdk,%,$(LOCAL_MODULE))")
 				}
-				android.SetAconfigFileMkEntries(c.AndroidModuleBase(), entries, c.mergedAconfigFiles)
+				entries.SetBoolIfTrue("LOCAL_UNINSTALLABLE_MODULE", c.IsSkipInstall())
 			},
 		},
 		ExtraFooters: []android.AndroidMkExtraFootersFunc{
@@ -263,15 +250,6 @@ func (library *libraryDecorator) AndroidMkEntries(ctx AndroidMkContext, entries 
 
 		if library.coverageOutputFile.Valid() {
 			entries.SetString("LOCAL_PREBUILT_COVERAGE_ARCHIVE", library.coverageOutputFile.String())
-		}
-
-		if library.useCoreVariant {
-			entries.SetBool("LOCAL_UNINSTALLABLE_MODULE", true)
-			entries.SetBool("LOCAL_NO_NOTICE_FILE", true)
-			entries.SetBool("LOCAL_VNDK_DEPEND_ON_CORE_VARIANT", true)
-		}
-		if library.checkSameCoreVariant {
-			entries.SetBool("LOCAL_CHECK_SAME_VNDK_VARIANTS", true)
 		}
 	})
 
@@ -498,14 +476,14 @@ func (p *prebuiltLibraryLinker) AndroidMkEntries(ctx AndroidMkContext, entries *
 	ctx.subAndroidMk(entries, p.libraryDecorator)
 	if p.shared() {
 		ctx.subAndroidMk(entries, &p.prebuiltLinker)
-		androidMkWriteAllowUndefinedSymbols(p.baseLinker, entries)
+		androidMkWritePrebuiltOptions(p.baseLinker, entries)
 	}
 }
 
 func (p *prebuiltBinaryLinker) AndroidMkEntries(ctx AndroidMkContext, entries *android.AndroidMkEntries) {
 	ctx.subAndroidMk(entries, p.binaryDecorator)
 	ctx.subAndroidMk(entries, &p.prebuiltLinker)
-	androidMkWriteAllowUndefinedSymbols(p.baseLinker, entries)
+	androidMkWritePrebuiltOptions(p.baseLinker, entries)
 }
 
 func (a *apiLibraryDecorator) AndroidMkEntries(ctx AndroidMkContext, entries *android.AndroidMkEntries) {
@@ -536,11 +514,17 @@ func (a *apiHeadersDecorator) AndroidMkEntries(ctx AndroidMkContext, entries *an
 	})
 }
 
-func androidMkWriteAllowUndefinedSymbols(linker *baseLinker, entries *android.AndroidMkEntries) {
+func androidMkWritePrebuiltOptions(linker *baseLinker, entries *android.AndroidMkEntries) {
 	allow := linker.Properties.Allow_undefined_symbols
 	if allow != nil {
 		entries.ExtraEntries = append(entries.ExtraEntries, func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
 			entries.SetBool("LOCAL_ALLOW_UNDEFINED_SYMBOLS", *allow)
+		})
+	}
+	ignore := linker.Properties.Ignore_max_page_size
+	if ignore != nil {
+		entries.ExtraEntries = append(entries.ExtraEntries, func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
+			entries.SetBool("LOCAL_IGNORE_MAX_PAGE_SIZE", *ignore)
 		})
 	}
 }

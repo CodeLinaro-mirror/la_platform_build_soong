@@ -72,7 +72,7 @@ func RegisterPostDepsMutators(ctx android.RegisterMutatorsContext) {
 	// Run mark_platform_availability before the apexMutator as the apexMutator needs to know whether
 	// it should create a platform variant.
 	ctx.BottomUp("mark_platform_availability", markPlatformAvailability).Parallel()
-	ctx.BottomUp("apex", apexMutator).Parallel()
+	ctx.Transition("apex", &apexTransitionMutator{})
 	ctx.BottomUp("apex_directly_in_any", apexDirectlyInAnyMutator).Parallel()
 	ctx.BottomUp("apex_dcla_deps", apexDCLADepsMutator).Parallel()
 	// Register after apex_info mutator so that it can use ApexVariationName
@@ -135,10 +135,6 @@ type apexBundleProperties struct {
 	// a workaround when the current implementation collects more than necessary. For example,
 	// Rust binaries with prefer_rlib:true add unnecessary dependencies.
 	Unwanted_transitive_deps []string
-
-	// The minimum SDK version that this APEX must support at minimum. This is usually set to
-	// the SDK version that the APEX was first introduced.
-	Min_sdk_version *string
 
 	// Whether this APEX is considered updatable or not. When set to true, this will enforce
 	// additional rules for making sure that the APEX is truly updatable. To be updatable,
@@ -387,6 +383,10 @@ type overridableProperties struct {
 
 	// Trim against a specific Dynamic Common Lib APEX
 	Trim_against *string
+
+	// The minimum SDK version that this APEX must support at minimum. This is usually set to
+	// the SDK version that the APEX was first introduced.
+	Min_sdk_version *string
 }
 
 type apexBundle struct {
@@ -489,9 +489,6 @@ type apexBundle struct {
 	javaApisUsedByModuleFile     android.ModuleOutPath
 
 	aconfigFiles []android.Path
-
-	// Single aconfig "cache file" merged from this module and all dependencies.
-	mergedAconfigFiles map[string]android.Paths
 }
 
 // apexFileClass represents a type of file that can be included in APEX.
@@ -701,7 +698,12 @@ var (
 func addDependenciesForNativeModules(ctx android.BottomUpMutatorContext, nativeModules ApexNativeDependencies, target android.Target, imageVariation string) {
 	binVariations := target.Variations()
 	libVariations := append(target.Variations(), blueprint.Variation{Mutator: "link", Variation: "shared"})
-	rustLibVariations := append(target.Variations(), blueprint.Variation{Mutator: "rust_libraries", Variation: "dylib"})
+	rustLibVariations := append(
+		target.Variations(), []blueprint.Variation{
+			{Mutator: "rust_libraries", Variation: "dylib"},
+			{Mutator: "link", Variation: ""},
+		}...,
+	)
 
 	// Append "image" variation
 	binVariations = append(binVariations, blueprint.Variation{Mutator: "image", Variation: imageVariation})
@@ -951,7 +953,6 @@ func (a *apexBundle) ApexInfoMutator(mctx android.TopDownMutatorContext) {
 	// the non-system APEXes because the VNDK libraries won't be included (and duped) in the
 	// APEX, but shared across APEXes via the VNDK APEX.
 	useVndk := a.SocSpecific() || a.DeviceSpecific() || (a.ProductSpecific() && mctx.Config().EnforceProductPartitionInterface())
-	excludeVndkLibs := useVndk && a.useVndkAsStable(mctx)
 	if proptools.Bool(a.properties.Use_vndk_as_stable) {
 		if !useVndk {
 			mctx.PropertyErrorf("use_vndk_as_stable", "not supported for system/system_ext APEXes")
@@ -959,11 +960,6 @@ func (a *apexBundle) ApexInfoMutator(mctx android.TopDownMutatorContext) {
 		if a.minSdkVersionValue(mctx) != "" {
 			mctx.PropertyErrorf("use_vndk_as_stable", "not supported when min_sdk_version is set")
 		}
-		mctx.VisitDirectDepsWithTag(sharedLibTag, func(dep android.Module) {
-			if c, ok := dep.(*cc.Module); ok && c.IsVndk() {
-				mctx.PropertyErrorf("use_vndk_as_stable", "Trying to include a VNDK library(%s) while use_vndk_as_stable is true.", dep.Name())
-			}
-		})
 		if mctx.Failed() {
 			return
 		}
@@ -985,13 +981,8 @@ func (a *apexBundle) ApexInfoMutator(mctx android.TopDownMutatorContext) {
 		if !android.IsDepInSameApex(mctx, parent, child) {
 			return false
 		}
-		if excludeVndkLibs {
-			if c, ok := child.(*cc.Module); ok && c.IsVndk() {
-				return false
-			}
-		}
 
-		if useVndk && mctx.Config().IsVndkDeprecated() && child.Name() == "libbinder" {
+		if useVndk && child.Name() == "libbinder" {
 			mctx.ModuleErrorf("Module %s in the vendor APEX %s should not use libbinder. Use libbinder_ndk instead.", parent.Name(), a.Name())
 		}
 
@@ -1030,6 +1021,11 @@ func (a *apexBundle) ApexInfoMutator(mctx android.TopDownMutatorContext) {
 	// be built for this apexBundle.
 
 	apexVariationName := mctx.ModuleName() // could be com.android.foo
+	if overridable, ok := mctx.Module().(android.OverridableModule); ok && overridable.GetOverriddenBy() != "" {
+		// use the overridden name com.mycompany.android.foo
+		apexVariationName = overridable.GetOverriddenBy()
+	}
+
 	a.properties.ApexVariationName = apexVariationName
 	testApexes := []string{}
 	if a.testApex {
@@ -1074,12 +1070,16 @@ type ApexInfoMutator interface {
 // specific variant to modules that support the ApexInfoMutator.
 // It also propagates updatable=true to apps of updatable apexes
 func apexInfoMutator(mctx android.TopDownMutatorContext) {
-	if !mctx.Module().Enabled() {
+	if !mctx.Module().Enabled(mctx) {
 		return
 	}
 
 	if a, ok := mctx.Module().(ApexInfoMutator); ok {
 		a.ApexInfoMutator(mctx)
+	}
+
+	if am, ok := mctx.Module().(android.ApexModule); ok {
+		android.ApexInfoMutator(mctx, am)
 	}
 	enforceAppUpdatability(mctx)
 }
@@ -1087,10 +1087,10 @@ func apexInfoMutator(mctx android.TopDownMutatorContext) {
 // apexStrictUpdatibilityLintMutator propagates strict_updatability_linting to transitive deps of a mainline module
 // This check is enforced for updatable modules
 func apexStrictUpdatibilityLintMutator(mctx android.TopDownMutatorContext) {
-	if !mctx.Module().Enabled() {
+	if !mctx.Module().Enabled(mctx) {
 		return
 	}
-	if apex, ok := mctx.Module().(*apexBundle); ok && apex.checkStrictUpdatabilityLinting() {
+	if apex, ok := mctx.Module().(*apexBundle); ok && apex.checkStrictUpdatabilityLinting(mctx) {
 		mctx.WalkDeps(func(child, parent android.Module) bool {
 			// b/208656169 Do not propagate strict updatability linting to libcore/
 			// These libs are available on the classpath during compilation
@@ -1114,7 +1114,7 @@ func apexStrictUpdatibilityLintMutator(mctx android.TopDownMutatorContext) {
 
 // enforceAppUpdatability propagates updatable=true to apps of updatable apexes
 func enforceAppUpdatability(mctx android.TopDownMutatorContext) {
-	if !mctx.Module().Enabled() {
+	if !mctx.Module().Enabled(mctx) {
 		return
 	}
 	if apex, ok := mctx.Module().(*apexBundle); ok && apex.Updatable() {
@@ -1184,15 +1184,16 @@ var (
 	}
 )
 
-func (a *apexBundle) checkStrictUpdatabilityLinting() bool {
-	return a.Updatable() && !android.InList(a.ApexVariationName(), skipStrictUpdatabilityLintAllowlist)
+func (a *apexBundle) checkStrictUpdatabilityLinting(mctx android.TopDownMutatorContext) bool {
+	// The allowlist contains the base apex name, so use that instead of the ApexVariationName
+	return a.Updatable() && !android.InList(mctx.ModuleName(), skipStrictUpdatabilityLintAllowlist)
 }
 
 // apexUniqueVariationsMutator checks if any dependencies use unique apex variations. If so, use
 // unique apex variations for this module. See android/apex.go for more about unique apex variant.
 // TODO(jiyong): move this to android/apex.go?
 func apexUniqueVariationsMutator(mctx android.BottomUpMutatorContext) {
-	if !mctx.Module().Enabled() {
+	if !mctx.Module().Enabled(mctx) {
 		return
 	}
 	if am, ok := mctx.Module().(android.ApexModule); ok {
@@ -1204,7 +1205,7 @@ func apexUniqueVariationsMutator(mctx android.BottomUpMutatorContext) {
 // the apex in order to retrieve its contents later.
 // TODO(jiyong): move this to android/apex.go?
 func apexTestForDepsMutator(mctx android.BottomUpMutatorContext) {
-	if !mctx.Module().Enabled() {
+	if !mctx.Module().Enabled(mctx) {
 		return
 	}
 	if am, ok := mctx.Module().(android.ApexModule); ok {
@@ -1219,7 +1220,7 @@ func apexTestForDepsMutator(mctx android.BottomUpMutatorContext) {
 
 // TODO(jiyong): move this to android/apex.go?
 func apexTestForMutator(mctx android.BottomUpMutatorContext) {
-	if !mctx.Module().Enabled() {
+	if !mctx.Module().Enabled(mctx) {
 		return
 	}
 	if _, ok := mctx.Module().(android.ApexModule); ok {
@@ -1281,40 +1282,43 @@ func markPlatformAvailability(mctx android.BottomUpMutatorContext) {
 	}
 }
 
-// apexMutator visits each module and creates apex variations if the module was marked in the
-// previous run of apexInfoMutator.
-func apexMutator(mctx android.BottomUpMutatorContext) {
-	if !mctx.Module().Enabled() {
-		return
-	}
+type apexTransitionMutator struct{}
 
-	// This is the usual path.
-	if am, ok := mctx.Module().(android.ApexModule); ok && am.CanHaveApexVariants() {
-		android.CreateApexVariations(mctx, am)
-		return
-	}
-
+func (a *apexTransitionMutator) Split(ctx android.BaseModuleContext) []string {
 	// apexBundle itself is mutated so that it and its dependencies have the same apex variant.
-	// Note that a default variation "" is also created as an alias, and the default dependency
-	// variation is set to the default variation. This is to allow an apex to depend on another
-	// module which is outside of the apex. This is because the dependent module is not mutated
-	// for this apex variant.
-	createApexVariation := func(apexBundleName string) {
-		defaultVariation := ""
-		mctx.SetDefaultDependencyVariation(&defaultVariation)
-		mctx.CreateVariations(apexBundleName)
-		mctx.CreateAliasVariation(defaultVariation, apexBundleName)
+	if ai, ok := ctx.Module().(ApexInfoMutator); ok && apexModuleTypeRequiresVariant(ai) {
+		if overridable, ok := ctx.Module().(android.OverridableModule); ok && overridable.GetOverriddenBy() != "" {
+			return []string{overridable.GetOverriddenBy()}
+		}
+		return []string{ai.ApexVariationName()}
+	} else if _, ok := ctx.Module().(*OverrideApex); ok {
+		return []string{ctx.ModuleName()}
+	}
+	return []string{""}
+}
+
+func (a *apexTransitionMutator) OutgoingTransition(ctx android.OutgoingTransitionContext, sourceVariation string) string {
+	return sourceVariation
+}
+
+func (a *apexTransitionMutator) IncomingTransition(ctx android.IncomingTransitionContext, incomingVariation string) string {
+	if am, ok := ctx.Module().(android.ApexModule); ok && am.CanHaveApexVariants() {
+		return android.IncomingApexTransition(ctx, incomingVariation)
+	} else if ai, ok := ctx.Module().(ApexInfoMutator); ok {
+		if overridable, ok := ctx.Module().(android.OverridableModule); ok && overridable.GetOverriddenBy() != "" {
+			return overridable.GetOverriddenBy()
+		}
+		return ai.ApexVariationName()
+	} else if _, ok := ctx.Module().(*OverrideApex); ok {
+		return ctx.Module().Name()
 	}
 
-	if ai, ok := mctx.Module().(ApexInfoMutator); ok && apexModuleTypeRequiresVariant(ai) {
-		createApexVariation(ai.ApexVariationName())
-	} else if o, ok := mctx.Module().(*OverrideApex); ok {
-		apexBundleName := o.GetOverriddenModuleName()
-		if apexBundleName == "" {
-			mctx.ModuleErrorf("base property is not set")
-			return
-		}
-		createApexVariation(apexBundleName)
+	return ""
+}
+
+func (a *apexTransitionMutator) Mutate(ctx android.BottomUpMutatorContext, variation string) {
+	if am, ok := ctx.Module().(android.ApexModule); ok && am.CanHaveApexVariants() {
+		android.MutateApexTransition(ctx, variation)
 	}
 }
 
@@ -1332,7 +1336,7 @@ func apexModuleTypeRequiresVariant(module ApexInfoMutator) bool {
 // See android.UpdateDirectlyInAnyApex
 // TODO(jiyong): move this to android/apex.go?
 func apexDirectlyInAnyMutator(mctx android.BottomUpMutatorContext) {
-	if !mctx.Module().Enabled() {
+	if !mctx.Module().Enabled(mctx) {
 		return
 	}
 	if am, ok := mctx.Module().(android.ApexModule); ok {
@@ -1631,7 +1635,8 @@ func apexFileForShBinary(ctx android.BaseModuleContext, sh *sh.ShBinary) apexFil
 
 func apexFileForPrebuiltEtc(ctx android.BaseModuleContext, prebuilt prebuilt_etc.PrebuiltEtcModule, outputFile android.Path) apexFile {
 	dirInApex := filepath.Join(prebuilt.BaseDir(), prebuilt.SubDir())
-	return newApexFile(ctx, outputFile, outputFile.Base(), dirInApex, etc, prebuilt)
+	makeModuleName := strings.ReplaceAll(filepath.Join(dirInApex, outputFile.Base()), "/", "_")
+	return newApexFile(ctx, outputFile, makeModuleName, dirInApex, etc, prebuilt)
 }
 
 func apexFileForCompatConfig(ctx android.BaseModuleContext, config java.PlatformCompatConfigIntf, depName string) apexFile {
@@ -1658,20 +1663,28 @@ var _ javaModule = (*java.DexImport)(nil)
 var _ javaModule = (*java.SdkLibraryImport)(nil)
 
 // apexFileForJavaModule creates an apexFile for a java module's dex implementation jar.
-func apexFileForJavaModule(ctx android.BaseModuleContext, module javaModule) apexFile {
+func apexFileForJavaModule(ctx android.ModuleContext, module javaModule) apexFile {
 	return apexFileForJavaModuleWithFile(ctx, module, module.DexJarBuildPath(ctx).PathOrNil())
 }
 
 // apexFileForJavaModuleWithFile creates an apexFile for a java module with the supplied file.
-func apexFileForJavaModuleWithFile(ctx android.BaseModuleContext, module javaModule, dexImplementationJar android.Path) apexFile {
+func apexFileForJavaModuleWithFile(ctx android.ModuleContext, module javaModule, dexImplementationJar android.Path) apexFile {
 	dirInApex := "javalib"
 	af := newApexFile(ctx, dexImplementationJar, module.BaseModuleName(), dirInApex, javaSharedLib, module)
 	af.jacocoReportClassesFile = module.JacocoReportClassesFile()
 	af.lintDepSets = module.LintDepSets()
 	af.customStem = module.Stem() + ".jar"
-	if dexpreopter, ok := module.(java.DexpreopterInterface); ok {
+	// TODO: b/338641779 - Remove special casing of sdkLibrary once bcpf and sscpf depends
+	// on the implementation library
+	if sdkLib, ok := module.(*java.SdkLibrary); ok {
+		for _, install := range sdkLib.BuiltInstalledForApex() {
+			af.requiredModuleNames = append(af.requiredModuleNames, install.FullModuleName())
+			install.PackageFile(ctx)
+		}
+	} else if dexpreopter, ok := module.(java.DexpreopterInterface); ok {
 		for _, install := range dexpreopter.DexpreoptBuiltInstalledForApex() {
 			af.requiredModuleNames = append(af.requiredModuleNames, install.FullModuleName())
+			install.PackageFile(ctx)
 		}
 	}
 	return af
@@ -1960,7 +1973,7 @@ func (a *apexBundle) depVisitor(vctx *visitorContext, ctx android.ModuleContext,
 	if _, ok := depTag.(android.ExcludeFromApexContentsTag); ok {
 		return false
 	}
-	if mod, ok := child.(android.Module); ok && !mod.Enabled() {
+	if mod, ok := child.(android.Module); ok && !mod.Enabled(ctx) {
 		return false
 	}
 	depName := ctx.OtherModuleName(child)
@@ -2087,7 +2100,7 @@ func (a *apexBundle) depVisitor(vctx *visitorContext, ctx android.ModuleContext,
 			}
 		case bpfTag:
 			if bpfProgram, ok := child.(bpf.BpfModule); ok {
-				filesToCopy, _ := bpfProgram.OutputFiles("")
+				filesToCopy := android.OutputFilesForModule(ctx, bpfProgram, "")
 				apex_sub_dir := bpfProgram.SubDir()
 				for _, bpfFile := range filesToCopy {
 					vctx.filesInfo = append(vctx.filesInfo, apexFileForBpfProgram(ctx, bpfFile, apex_sub_dir, bpfProgram))
@@ -2103,7 +2116,7 @@ func (a *apexBundle) depVisitor(vctx *visitorContext, ctx android.ModuleContext,
 			}
 		case prebuiltTag:
 			if prebuilt, ok := child.(prebuilt_etc.PrebuiltEtcModule); ok {
-				filesToCopy, _ := prebuilt.OutputFiles("")
+				filesToCopy := android.OutputFilesForModule(ctx, prebuilt, "")
 				for _, etcFile := range filesToCopy {
 					vctx.filesInfo = append(vctx.filesInfo, apexFileForPrebuiltEtc(ctx, prebuilt, etcFile))
 				}
@@ -2168,11 +2181,6 @@ func (a *apexBundle) depVisitor(vctx *visitorContext, ctx android.ModuleContext,
 	// tags used below are private (e.g. `cc.sharedDepTag`).
 	if cc.IsSharedDepTag(depTag) || cc.IsRuntimeDepTag(depTag) {
 		if ch, ok := child.(*cc.Module); ok {
-			if ch.UseVndk() && a.useVndkAsStable(ctx) && ch.IsVndk() {
-				vctx.requireNativeLibs = append(vctx.requireNativeLibs, ":vndk")
-				return false
-			}
-
 			af := apexFileForNativeLibrary(ctx, ch, vctx.handleSpecialLibs)
 			af.transitiveDep = true
 
@@ -2245,7 +2253,7 @@ func (a *apexBundle) depVisitor(vctx *visitorContext, ctx android.ModuleContext,
 		// Because APK-in-APEX embeds jni_libs transitively, we don't need to track transitive deps
 	} else if java.IsXmlPermissionsFileDepTag(depTag) {
 		if prebuilt, ok := child.(prebuilt_etc.PrebuiltEtcModule); ok {
-			filesToCopy, _ := prebuilt.OutputFiles("")
+			filesToCopy := android.OutputFilesForModule(ctx, prebuilt, "")
 			for _, etcFile := range filesToCopy {
 				vctx.filesInfo = append(vctx.filesInfo, apexFileForPrebuiltEtc(ctx, prebuilt, etcFile))
 			}
@@ -2308,7 +2316,7 @@ func (a *apexBundle) depVisitor(vctx *visitorContext, ctx android.ModuleContext,
 }
 
 func addAconfigFiles(vctx *visitorContext, ctx android.ModuleContext, module blueprint.Module) {
-	if dep, ok := android.OtherModuleProvider(ctx, module, android.AconfigTransitiveDeclarationsInfoProvider); ok {
+	if dep, ok := android.OtherModuleProvider(ctx, module, android.AconfigPropagatingProviderKey); ok {
 		if len(dep.AconfigFiles) > 0 && dep.AconfigFiles[ctx.ModuleName()] != nil {
 			vctx.aconfigFiles = append(vctx.aconfigFiles, dep.AconfigFiles[ctx.ModuleName()]...)
 		}
@@ -2396,7 +2404,6 @@ func (a *apexBundle) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 			return
 		}
 	}
-	android.CollectDependencyAconfigFiles(ctx, &a.mergedAconfigFiles)
 
 	////////////////////////////////////////////////////////////////////////////////////////////
 	// 3) some fields in apexBundle struct are configured
@@ -2568,9 +2575,6 @@ func BundleFactory() android.Module {
 type Defaults struct {
 	android.ModuleBase
 	android.DefaultsModuleBase
-
-	// Single aconfig "cache file" merged from this module and all dependencies.
-	mergedAconfigFiles map[string]android.Paths
 }
 
 // apex_defaults provides defaultable properties to other apex modules.
@@ -2591,10 +2595,6 @@ func DefaultsFactory() android.Module {
 type OverrideApex struct {
 	android.ModuleBase
 	android.OverrideModuleBase
-}
-
-func (d *Defaults) GenerateAndroidBuildActions(ctx android.ModuleContext) {
-	android.CollectDependencyAconfigFiles(ctx, &d.mergedAconfigFiles)
 }
 
 func (o *OverrideApex) GenerateAndroidBuildActions(_ android.ModuleContext) {
@@ -2639,7 +2639,7 @@ func (a *apexBundle) minSdkVersionValue(ctx android.EarlyModuleContext) string {
 	// Only override the minSdkVersion value on Apexes which already specify
 	// a min_sdk_version (it's optional for non-updatable apexes), and that its
 	// min_sdk_version value is lower than the one to override with.
-	minApiLevel := android.MinSdkVersionFromValue(ctx, proptools.String(a.properties.Min_sdk_version))
+	minApiLevel := android.MinSdkVersionFromValue(ctx, proptools.String(a.overridableProperties.Min_sdk_version))
 	if minApiLevel.IsNone() {
 		return ""
 	}
@@ -3000,13 +3000,4 @@ func rBcpPackages() map[string][]string {
 
 func (a *apexBundle) IsTestApex() bool {
 	return a.testApex
-}
-
-func (a *apexBundle) useVndkAsStable(ctx android.BaseModuleContext) bool {
-	// VNDK cannot be linked if it is deprecated
-	if ctx.Config().IsVndkDeprecated() {
-		return false
-	}
-
-	return proptools.Bool(a.properties.Use_vndk_as_stable)
 }

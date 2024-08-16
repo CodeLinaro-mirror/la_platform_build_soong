@@ -229,10 +229,6 @@ type DeviceProperties struct {
 	// If the SDK kind is empty, it will be set to public.
 	Sdk_version *string
 
-	// if not blank, set the minimum version of the sdk that the compiled artifacts will run against.
-	// Defaults to sdk_version if not set. See sdk_version for possible values.
-	Min_sdk_version *string
-
 	// if not blank, set the maximum version of the sdk that the compiled artifacts will run against.
 	// Defaults to empty string "". See sdk_version for possible values.
 	Max_sdk_version *string
@@ -312,6 +308,10 @@ type OverridableProperties struct {
 	// Otherwise, both the overridden and the overriding modules will have the same output name, which
 	// can cause the duplicate output error.
 	Stem *string
+
+	// if not blank, set the minimum version of the sdk that the compiled artifacts will run against.
+	// Defaults to sdk_version if not set. See sdk_version for possible values.
+	Min_sdk_version *string
 }
 
 // Functionality common to Module and Import
@@ -435,6 +435,7 @@ type Module struct {
 	deviceProperties DeviceProperties
 
 	overridableProperties OverridableProperties
+	sourceProperties      android.SourceProperties
 
 	// jar file containing header classes including static library dependencies, suitable for
 	// inserting into the bootclasspath/classpath of another compile
@@ -535,9 +536,6 @@ type Module struct {
 	// This should be set in every ModuleWithStem's GenerateAndroidBuildActions
 	// or the module should override Stem().
 	stem string
-
-	// Single aconfig "cache file" merged from this module and all dependencies.
-	mergedAconfigFiles map[string]android.Paths
 
 	// Values that will be set in the JarJarProvider data for jarjar repackaging,
 	// and merged with our dependencies' rules.
@@ -717,6 +715,7 @@ func (j *Module) shouldInstrumentInApex(ctx android.BaseModuleContext) bool {
 	// doesn't make sense) or framework libraries (e.g. libraries found in the InstrumentFrameworkModules list) unless EMMA_INSTRUMENT_FRAMEWORK is true.
 	apexInfo, _ := android.ModuleProvider(ctx, android.ApexInfoProvider)
 	isJacocoAgent := ctx.ModuleName() == "jacocoagent"
+
 	if j.DirectlyInAnyApex() && !isJacocoAgent && !apexInfo.IsForPlatform() {
 		if !inList(ctx.ModuleName(), config.InstrumentFrameworkModules) {
 			return true
@@ -740,8 +739,8 @@ func (j *Module) SystemModules() string {
 }
 
 func (j *Module) MinSdkVersion(ctx android.EarlyModuleContext) android.ApiLevel {
-	if j.deviceProperties.Min_sdk_version != nil {
-		return android.ApiLevelFrom(ctx, *j.deviceProperties.Min_sdk_version)
+	if j.overridableProperties.Min_sdk_version != nil {
+		return android.ApiLevelFrom(ctx, *j.overridableProperties.Min_sdk_version)
 	}
 	return j.SdkVersion(ctx).ApiLevel
 }
@@ -842,9 +841,11 @@ func (j *Module) deps(ctx android.BottomUpMutatorContext) {
 		if dep != nil {
 			if component, ok := dep.(SdkLibraryComponentDependency); ok {
 				if lib := component.OptionalSdkLibraryImplementation(); lib != nil {
-					// Add library as optional if it's one of the optional compatibility libs.
+					// Add library as optional if it's one of the optional compatibility libs or it's
+					// explicitly listed in the optional_uses_libs property.
 					tag := usesLibReqTag
-					if android.InList(*lib, dexpreopt.OptionalCompatUsesLibs) {
+					if android.InList(*lib, dexpreopt.OptionalCompatUsesLibs) ||
+						android.InList(*lib, j.usesLibrary.usesLibraryProperties.Optional_uses_libs) {
 						tag = usesLibOptTag
 					}
 					ctx.AddVariationDependencies(nil, tag, *lib)
@@ -1649,9 +1650,26 @@ func (j *Module) compile(ctx android.ModuleContext, extraSrcJars, extraClasspath
 				classesJar:    implementationAndResourcesJar,
 				jarName:       jarName,
 			}
-			dexOutputFile = j.dexer.compileDex(ctx, params)
+			if j.GetProfileGuided() && j.optimizeOrObfuscateEnabled() && !j.EnableProfileRewriting() {
+				ctx.PropertyErrorf("enable_profile_rewriting",
+					"Enable_profile_rewriting must be true when profile_guided dexpreopt and R8 optimization/obfuscation is turned on. The attached profile should be sourced from an unoptimized/unobfuscated APK.",
+				)
+			}
+			if j.EnableProfileRewriting() {
+				profile := j.GetProfile()
+				if profile == "" || !j.GetProfileGuided() {
+					ctx.PropertyErrorf("enable_profile_rewriting", "Profile and Profile_guided must be set when enable_profile_rewriting is true")
+				}
+				params.artProfileInput = &profile
+			}
+			dexOutputFile, dexArtProfileOutput := j.dexer.compileDex(ctx, params)
 			if ctx.Failed() {
 				return
+			}
+
+			// If r8/d8 provides a profile that matches the optimized dex, use that for dexpreopt.
+			if dexArtProfileOutput != nil {
+				j.dexpreopter.SetRewrittenProfile(*dexArtProfileOutput)
 			}
 
 			// merge dex jar with resources if necessary
@@ -1679,7 +1697,11 @@ func (j *Module) compile(ctx android.ModuleContext, extraSrcJars, extraClasspath
 			j.dexJarFile = makeDexJarPathFromPath(dexOutputFile)
 
 			// Dexpreopting
-			j.dexpreopt(ctx, android.RemoveOptionalPrebuiltPrefix(ctx.ModuleName()), dexOutputFile)
+			libName := android.RemoveOptionalPrebuiltPrefix(ctx.ModuleName())
+			if j.SdkLibraryName() != nil && strings.HasSuffix(ctx.ModuleName(), ".impl") {
+				libName = strings.TrimSuffix(libName, ".impl")
+			}
+			j.dexpreopt(ctx, libName, dexOutputFile)
 
 			outputFile = dexOutputFile
 		} else {
@@ -1726,8 +1748,6 @@ func (j *Module) compile(ctx android.ModuleContext, extraSrcJars, extraClasspath
 	j.collectTransitiveSrcFiles(ctx, srcFiles)
 
 	ctx.CheckbuildFile(outputFile)
-
-	android.CollectDependencyAconfigFiles(ctx, &j.mergedAconfigFiles)
 
 	android.SetProvider(ctx, JavaInfoProvider, JavaInfo{
 		HeaderJars:                          android.PathsIfNonNil(j.headerJarFile),
@@ -1832,7 +1852,7 @@ func (j *Module) compileJavaClasses(ctx android.ModuleContext, jarName string, i
 	classes := android.PathForModuleOut(ctx, "javac", jarName).OutputPath
 	TransformJavaToClasses(ctx, classes, idx, srcFiles, srcJars, annoSrcJar, flags, extraJarDeps)
 
-	if ctx.Config().EmitXrefRules() {
+	if ctx.Config().EmitXrefRules() && ctx.Module() == ctx.PrimaryModule() {
 		extractionFile := android.PathForModuleOut(ctx, kzipName)
 		emitXrefRule(ctx, extractionFile, idx, srcFiles, srcJars, flags, extraJarDeps)
 		j.kytheFiles = append(j.kytheFiles, extractionFile)
@@ -2386,6 +2406,7 @@ func (j *Module) collectDeps(ctx android.ModuleContext) deps {
 		}
 
 		addCLCFromDep(ctx, module, j.classLoaderContexts)
+		addMissingOptionalUsesLibsFromDep(ctx, module, &j.usesLibrary)
 	})
 
 	return deps
@@ -2523,7 +2544,7 @@ func collectDirectDepsProviders(ctx android.ModuleContext) (result *JarJarProvid
 				case Implementation:
 					return RenameUseInclude, "info"
 				default:
-					//fmt.Printf("LJ: %v -> %v StubsLinkType unknown\n", module, m)
+					//fmt.Printf("collectDirectDepsProviders: %v -> %v StubsLinkType unknown\n", module, m)
 					// Fall through to the heuristic logic.
 				}
 				switch reflect.TypeOf(m).String() {
@@ -2719,3 +2740,13 @@ type ModuleWithStem interface {
 }
 
 var _ ModuleWithStem = (*Module)(nil)
+
+type ModuleWithUsesLibrary interface {
+	UsesLibrary() *usesLibrary
+}
+
+func (j *Module) UsesLibrary() *usesLibrary {
+	return &j.usesLibrary
+}
+
+var _ ModuleWithUsesLibrary = (*Module)(nil)

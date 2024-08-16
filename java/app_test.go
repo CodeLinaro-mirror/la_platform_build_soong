@@ -3244,7 +3244,10 @@ func TestUsesLibraries(t *testing.T) {
 			name: "static-y",
 			srcs: ["a.java"],
 			uses_libs: ["runtime-required-y"],
-			optional_uses_libs: ["runtime-optional-y"],
+			optional_uses_libs: [
+				"runtime-optional-y",
+				"missing-lib-a",
+			],
 			sdk_version: "current",
 		}
 
@@ -3280,7 +3283,7 @@ func TestUsesLibraries(t *testing.T) {
 			sdk_version: "current",
 			optional_uses_libs: [
 				"bar",
-				"baz",
+				"missing-lib-b",
 			],
 		}
 
@@ -3295,7 +3298,7 @@ func TestUsesLibraries(t *testing.T) {
 			],
 			optional_uses_libs: [
 				"bar",
-				"baz",
+				"missing-lib-b",
 			],
 		}
 	`
@@ -3317,10 +3320,10 @@ func TestUsesLibraries(t *testing.T) {
 	// propagated from dependencies.
 	actualManifestFixerArgs := app.Output("manifest_fixer/AndroidManifest.xml").Args["args"]
 	expectManifestFixerArgs := `--extract-native-libs=true ` +
-		`--uses-library qux ` +
-		`--uses-library quuz ` +
 		`--uses-library foo ` +
 		`--uses-library com.non.sdk.lib ` +
+		`--uses-library qux ` +
+		`--uses-library quuz ` +
 		`--uses-library runtime-library ` +
 		`--uses-library runtime-required-x ` +
 		`--uses-library runtime-required-y ` +
@@ -3339,9 +3342,10 @@ func TestUsesLibraries(t *testing.T) {
 		`--uses-library runtime-required-x ` +
 		`--uses-library runtime-required-y ` +
 		`--optional-uses-library bar ` +
-		`--optional-uses-library baz ` +
 		`--optional-uses-library runtime-optional-x ` +
-		`--optional-uses-library runtime-optional-y `
+		`--optional-uses-library runtime-optional-y ` +
+		`--missing-optional-uses-library missing-lib-b ` +
+		`--missing-optional-uses-library missing-lib-a`
 	android.AssertStringDoesContain(t, "verify cmd args", verifyCmd, verifyArgs)
 
 	// Test that all libraries are verified for an APK (library order matters).
@@ -3350,7 +3354,7 @@ func TestUsesLibraries(t *testing.T) {
 		`--uses-library com.non.sdk.lib ` +
 		`--uses-library android.test.runner ` +
 		`--optional-uses-library bar ` +
-		`--optional-uses-library baz `
+		`--missing-optional-uses-library missing-lib-b `
 	android.AssertStringDoesContain(t, "verify apk cmd args", verifyApkCmd, verifyApkArgs)
 
 	// Test that necessary args are passed for constructing CLC in Ninja phase.
@@ -4318,52 +4322,6 @@ func TestPrivappAllowlistAndroidMk(t *testing.T) {
 	)
 }
 
-func TestApexGlobalMinSdkVersionOverride(t *testing.T) {
-	result := android.GroupFixturePreparers(
-		PrepareForTestWithJavaDefaultModules,
-		android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
-			variables.ApexGlobalMinSdkVersionOverride = proptools.StringPtr("Tiramisu")
-		}),
-	).RunTestWithBp(t, `
-		android_app {
-			name: "com.android.bar",
-			srcs: ["a.java"],
-			sdk_version: "current",
-		}
-		android_app {
-			name: "com.android.foo",
-			srcs: ["a.java"],
-			sdk_version: "current",
-			min_sdk_version: "S",
-			updatable: true,
-		}
-		override_android_app {
-			name: "com.android.go.foo",
-			base: "com.android.foo",
-		}
-	`)
-	foo := result.ModuleForTests("com.android.foo", "android_common").Rule("manifestFixer")
-	fooOverride := result.ModuleForTests("com.android.foo", "android_common_com.android.go.foo").Rule("manifestFixer")
-	bar := result.ModuleForTests("com.android.bar", "android_common").Rule("manifestFixer")
-
-	android.AssertStringDoesContain(t,
-		"expected manifest fixer to set com.android.bar minSdkVersion to S",
-		bar.BuildParams.Args["args"],
-		"--minSdkVersion  S",
-	)
-	android.AssertStringDoesContain(t,
-		"com.android.foo: expected manifest fixer to set minSdkVersion to T",
-		foo.BuildParams.Args["args"],
-		"--minSdkVersion  T",
-	)
-	android.AssertStringDoesContain(t,
-		"com.android.go.foo: expected manifest fixer to set minSdkVersion to T",
-		fooOverride.BuildParams.Args["args"],
-		"--minSdkVersion  T",
-	)
-
-}
-
 func TestAppFlagsPackages(t *testing.T) {
 	ctx := testApp(t, `
 		android_app {
@@ -4378,6 +4336,7 @@ func TestAppFlagsPackages(t *testing.T) {
 		aconfig_declarations {
 			name: "bar",
 			package: "com.example.package.bar",
+			container: "com.android.foo",
 			srcs: [
 				"bar.aconfig",
 			],
@@ -4385,6 +4344,7 @@ func TestAppFlagsPackages(t *testing.T) {
 		aconfig_declarations {
 			name: "baz",
 			package: "com.example.package.baz",
+			container: "com.android.foo",
 			srcs: [
 				"baz.aconfig",
 			],
@@ -4432,6 +4392,44 @@ func TestNoDexpreoptOptionalUsesLibDoesNotHaveImpl(t *testing.T) {
 	android.AssertBoolEquals(t, "dexpreopt should be disabled if optional_uses_libs does not have an implementation", true, dexpreopt == nil)
 }
 
+func TestTestOnlyApp(t *testing.T) {
+	t.Parallel()
+	ctx := android.GroupFixturePreparers(
+		prepareForJavaTest,
+	).RunTestWithBp(t, `
+                // These should be test-only
+                android_test {
+                        name: "android-test",
+                }
+                android_test_helper_app {
+                        name: "helper-app",
+                }
+                override_android_test {
+                        name: "override-test",
+                        base: "android-app",
+                }
+                // And these should not be
+		android_app {
+			name: "android-app",
+                        srcs: ["b.java"],
+			sdk_version: "current",
+		}
+	`)
+
+	expectedTestOnly := []string{
+		"android-test",
+		"helper-app",
+		"override-test",
+	}
+
+	expectedTopLevel := []string{
+		"android-test",
+		"override-test",
+	}
+
+	assertTestOnlyAndTopLevel(t, ctx, expectedTestOnly, expectedTopLevel)
+}
+
 func TestAppStem(t *testing.T) {
 	ctx := testApp(t, `
 				android_app {
@@ -4447,4 +4445,37 @@ func TestAppStem(t *testing.T) {
 	if !strings.Contains(outputs, "foo-new.apk") {
 		t.Errorf("Module output does not contain expected apk %s", "foo-new.apk")
 	}
+}
+
+func TestAppMinSdkVersionOverride(t *testing.T) {
+	result := android.GroupFixturePreparers(
+		PrepareForTestWithJavaDefaultModules,
+	).RunTestWithBp(t, `
+		android_app {
+			name: "com.android.foo",
+			srcs: ["a.java"],
+			sdk_version: "current",
+			min_sdk_version: "31",
+			updatable: true,
+		}
+		override_android_app {
+			name: "com.android.go.foo",
+			base: "com.android.foo",
+			min_sdk_version: "33",
+		}
+	`)
+	foo := result.ModuleForTests("com.android.foo", "android_common").Rule("manifestFixer")
+	fooOverride := result.ModuleForTests("com.android.foo", "android_common_com.android.go.foo").Rule("manifestFixer")
+
+	android.AssertStringDoesContain(t,
+		"com.android.foo: expected manifest fixer to set minSdkVersion to T",
+		foo.BuildParams.Args["args"],
+		"--minSdkVersion  31",
+	)
+	android.AssertStringDoesContain(t,
+		"com.android.go.foo: expected manifest fixer to set minSdkVersion to T",
+		fooOverride.BuildParams.Args["args"],
+		"--minSdkVersion  33",
+	)
+
 }

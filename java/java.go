@@ -75,7 +75,6 @@ func registerJavaBuildComponents(ctx android.RegistrationContext) {
 		ctx.BottomUp("jacoco_deps", jacocoDepsMutator).Parallel()
 	})
 
-	ctx.RegisterParallelSingletonType("logtags", LogtagsSingleton)
 	ctx.RegisterParallelSingletonType("kythe_java_extract", kytheExtractJavaFactory)
 }
 
@@ -367,14 +366,14 @@ type dependencyTag struct {
 	toolchain bool
 
 	static bool
+
+	installable bool
 }
 
-// installDependencyTag is a dependency tag that is annotated to cause the installed files of the
-// dependency to be installed when the parent module is installed.
-type installDependencyTag struct {
-	blueprint.BaseDependencyTag
-	android.InstallAlwaysNeededDependencyTag
-	name string
+var _ android.InstallNeededDependencyTag = (*dependencyTag)(nil)
+
+func (d dependencyTag) InstallDepNeeded() bool {
+	return d.installable
 }
 
 func (d dependencyTag) LicenseAnnotations() []android.LicenseAnnotation {
@@ -406,7 +405,7 @@ func makeUsesLibraryDependencyTag(sdkVersion int, optional bool) usesLibraryDepe
 }
 
 func IsJniDepTag(depTag blueprint.DependencyTag) bool {
-	return depTag == jniLibTag
+	return depTag == jniLibTag || depTag == jniInstallTag
 }
 
 var (
@@ -435,8 +434,8 @@ var (
 	javaApiContributionTag  = dependencyTag{name: "java-api-contribution"}
 	depApiSrcsTag           = dependencyTag{name: "dep-api-srcs"}
 	aconfigDeclarationTag   = dependencyTag{name: "aconfig-declaration"}
-	jniInstallTag           = installDependencyTag{name: "jni install"}
-	binaryInstallTag        = installDependencyTag{name: "binary install"}
+	jniInstallTag           = dependencyTag{name: "jni install", runtimeLinked: true, installable: true}
+	binaryInstallTag        = dependencyTag{name: "binary install", runtimeLinked: true, installable: true}
 	usesLibReqTag           = makeUsesLibraryDependencyTag(dexpreopt.AnySdkVersion, false)
 	usesLibOptTag           = makeUsesLibraryDependencyTag(dexpreopt.AnySdkVersion, true)
 	usesLibCompat28OptTag   = makeUsesLibraryDependencyTag(28, true)
@@ -492,6 +491,7 @@ type jniLib struct {
 	coverageFile   android.OptionalPath
 	unstrippedFile android.Path
 	partition      string
+	installPaths   android.InstallPaths
 }
 
 func sdkDeps(ctx android.BottomUpMutatorContext, sdkContext android.SdkContext, d dexer) {
@@ -567,6 +567,12 @@ func getJavaVersion(ctx android.ModuleContext, javaVersion string, sdkContext an
 		return normalizeJavaVersion(ctx, javaVersion)
 	} else if ctx.Device() {
 		return defaultJavaLanguageVersion(ctx, sdkContext.SdkVersion(ctx))
+	} else if ctx.Config().TargetsJava21() {
+		// Temporary experimental flag to be able to try and build with
+		// java version 21 options.  The flag, if used, just sets Java
+		// 21 as the default version, leaving any components that
+		// target an older version intact.
+		return JAVA_VERSION_21
 	} else {
 		return JAVA_VERSION_17
 	}
@@ -587,6 +593,7 @@ const (
 	JAVA_VERSION_9           = 9
 	JAVA_VERSION_11          = 11
 	JAVA_VERSION_17          = 17
+	JAVA_VERSION_21          = 21
 )
 
 func (v javaVersion) String() string {
@@ -605,6 +612,8 @@ func (v javaVersion) String() string {
 		return "11"
 	case JAVA_VERSION_17:
 		return "17"
+	case JAVA_VERSION_21:
+		return "21"
 	default:
 		return "unsupported"
 	}
@@ -647,6 +656,8 @@ func normalizeJavaVersion(ctx android.BaseModuleContext, javaVersion string) jav
 		return JAVA_VERSION_11
 	case "17":
 		return JAVA_VERSION_17
+	case "21":
+		return JAVA_VERSION_21
 	case "10", "12", "13", "14", "15", "16":
 		ctx.PropertyErrorf("java_version", "Java language level %s is not supported", javaVersion)
 		return JAVA_VERSION_UNSUPPORTED
@@ -669,6 +680,10 @@ type Library struct {
 }
 
 var _ android.ApexModule = (*Library)(nil)
+
+func (j *Library) CheckDepsMinSdkVersion(ctx android.ModuleContext) {
+	CheckMinSdkVersion(ctx, j)
+}
 
 // Provides access to the list of permitted packages from apex boot jars.
 type PermittedPackagesForUpdatableBootJars interface {
@@ -886,11 +901,23 @@ func init() {
 }
 
 func (j *Library) GenerateAndroidBuildActions(ctx android.ModuleContext) {
+	if disableSourceApexVariant(ctx) {
+		// Prebuilts are active, do not create the installation rules for the source javalib.
+		// Even though the source javalib is not used, we need to hide it to prevent duplicate installation rules.
+		// TODO (b/331665856): Implement a principled solution for this.
+		j.HideFromMake()
+	}
 	j.provideHiddenAPIPropertyInfo(ctx)
 
 	j.sdkVersion = j.SdkVersion(ctx)
 	j.minSdkVersion = j.MinSdkVersion(ctx)
 	j.maxSdkVersion = j.MaxSdkVersion(ctx)
+
+	// Check min_sdk_version of the transitive dependencies if this module is created from
+	// java_sdk_library.
+	if j.overridableProperties.Min_sdk_version != nil && j.SdkLibraryName() != nil {
+		j.CheckDepsMinSdkVersion(ctx)
+	}
 
 	// SdkLibrary.GenerateAndroidBuildActions(ctx) sets the stubsLinkType to Unknown.
 	// If the stubsLinkType has already been set to Unknown, the stubsLinkType should
@@ -922,8 +949,12 @@ func (j *Library) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	j.checkSdkVersions(ctx)
 	j.checkHeadersOnly(ctx)
 	if ctx.Device() {
+		libName := j.Name()
+		if j.SdkLibraryName() != nil && strings.HasSuffix(libName, ".impl") {
+			libName = proptools.String(j.SdkLibraryName())
+		}
 		j.dexpreopter.installPath = j.dexpreopter.getInstallPath(
-			ctx, j.Name(), android.PathForModuleInstall(ctx, "framework", j.Stem()+".jar"))
+			ctx, libName, android.PathForModuleInstall(ctx, "framework", j.Stem()+".jar"))
 		j.dexpreopter.isSDKLibrary = j.deviceProperties.IsSDKLibrary
 		setUncompressDex(ctx, &j.dexpreopter, &j.dexer)
 		j.dexpreopter.uncompressedDex = *j.dexProperties.Uncompress_dex
@@ -934,8 +965,24 @@ func (j *Library) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	}
 	j.compile(ctx, nil, nil, nil)
 
-	exclusivelyForApex := !apexInfo.IsForPlatform()
-	if (Bool(j.properties.Installable) || ctx.Host()) && !exclusivelyForApex {
+	// If this module is an impl library created from java_sdk_library,
+	// install the files under the java_sdk_library module outdir instead of this module outdir.
+	if j.SdkLibraryName() != nil && strings.HasSuffix(j.Name(), ".impl") {
+		j.setInstallRules(ctx, proptools.String(j.SdkLibraryName()))
+	} else {
+		j.setInstallRules(ctx, ctx.ModuleName())
+	}
+
+	android.SetProvider(ctx, android.TestOnlyProviderKey, android.TestModuleInformation{
+		TestOnly:       Bool(j.sourceProperties.Test_only),
+		TopLevelTarget: j.sourceProperties.Top_level_test_target,
+	})
+}
+
+func (j *Library) setInstallRules(ctx android.ModuleContext, installModuleName string) {
+	apexInfo, _ := android.ModuleProvider(ctx, android.ApexInfoProvider)
+
+	if (Bool(j.properties.Installable) || ctx.Host()) && apexInfo.IsForPlatform() {
 		var extraInstallDeps android.InstallPaths
 		if j.InstallMixin != nil {
 			extraInstallDeps = j.InstallMixin(ctx, j.outputFile)
@@ -952,7 +999,7 @@ func (j *Library) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 			if !ctx.Host() {
 				archDir = ctx.DeviceConfig().DeviceArch()
 			}
-			installDir = android.PathForModuleInstall(ctx, ctx.ModuleName(), archDir)
+			installDir = android.PathForModuleInstall(ctx, installModuleName, archDir)
 		} else {
 			installDir = android.PathForModuleInstall(ctx, "framework")
 		}
@@ -961,8 +1008,18 @@ func (j *Library) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 }
 
 func (j *Library) DepsMutator(ctx android.BottomUpMutatorContext) {
-	j.deps(ctx)
 	j.usesLibrary.deps(ctx, false)
+	j.deps(ctx)
+
+	if j.SdkLibraryName() != nil && strings.HasSuffix(j.Name(), ".impl") {
+		if dexpreopt.IsDex2oatNeeded(ctx) {
+			dexpreopt.RegisterToolDeps(ctx)
+		}
+		prebuiltSdkLibExists := ctx.OtherModuleExists(android.PrebuiltNameFromSource(proptools.String(j.SdkLibraryName())))
+		if prebuiltSdkLibExists && ctx.OtherModuleExists("all_apex_contributions") {
+			ctx.AddDependency(ctx.Module(), android.AcDepTag, "all_apex_contributions")
+		}
+	}
 }
 
 const (
@@ -1046,7 +1103,7 @@ func (p *librarySdkMemberProperties) PopulateFromVariant(ctx android.SdkMemberCo
 
 	// If the min_sdk_version was set then add the canonical representation of the API level to the
 	// snapshot.
-	if j.deviceProperties.Min_sdk_version != nil {
+	if j.overridableProperties.Min_sdk_version != nil {
 		canonical, err := android.ReplaceFinalizedCodenames(ctx.SdkModuleContext().Config(), j.minSdkVersion.String())
 		if err != nil {
 			ctx.ModuleErrorf("%s", err)
@@ -1123,6 +1180,7 @@ func LibraryFactory() android.Module {
 	module := &Library{}
 
 	module.addHostAndDeviceProperties()
+	module.AddProperties(&module.sourceProperties)
 
 	module.initModuleAndImport(module)
 
@@ -1446,6 +1504,8 @@ func (j *TestHost) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		RequiredModuleNames: j.RequiredModuleNames(),
 		TestSuites:          j.testProperties.Test_suites,
 		IsHost:              true,
+		LocalSdkVersion:     j.sdkVersion.String(),
+		IsUnitTest:          Bool(j.testProperties.Test_options.Unit_test),
 	})
 }
 
@@ -1604,6 +1664,8 @@ func TestFactory() android.Module {
 	module.Module.properties.Installable = proptools.BoolPtr(true)
 	module.Module.dexpreopter.isTest = true
 	module.Module.linter.properties.Lint.Test = proptools.BoolPtr(true)
+	module.Module.sourceProperties.Test_only = proptools.BoolPtr(true)
+	module.Module.sourceProperties.Top_level_test_target = true
 
 	InitJavaModule(module, android.HostAndDeviceSupported)
 	return module
@@ -1619,6 +1681,7 @@ func TestHelperLibraryFactory() android.Module {
 	module.Module.properties.Installable = proptools.BoolPtr(true)
 	module.Module.dexpreopter.isTest = true
 	module.Module.linter.properties.Lint.Test = proptools.BoolPtr(true)
+	module.Module.sourceProperties.Test_only = proptools.BoolPtr(true)
 
 	InitJavaModule(module, android.HostAndDeviceSupported)
 	return module
@@ -1674,6 +1737,8 @@ func InitTestHost(th *TestHost, installable *bool, testSuites []string, autoGenC
 	th.properties.Installable = installable
 	th.testProperties.Auto_gen_config = autoGenConfig
 	th.testProperties.Test_suites = testSuites
+	th.sourceProperties.Test_only = proptools.BoolPtr(true)
+	th.sourceProperties.Top_level_test_target = true
 }
 
 //
@@ -1799,7 +1864,7 @@ func BinaryFactory() android.Module {
 	module := &Binary{}
 
 	module.addHostAndDeviceProperties()
-	module.AddProperties(&module.binaryProperties)
+	module.AddProperties(&module.binaryProperties, &module.sourceProperties)
 
 	module.Module.properties.Installable = proptools.BoolPtr(true)
 
@@ -2115,7 +2180,7 @@ func (al *ApiLibrary) DepsMutator(ctx android.BottomUpMutatorContext) {
 
 // Map where key is the api scope name and value is the int value
 // representing the order of the api scope, narrowest to the widest
-var scopeOrderMap = allApiScopes.MapToIndex(
+var scopeOrderMap = AllApiScopes.MapToIndex(
 	func(s *apiScope) string { return s.name })
 
 func (al *ApiLibrary) sortApiFilesByApiScope(ctx android.ModuleContext, srcFilesInfo []JavaApiImportInfo) []JavaApiImportInfo {
@@ -2276,7 +2341,7 @@ func (al *ApiLibrary) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		classesJar:    al.stubsJar,
 		jarName:       ctx.ModuleName() + ".jar",
 	}
-	dexOutputFile := al.dexer.compileDex(ctx, dexParams)
+	dexOutputFile, _ := al.dexer.compileDex(ctx, dexParams)
 	uncompressed := true
 	al.initHiddenAPI(ctx, makeDexJarPathFromPath(dexOutputFile), al.stubsJar, &uncompressed)
 	dexOutputFile = al.hiddenAPIEncodeDex(ctx, dexOutputFile)
@@ -2564,7 +2629,7 @@ func (j *Import) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	// header jar for this module.
 	reuseImplementationJarAsHeaderJar := slices.Equal(staticJars, staticHeaderJars)
 
-	var headerOutputFile android.WritablePath
+	var headerOutputFile android.ModuleOutPath
 	if reuseImplementationJarAsHeaderJar {
 		headerOutputFile = outputFile
 	} else {
@@ -2587,8 +2652,12 @@ func (j *Import) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 			headerOutputFile = outputFile
 		}
 	}
-	j.combinedHeaderFile = headerOutputFile
-	j.combinedImplementationFile = outputFile
+
+	// Save the output file with no relative path so that it doesn't end up in a subdirectory when used as a resource.
+	// Also strip the relative path from the header output file so that the reuseImplementationJarAsHeaderJar check
+	// in a module that depends on this module considers them equal.
+	j.combinedHeaderFile = headerOutputFile.WithoutRel()
+	j.combinedImplementationFile = outputFile.WithoutRel()
 
 	j.maybeInstall(ctx, jarName, outputFile)
 
@@ -2656,7 +2725,7 @@ func (j *Import) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 				jarName:       jarName,
 			}
 
-			dexOutputFile = j.dexer.compileDex(ctx, dexParams)
+			dexOutputFile, _ = j.dexer.compileDex(ctx, dexParams)
 			if ctx.Failed() {
 				return
 			}
@@ -3147,10 +3216,32 @@ func addCLCFromDep(ctx android.ModuleContext, depModule android.Module,
 	// <uses_library> and should not be added to CLC, but the transitive <uses-library> dependencies
 	// from its CLC should be added to the current CLC.
 	if sdkLib != nil {
-		clcMap.AddContext(ctx, dexpreopt.AnySdkVersion, *sdkLib, false,
+		optional := false
+		if module, ok := ctx.Module().(ModuleWithUsesLibrary); ok {
+			if android.InList(*sdkLib, module.UsesLibrary().usesLibraryProperties.Optional_uses_libs) {
+				optional = true
+			}
+		}
+		clcMap.AddContext(ctx, dexpreopt.AnySdkVersion, *sdkLib, optional,
 			dep.DexJarBuildPath(ctx).PathOrNil(), dep.DexJarInstallPath(), dep.ClassLoaderContexts())
 	} else {
 		clcMap.AddContextMap(dep.ClassLoaderContexts(), depName)
+	}
+}
+
+func addMissingOptionalUsesLibsFromDep(ctx android.ModuleContext, depModule android.Module,
+	usesLibrary *usesLibrary) {
+
+	dep, ok := depModule.(ModuleWithUsesLibrary)
+	if !ok {
+		return
+	}
+
+	for _, lib := range dep.UsesLibrary().usesLibraryProperties.Missing_optional_uses_libs {
+		if !android.InList(lib, usesLibrary.usesLibraryProperties.Missing_optional_uses_libs) {
+			usesLibrary.usesLibraryProperties.Missing_optional_uses_libs =
+				append(usesLibrary.usesLibraryProperties.Missing_optional_uses_libs, lib)
+		}
 	}
 }
 

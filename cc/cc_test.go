@@ -658,7 +658,7 @@ func TestMakeLinkType(t *testing.T) {
 	}{
 		{vendorVariant, "libvendor", "native:vendor"},
 		{vendorVariant, "libllndk", "native:vndk"},
-		{vendorVariant27, "prevndk.vndk.27.arm.binder32", "native:vndk"},
+		{vendorVariant27, "prevndk.vndk.27.arm.binder32", "native:vendor"},
 		{coreVariant, "libllndk", "native:platform"},
 	}
 	for _, test := range tests {
@@ -958,6 +958,7 @@ func TestLlndkLibrary(t *testing.T) {
 	cc_library_headers {
 		name: "libexternal_llndk_headers",
 		export_include_dirs: ["include_llndk"],
+		export_system_include_dirs: ["include_system_llndk"],
 		llndk: {
 			symbol_file: "libllndk.map.txt",
 		},
@@ -972,6 +973,17 @@ func TestLlndkLibrary(t *testing.T) {
 			override_export_include_dirs: ["include_llndk"],
 		},
 		export_include_dirs: ["include"],
+	}
+
+	cc_library {
+		name: "libllndk_with_system_headers",
+		llndk: {
+			symbol_file: "libllndk.map.txt",
+			export_llndk_headers: ["libexternal_llndk_headers"],
+			export_headers_as_system: true,
+		},
+		export_include_dirs: ["include"],
+		export_system_include_dirs: ["include_system"],
 	}
 	`)
 	actual := result.ModuleVariantsForTests("libllndk")
@@ -990,20 +1002,26 @@ func TestLlndkLibrary(t *testing.T) {
 	params := result.ModuleForTests("libllndk", "android_vendor_arm_armv7-a-neon_shared").Description("generate stub")
 	android.AssertSame(t, "use Vendor API level for default stubs", "202404", params.Args["apiLevel"])
 
-	checkExportedIncludeDirs := func(module, variant string, expectedDirs ...string) {
+	checkExportedIncludeDirs := func(module, variant string, expectedSystemDirs []string, expectedDirs ...string) {
 		t.Helper()
 		m := result.ModuleForTests(module, variant).Module()
 		f, _ := android.SingletonModuleProvider(result, m, FlagExporterInfoProvider)
 		android.AssertPathsRelativeToTopEquals(t, "exported include dirs for "+module+"["+variant+"]",
 			expectedDirs, f.IncludeDirs)
+		android.AssertPathsRelativeToTopEquals(t, "exported include dirs for "+module+"["+variant+"]",
+			expectedSystemDirs, f.SystemIncludeDirs)
 	}
 
-	checkExportedIncludeDirs("libllndk", coreVariant, "include")
-	checkExportedIncludeDirs("libllndk", vendorVariant, "include")
-	checkExportedIncludeDirs("libllndk_with_external_headers", coreVariant, "include")
-	checkExportedIncludeDirs("libllndk_with_external_headers", vendorVariant, "include_llndk")
-	checkExportedIncludeDirs("libllndk_with_override_headers", coreVariant, "include")
-	checkExportedIncludeDirs("libllndk_with_override_headers", vendorVariant, "include_llndk")
+	checkExportedIncludeDirs("libllndk", coreVariant, nil, "include")
+	checkExportedIncludeDirs("libllndk", vendorVariant, nil, "include")
+	checkExportedIncludeDirs("libllndk_with_external_headers", coreVariant, nil, "include")
+	checkExportedIncludeDirs("libllndk_with_external_headers", vendorVariant,
+		[]string{"include_system_llndk"}, "include_llndk")
+	checkExportedIncludeDirs("libllndk_with_override_headers", coreVariant, nil, "include")
+	checkExportedIncludeDirs("libllndk_with_override_headers", vendorVariant, nil, "include_llndk")
+	checkExportedIncludeDirs("libllndk_with_system_headers", coreVariant, []string{"include_system"}, "include")
+	checkExportedIncludeDirs("libllndk_with_system_headers", vendorVariant,
+		[]string{"include_system", "include", "include_system_llndk"}, "include_llndk")
 
 	checkAbiLinkerIncludeDirs := func(module string) {
 		t.Helper()
@@ -1016,12 +1034,14 @@ func TestLlndkLibrary(t *testing.T) {
 		}
 		vendorModule := result.ModuleForTests(module, vendorVariant).Module()
 		vendorInfo, _ := android.SingletonModuleProvider(result, vendorModule, FlagExporterInfoProvider)
+		vendorDirs := android.Concat(vendorInfo.IncludeDirs, vendorInfo.SystemIncludeDirs)
 		android.AssertStringEquals(t, module+" has different exported include dirs for vendor variant and ABI check",
-			android.JoinPathsWithPrefix(vendorInfo.IncludeDirs, "-I"), abiCheckFlags)
+			android.JoinPathsWithPrefix(vendorDirs, "-I"), abiCheckFlags)
 	}
 	checkAbiLinkerIncludeDirs("libllndk")
 	checkAbiLinkerIncludeDirs("libllndk_with_override_headers")
 	checkAbiLinkerIncludeDirs("libllndk_with_external_headers")
+	checkAbiLinkerIncludeDirs("libllndk_with_system_headers")
 }
 
 func TestLlndkHeaders(t *testing.T) {
@@ -3199,4 +3219,33 @@ func TestVendorSdkVersion(t *testing.T) {
 	).RunTestWithBp(t, bp)
 	testSdkVersionFlag("libfoo", "30")
 	testSdkVersionFlag("libbar", "29")
+}
+
+func TestClangVerify(t *testing.T) {
+	t.Parallel()
+
+	ctx := testCc(t, `
+		cc_library {
+			name: "lib_no_clang_verify",
+			srcs: ["libnocv.cc"],
+		}
+
+		cc_library {
+			name: "lib_clang_verify",
+			srcs: ["libcv.cc"],
+			clang_verify: true,
+		}
+	`)
+
+	module := ctx.ModuleForTests("lib_no_clang_verify", "android_arm64_armv8-a_shared")
+
+	cFlags_no_cv := module.Rule("cc").Args["cFlags"]
+	if strings.Contains(cFlags_no_cv, "-Xclang") || strings.Contains(cFlags_no_cv, "-verify") {
+		t.Errorf("expected %q not in cflags, got %q", "-Xclang -verify", cFlags_no_cv)
+	}
+
+	cFlags_cv := ctx.ModuleForTests("lib_clang_verify", "android_arm64_armv8-a_shared").Rule("cc").Args["cFlags"]
+	if strings.Contains(cFlags_cv, "-Xclang") && strings.Contains(cFlags_cv, "-verify") {
+		t.Errorf("expected %q in cflags, got %q", "-Xclang -verify", cFlags_cv)
+	}
 }

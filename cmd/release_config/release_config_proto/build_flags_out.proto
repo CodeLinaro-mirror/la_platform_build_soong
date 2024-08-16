@@ -1,3 +1,7 @@
+//
+// Copyright (C) 2024 The Android Open-Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
@@ -52,6 +56,11 @@ message flag_artifact {
   repeated tracepoint traces = 8;
 }
 
+message flag_artifacts {
+  // The artifacts
+  repeated flag_artifact flag_artifacts = 1;
+}
+
 message release_config_artifact {
   // The name of the release config.
   // See # name for format detail
@@ -74,6 +83,10 @@ message release_config_artifact {
   // The release config directories used for this config.
   // For example, "build/release".
   repeated string directories = 6;
+
+  // Prior stage(s) for flag advancement (during development).
+  // Once a flag has met criteria in a prior stage, it can advance to this one.
+  repeated string prior_stages = 7;
 }
 
 message release_configs_artifact {
@@ -82,5 +95,8 @@ message release_configs_artifact {
 
   // All other release configs defined for this TARGET_PRODUCT.
   repeated release_config_artifact other_release_configs = 2;
+
+  // Map of release_config_artifact.directories to release_config_map message.
+  map<string, release_config_map> release_config_maps_map = 3;
 }
 

@@ -145,8 +145,16 @@ var (
 		// displaying logs in web browsers.
 		"-fmessage-length=0",
 
+		// Disable C++17 "relaxed template template argument matching" as a workaround for
+		// our out-dated libcxx.
+		// http://b/341084395
+		"-fno-relaxed-template-template-args",
+
 		// Make paths in deps files relative.
 		"-no-canonical-prefixes",
+
+		// http://b/315250603 temporarily disabled
+		"-Wno-error=format",
 	}
 
 	commonGlobalConlyflags = []string{}
@@ -257,8 +265,6 @@ var (
 		// "-Werror=fortify-source",
 		// http://b/315246135 temporarily disabled
 		"-Wno-unused-variable",
-		// http://b/315250603 temporarily disabled
-		"-Wno-error=format",
 		// Disabled because it produces many false positives. http://b/323050926
 		"-Wno-missing-field-initializers",
 		// http://b/323050889
@@ -297,6 +303,9 @@ var (
 		// New warnings to be fixed after clang-r475365
 		"-Wno-error=single-bit-bitfield-constant-conversion", // http://b/243965903
 		"-Wno-error=enum-constexpr-conversion",               // http://b/243964282
+		// New warnings to be fixed after clang-r522817
+		"-Wno-error=invalid-offsetof",
+		"-Wno-error=thread-safety-reference-return",
 
 		//Android T Vendor Compilation
 		"-Wno-reorder-init-list",
@@ -354,6 +363,9 @@ var (
 		// until then because it causes warnings in the _callers_, not the
 		// project itself.
 		"-Wno-deprecated-dynamic-exception-spec",
+
+		// Allow using VLA CXX extension.
+		"-Wno-vla-cxx-extension",
 	}
 
 	noOverride64GlobalCflags = []string{}
@@ -442,7 +454,7 @@ var (
 
 	// prebuilts/clang default settings.
 	ClangDefaultBase         = "prebuilts/clang/host"
-	ClangDefaultVersion      = "clang-r510928"
+	ClangDefaultVersion      = "clang-r522817"
 	ClangDefaultShortVersion = "18"
 
 	// Directories with warnings from Android.bp files.
@@ -478,14 +490,14 @@ func init() {
 		// Automatically initialize any uninitialized stack variables.
 		// Prefer zero-init if multiple options are set.
 		if ctx.Config().IsEnvTrue("AUTO_ZERO_INITIALIZE") {
-			flags = append(flags, "-ftrivial-auto-var-init=zero -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang -Wno-unused-command-line-argument")
+			flags = append(flags, "-ftrivial-auto-var-init=zero")
 		} else if ctx.Config().IsEnvTrue("AUTO_PATTERN_INITIALIZE") {
 			flags = append(flags, "-ftrivial-auto-var-init=pattern")
 		} else if ctx.Config().IsEnvTrue("AUTO_UNINITIALIZE") {
 			flags = append(flags, "-ftrivial-auto-var-init=uninitialized")
 		} else {
 			// Default to zero initialization.
-			flags = append(flags, "-ftrivial-auto-var-init=zero -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang -Wno-unused-command-line-argument")
+			flags = append(flags, "-ftrivial-auto-var-init=zero")
 		}
 
 		// Workaround for ccache with clang.

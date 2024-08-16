@@ -28,6 +28,7 @@ func TestSelects(t *testing.T) {
 		name          string
 		bp            string
 		provider      selectsTestProvider
+		providers     map[string]selectsTestProvider
 		vendorVars    map[string]map[string]string
 		expectedError string
 	}{
@@ -269,11 +270,11 @@ func TestSelects(t *testing.T) {
 			},
 		},
 		{
-			name: "Select on variant",
+			name: "Select on arch",
 			bp: `
 			my_module_type {
 				name: "foo",
-				my_string: select(variant("arch"), {
+				my_string: select(arch(), {
 					"x86": "my_x86",
 					"x86_64": "my_x86_64",
 					"arm": "my_arm",
@@ -284,6 +285,22 @@ func TestSelects(t *testing.T) {
 			`,
 			provider: selectsTestProvider{
 				my_string: proptools.StringPtr("my_arm64"),
+			},
+		},
+		{
+			name: "Select on os",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_string: select(os(), {
+					"android": "my_android",
+					"linux": "my_linux",
+					default: "my_default",
+				}),
+			}
+			`,
+			provider: selectsTestProvider{
+				my_string: proptools.StringPtr("my_android"),
 			},
 		},
 		{
@@ -327,8 +344,10 @@ func TestSelects(t *testing.T) {
 			my_module_type {
 				name: "foo",
 				my_string: select(soong_config_variable("my_namespace", "my_variable"), {
+					"foo": "bar",
 					default: unset,
 				}) + select(soong_config_variable("my_namespace", "my_variable2"), {
+					"baz": "qux",
 					default: unset,
 				})
 			}
@@ -341,6 +360,7 @@ func TestSelects(t *testing.T) {
 			my_module_type {
 				name: "foo",
 				my_string: select(soong_config_variable("my_namespace", "my_variable"), {
+					"foo": "bar",
 					default: unset,
 				}) + select(soong_config_variable("my_namespace", "my_variable2"), {
 					default: "a",
@@ -392,6 +412,42 @@ func TestSelects(t *testing.T) {
 			},
 		},
 		{
+			name: "defaults applied to multiple modules",
+			bp: `
+			my_module_type {
+				name: "foo2",
+				defaults: ["bar"],
+				my_string_list: select(soong_config_variable("my_namespace", "my_variable"), {
+					"a": ["a1"],
+					default: ["b1"],
+				}),
+			}
+			my_module_type {
+				name: "foo",
+				defaults: ["bar"],
+				my_string_list: select(soong_config_variable("my_namespace", "my_variable"), {
+					"a": ["a1"],
+					default: ["b1"],
+				}),
+			}
+			my_defaults {
+				name: "bar",
+				my_string_list: select(soong_config_variable("my_namespace", "my_variable2"), {
+					"a": ["a2"],
+					default: ["b2"],
+				}),
+			}
+			`,
+			providers: map[string]selectsTestProvider{
+				"foo": {
+					my_string_list: &[]string{"b2", "b1"},
+				},
+				"foo2": {
+					my_string_list: &[]string{"b2", "b1"},
+				},
+			},
+		},
+		{
 			name: "Replacing string list",
 			bp: `
 			my_module_type {
@@ -414,6 +470,335 @@ func TestSelects(t *testing.T) {
 				replacing_string_list: &[]string{"b1"},
 			},
 		},
+		{
+			name: "Multi-condition string 1",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_string: select((
+					soong_config_variable("my_namespace", "my_variable"),
+					soong_config_variable("my_namespace", "my_variable2"),
+				), {
+					("a", "b"): "a+b",
+					("a", default): "a+default",
+					(default, default): "default",
+				}),
+			}
+			`,
+			vendorVars: map[string]map[string]string{
+				"my_namespace": {
+					"my_variable":  "a",
+					"my_variable2": "b",
+				},
+			},
+			provider: selectsTestProvider{
+				my_string: proptools.StringPtr("a+b"),
+			},
+		},
+		{
+			name: "Multi-condition string 2",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_string: select((
+					soong_config_variable("my_namespace", "my_variable"),
+					soong_config_variable("my_namespace", "my_variable2"),
+				), {
+					("a", "b"): "a+b",
+					("a", default): "a+default",
+					(default, default): "default",
+				}),
+			}
+			`,
+			vendorVars: map[string]map[string]string{
+				"my_namespace": {
+					"my_variable":  "a",
+					"my_variable2": "c",
+				},
+			},
+			provider: selectsTestProvider{
+				my_string: proptools.StringPtr("a+default"),
+			},
+		},
+		{
+			name: "Multi-condition string 3",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_string: select((
+					soong_config_variable("my_namespace", "my_variable"),
+					soong_config_variable("my_namespace", "my_variable2"),
+				), {
+					("a", "b"): "a+b",
+					("a", default): "a+default",
+					(default, default): "default",
+				}),
+			}
+			`,
+			vendorVars: map[string]map[string]string{
+				"my_namespace": {
+					"my_variable":  "c",
+					"my_variable2": "b",
+				},
+			},
+			provider: selectsTestProvider{
+				my_string: proptools.StringPtr("default"),
+			},
+		},
+		{
+			name: "Unhandled string value",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_string: select(soong_config_variable("my_namespace", "my_variable"), {
+					"foo": "a",
+					"bar": "b",
+				}),
+			}
+			`,
+			vendorVars: map[string]map[string]string{
+				"my_namespace": {
+					"my_variable": "baz",
+				},
+			},
+			expectedError: `my_string: soong_config_variable\("my_namespace", "my_variable"\) had value "baz", which was not handled by the select statement`,
+		},
+		{
+			name: "Select on boolean",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_string: select(boolean_var_for_testing(), {
+					true: "t",
+					false: "f",
+				}),
+			}
+			`,
+			vendorVars: map[string]map[string]string{
+				"boolean_var": {
+					"for_testing": "true",
+				},
+			},
+			provider: selectsTestProvider{
+				my_string: proptools.StringPtr("t"),
+			},
+		},
+		{
+			name: "Select on boolean false",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_string: select(boolean_var_for_testing(), {
+					true: "t",
+					false: "f",
+				}),
+			}
+			`,
+			vendorVars: map[string]map[string]string{
+				"boolean_var": {
+					"for_testing": "false",
+				},
+			},
+			provider: selectsTestProvider{
+				my_string: proptools.StringPtr("f"),
+			},
+		},
+		{
+			name: "Select on boolean undefined",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_string: select(boolean_var_for_testing(), {
+					true: "t",
+					false: "f",
+				}),
+			}
+			`,
+			expectedError: `my_string: boolean_var_for_testing\(\) had value undefined, which was not handled by the select statement`,
+		},
+		{
+			name: "Select on boolean undefined with default",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_string: select(boolean_var_for_testing(), {
+					true: "t",
+					false: "f",
+					default: "default",
+				}),
+			}
+			`,
+			provider: selectsTestProvider{
+				my_string: proptools.StringPtr("default"),
+			},
+		},
+		{
+			name: "Mismatched condition types",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_string: select(boolean_var_for_testing(), {
+					"true": "t",
+					"false": "f",
+					default: "default",
+				}),
+			}
+			`,
+			vendorVars: map[string]map[string]string{
+				"boolean_var": {
+					"for_testing": "false",
+				},
+			},
+			expectedError: "Expected all branches of a select on condition boolean_var_for_testing\\(\\) to have type bool, found string",
+		},
+		{
+			name: "Assigning select to nonconfigurable bool",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_nonconfigurable_bool: select(arch(), {
+					"x86_64": true,
+					default: false,
+				}),
+			}
+			`,
+			expectedError: `can't assign select statement to non-configurable property "my_nonconfigurable_bool"`,
+		},
+		{
+			name: "Assigning select to nonconfigurable string",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_nonconfigurable_string: select(arch(), {
+					"x86_64": "x86!",
+					default: "unknown!",
+				}),
+			}
+			`,
+			expectedError: `can't assign select statement to non-configurable property "my_nonconfigurable_string"`,
+		},
+		{
+			name: "Assigning appended selects to nonconfigurable string",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_nonconfigurable_string: select(arch(), {
+					"x86_64": "x86!",
+					default: "unknown!",
+				}) + select(os(), {
+					"darwin": "_darwin!",
+					default: "unknown!",
+				}),
+			}
+			`,
+			expectedError: `can't assign select statement to non-configurable property "my_nonconfigurable_string"`,
+		},
+		{
+			name: "Assigning select to nonconfigurable string list",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_nonconfigurable_string_list: select(arch(), {
+					"x86_64": ["foo", "bar"],
+					default: ["baz", "qux"],
+				}),
+			}
+			`,
+			expectedError: `can't assign select statement to non-configurable property "my_nonconfigurable_string_list"`,
+		},
+		{
+			name: "Select in variable",
+			bp: `
+			my_second_variable = ["after.cpp"]
+			my_variable = select(soong_config_variable("my_namespace", "my_variable"), {
+				"a": ["a.cpp"],
+				"b": ["b.cpp"],
+				default: ["c.cpp"],
+			}) + my_second_variable
+			my_module_type {
+				name: "foo",
+				my_string_list: ["before.cpp"] + my_variable,
+			}
+			`,
+			provider: selectsTestProvider{
+				my_string_list: &[]string{"before.cpp", "a.cpp", "after.cpp"},
+			},
+			vendorVars: map[string]map[string]string{
+				"my_namespace": {
+					"my_variable": "a",
+				},
+			},
+		},
+		{
+			name: "Soong config value variable on configurable property",
+			bp: `
+			soong_config_module_type {
+				name: "soong_config_my_module_type",
+				module_type: "my_module_type",
+				config_namespace: "my_namespace",
+				value_variables: ["my_variable"],
+				properties: ["my_string", "my_string_list"],
+			}
+
+			soong_config_my_module_type {
+				name: "foo",
+				my_string_list: ["before.cpp"],
+				soong_config_variables: {
+					my_variable: {
+						my_string_list: ["after_%s.cpp"],
+						my_string: "%s.cpp",
+					},
+				},
+			}
+			`,
+			provider: selectsTestProvider{
+				my_string:      proptools.StringPtr("foo.cpp"),
+				my_string_list: &[]string{"before.cpp", "after_foo.cpp"},
+			},
+			vendorVars: map[string]map[string]string{
+				"my_namespace": {
+					"my_variable": "foo",
+				},
+			},
+		},
+		{
+			name: "Property appending with variable",
+			bp: `
+			my_variable = ["b.cpp"]
+			my_module_type {
+				name: "foo",
+				my_string_list: ["a.cpp"] + my_variable + select(soong_config_variable("my_namespace", "my_variable"), {
+					"a": ["a.cpp"],
+					"b": ["b.cpp"],
+					default: ["c.cpp"],
+				}),
+			}
+			`,
+			provider: selectsTestProvider{
+				my_string_list: &[]string{"a.cpp", "b.cpp", "c.cpp"},
+			},
+		},
+		{
+			name: "Test AppendSimpleValue",
+			bp: `
+			my_module_type {
+				name: "foo",
+				my_string_list: ["a.cpp"] + select(soong_config_variable("my_namespace", "my_variable"), {
+					"a": ["a.cpp"],
+					"b": ["b.cpp"],
+					default: ["c.cpp"],
+				}),
+			}
+			`,
+			vendorVars: map[string]map[string]string{
+				"selects_test": {
+					"append_to_string_list": "foo.cpp",
+				},
+			},
+			provider: selectsTestProvider{
+				my_string_list: &[]string{"a.cpp", "c.cpp", "foo.cpp"},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -421,6 +806,7 @@ func TestSelects(t *testing.T) {
 			fixtures := GroupFixturePreparers(
 				PrepareForTestWithDefaults,
 				PrepareForTestWithArchMutator,
+				PrepareForTestWithSoongConfigModuleBuildComponents,
 				FixtureRegisterWithContext(func(ctx RegistrationContext) {
 					ctx.RegisterModuleType("my_module_type", newSelectsMockModule)
 					ctx.RegisterModuleType("my_defaults", newSelectsMockModuleDefaults)
@@ -435,10 +821,19 @@ func TestSelects(t *testing.T) {
 			result := fixtures.RunTestWithBp(t, tc.bp)
 
 			if tc.expectedError == "" {
-				m := result.ModuleForTests("foo", "android_arm64_armv8-a")
-				p, _ := OtherModuleProvider(result.testContext.OtherModuleProviderAdaptor(), m.Module(), selectsTestProviderKey)
-				if !reflect.DeepEqual(p, tc.provider) {
-					t.Errorf("Expected:\n  %q\ngot:\n  %q", tc.provider.String(), p.String())
+				if len(tc.providers) == 0 {
+					tc.providers = map[string]selectsTestProvider{
+						"foo": tc.provider,
+					}
+				}
+
+				for moduleName := range tc.providers {
+					expected := tc.providers[moduleName]
+					m := result.ModuleForTests(moduleName, "android_arm64_armv8-a")
+					p, _ := OtherModuleProvider(result.testContext.OtherModuleProviderAdaptor(), m.Module(), selectsTestProviderKey)
+					if !reflect.DeepEqual(p, expected) {
+						t.Errorf("Expected:\n  %q\ngot:\n  %q", expected.String(), p.String())
+					}
 				}
 			}
 		})
@@ -446,11 +841,14 @@ func TestSelects(t *testing.T) {
 }
 
 type selectsTestProvider struct {
-	my_bool               *bool
-	my_string             *string
-	my_string_list        *[]string
-	my_paths              *[]string
-	replacing_string_list *[]string
+	my_bool                        *bool
+	my_string                      *string
+	my_string_list                 *[]string
+	my_paths                       *[]string
+	replacing_string_list          *[]string
+	my_nonconfigurable_bool        *bool
+	my_nonconfigurable_string      *string
+	my_nonconfigurable_string_list []string
 }
 
 func (p *selectsTestProvider) String() string {
@@ -462,23 +860,42 @@ func (p *selectsTestProvider) String() string {
 	if p.my_string != nil {
 		myStringStr = *p.my_string
 	}
+	myNonconfigurableStringStr := "nil"
+	if p.my_nonconfigurable_string != nil {
+		myNonconfigurableStringStr = *p.my_nonconfigurable_string
+	}
 	return fmt.Sprintf(`selectsTestProvider {
 	my_bool: %v,
 	my_string: %s,
     my_string_list: %s,
     my_paths: %s,
 	replacing_string_list %s,
-}`, myBoolStr, myStringStr, p.my_string_list, p.my_paths, p.replacing_string_list)
+	my_nonconfigurable_bool: %v,
+	my_nonconfigurable_string: %s,
+	my_nonconfigurable_string_list: %s,
+}`,
+		myBoolStr,
+		myStringStr,
+		p.my_string_list,
+		p.my_paths,
+		p.replacing_string_list,
+		p.my_nonconfigurable_bool,
+		myNonconfigurableStringStr,
+		p.my_nonconfigurable_string_list,
+	)
 }
 
 var selectsTestProviderKey = blueprint.NewProvider[selectsTestProvider]()
 
 type selectsMockModuleProperties struct {
-	My_bool               proptools.Configurable[bool]
-	My_string             proptools.Configurable[string]
-	My_string_list        proptools.Configurable[[]string]
-	My_paths              proptools.Configurable[[]string] `android:"path"`
-	Replacing_string_list proptools.Configurable[[]string] `android:"replace_instead_of_append,arch_variant"`
+	My_bool                        proptools.Configurable[bool]
+	My_string                      proptools.Configurable[string]
+	My_string_list                 proptools.Configurable[[]string]
+	My_paths                       proptools.Configurable[[]string] `android:"path"`
+	Replacing_string_list          proptools.Configurable[[]string] `android:"replace_instead_of_append,arch_variant"`
+	My_nonconfigurable_bool        *bool
+	My_nonconfigurable_string      *string
+	My_nonconfigurable_string_list []string
 }
 
 type selectsMockModule struct {
@@ -487,13 +904,28 @@ type selectsMockModule struct {
 	properties selectsMockModuleProperties
 }
 
+func optionalToPtr[T any](o proptools.ConfigurableOptional[T]) *T {
+	if o.IsEmpty() {
+		return nil
+	}
+	x := o.Get()
+	return &x
+}
+
 func (p *selectsMockModule) GenerateAndroidBuildActions(ctx ModuleContext) {
+	toAppend := ctx.Config().VendorConfig("selects_test").String("append_to_string_list")
+	if toAppend != "" {
+		p.properties.My_string_list.AppendSimpleValue([]string{toAppend})
+	}
 	SetProvider(ctx, selectsTestProviderKey, selectsTestProvider{
-		my_bool:               p.properties.My_bool.Get(ctx),
-		my_string:             p.properties.My_string.Get(ctx),
-		my_string_list:        p.properties.My_string_list.Get(ctx),
-		my_paths:              p.properties.My_paths.Get(ctx),
-		replacing_string_list: p.properties.Replacing_string_list.Get(ctx),
+		my_bool:                        optionalToPtr(p.properties.My_bool.Get(ctx)),
+		my_string:                      optionalToPtr(p.properties.My_string.Get(ctx)),
+		my_string_list:                 optionalToPtr(p.properties.My_string_list.Get(ctx)),
+		my_paths:                       optionalToPtr(p.properties.My_paths.Get(ctx)),
+		replacing_string_list:          optionalToPtr(p.properties.Replacing_string_list.Get(ctx)),
+		my_nonconfigurable_bool:        p.properties.My_nonconfigurable_bool,
+		my_nonconfigurable_string:      p.properties.My_nonconfigurable_string,
+		my_nonconfigurable_string_list: p.properties.My_nonconfigurable_string_list,
 	})
 }
 
