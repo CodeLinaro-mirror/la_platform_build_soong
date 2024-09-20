@@ -104,6 +104,14 @@ var _ android.ImageInterface = (*bpf)(nil)
 
 func (bpf *bpf) ImageMutatorBegin(ctx android.BaseModuleContext) {}
 
+func (bpf *bpf) VendorVariantNeeded(ctx android.BaseModuleContext) bool {
+	return proptools.Bool(bpf.properties.Vendor)
+}
+
+func (bpf *bpf) ProductVariantNeeded(ctx android.BaseModuleContext) bool {
+	return false
+}
+
 func (bpf *bpf) CoreVariantNeeded(ctx android.BaseModuleContext) bool {
 	return !proptools.Bool(bpf.properties.Vendor)
 }
@@ -125,9 +133,6 @@ func (bpf *bpf) RecoveryVariantNeeded(ctx android.BaseModuleContext) bool {
 }
 
 func (bpf *bpf) ExtraImageVariations(ctx android.BaseModuleContext) []string {
-	if proptools.Bool(bpf.properties.Vendor) {
-		return []string{"vendor"}
-	}
 	return nil
 }
 
@@ -143,12 +148,16 @@ func (bpf *bpf) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		"-no-canonical-prefixes",
 
 		"-O2",
+		"-Wall",
+		"-Werror",
+		"-Wextra",
+
 		"-isystem bionic/libc/include",
 		"-isystem bionic/libc/kernel/uapi",
 		// The architecture doesn't matter here, but asm/types.h is included by linux/types.h.
 		"-isystem bionic/libc/kernel/uapi/asm-arm64",
 		"-isystem bionic/libc/kernel/android/uapi",
-		"-I       packages/modules/Connectivity/staticlibs/native/bpf_headers/include/bpf",
+		"-I       packages/modules/Connectivity/bpf/headers/include",
 		// TODO(b/149785767): only give access to specific file with AID_* constants
 		"-I       system/core/libcutils/include",
 		"-I " + ctx.ModuleDir(),
@@ -160,7 +169,7 @@ func (bpf *bpf) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 
 	cflags = append(cflags, bpf.properties.Cflags...)
 
-	if proptools.Bool(bpf.properties.Btf) {
+	if proptools.BoolDefault(bpf.properties.Btf, true) {
 		cflags = append(cflags, "-g")
 		if runtime.GOOS != "darwin" {
 			cflags = append(cflags, "-fdebug-prefix-map=/proc/self/cwd=")
@@ -185,7 +194,7 @@ func (bpf *bpf) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 			},
 		})
 
-		if proptools.Bool(bpf.properties.Btf) {
+		if proptools.BoolDefault(bpf.properties.Btf, true) {
 			objStripped := android.ObjPathWithExt(ctx, "", src, "o")
 			ctx.Build(pctx, android.BuildParams{
 				Rule:   stripRule,

@@ -434,6 +434,14 @@ be unnecessary as every module in the sdk already has its own licenses property.
 		prebuiltModule := memberType.AddPrebuiltModule(memberCtx, member)
 		s.createMemberSnapshot(memberCtx, member, prebuiltModule.(*bpModule))
 
+		// Set stripper to none to skip stripping for generated snapshots.
+		// Mainline prebuilts (cc_prebuilt_library_shared) are not strippable in older platforms.
+		// Thus, stripping should be skipped when being used as prebuilts.
+		if memberType.DisablesStrip() {
+			stripPropertySet := prebuiltModule.(*bpModule).AddPropertySet("strip")
+			stripPropertySet.AddProperty("none", true)
+		}
+
 		if member.memberType != android.LicenseModuleSdkMemberType && !builder.isInternalMember(member.name) {
 			// More exceptions
 			// 1. Skip BCP and SCCP fragments
@@ -1979,6 +1987,14 @@ func (m *memberContext) RequiresTrait(trait android.SdkMemberTrait) bool {
 
 func (m *memberContext) IsTargetBuildBeforeTiramisu() bool {
 	return m.builder.targetBuildRelease.EarlierThan(buildReleaseT)
+}
+
+func (m *memberContext) Config() android.Config {
+	return m.sdkMemberContext.Config()
+}
+
+func (m *memberContext) OtherModulePropertyErrorf(module android.Module, property string, fmt string, args ...interface{}) {
+	m.sdkMemberContext.OtherModulePropertyErrorf(module, property, fmt, args)
 }
 
 var _ android.SdkMemberContext = (*memberContext)(nil)

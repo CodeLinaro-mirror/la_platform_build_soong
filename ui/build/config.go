@@ -85,6 +85,7 @@ type configImpl struct {
 	skipMetricsUpload        bool
 	buildStartedTime         int64 // For metrics-upload-only - manually specify a build-started time
 	buildFromSourceStub      bool
+	incrementalBuildActions  bool
 	ensureAllowlistIntegrity bool // For CI builds - make sure modules are mixed-built
 
 	// From the product config
@@ -98,9 +99,10 @@ type configImpl struct {
 	// Autodetected
 	totalRAM uint64
 
-	brokenDupRules     bool
-	brokenUsesNetwork  bool
-	brokenNinjaEnvVars []string
+	brokenDupRules       bool
+	brokenUsesNetwork    bool
+	brokenNinjaEnvVars   []string
+	brokenMissingOutputs bool
 
 	pathReplaced bool
 
@@ -119,6 +121,10 @@ type configImpl struct {
 	// There's quite a bit of overlap with module-info.json and soong module graph. We
 	// could consider merging them.
 	moduleDebugFile string
+
+	// Whether to use n2 instead of ninja.  This is controlled with the
+	// environment variable SOONG_USE_N2
+	useN2 bool
 }
 
 type NinjaWeightListSource uint
@@ -281,6 +287,10 @@ func NewConfig(ctx Context, args ...string) Config {
 		ret.moduleDebugFile, _ = filepath.Abs(shared.JoinPath(ret.SoongOutDir(), "soong-debug-info.json"))
 	}
 
+	if os.Getenv("SOONG_USE_N2") == "true" {
+		ret.useN2 = true
+	}
+
 	ret.environ.Unset(
 		// We're already using it
 		"USE_SOONG_UI",
@@ -311,6 +321,7 @@ func NewConfig(ctx Context, args ...string) Config {
 		"DISPLAY",
 		"GREP_OPTIONS",
 		"JAVAC",
+		"LEX",
 		"NDK_ROOT",
 		"POSIXLY_CORRECT",
 
@@ -336,6 +347,9 @@ func NewConfig(ctx Context, args ...string) Config {
 
 		// We read it here already, don't let others share in the fun
 		"GENERATE_SOONG_DEBUG",
+
+		// Use config.useN2 instead.
+		"SOONG_USE_N2",
 	)
 
 	if ret.UseGoma() || ret.ForceUseGoma() {
@@ -811,6 +825,8 @@ func (c *configImpl) parseArgs(ctx Context, args []string) {
 			}
 		} else if arg == "--build-from-source-stub" {
 			c.buildFromSourceStub = true
+		} else if arg == "--incremental-build-actions" {
+			c.incrementalBuildActions = true
 		} else if strings.HasPrefix(arg, "--build-command=") {
 			buildCmd := strings.TrimPrefix(arg, "--build-command=")
 			// remove quotations
@@ -1025,7 +1041,7 @@ func (c *configImpl) NamedGlobFile(name string) string {
 
 func (c *configImpl) UsedEnvFile(tag string) string {
 	if v, ok := c.environ.Get("TARGET_PRODUCT"); ok {
-		return shared.JoinPath(c.SoongOutDir(), usedEnvFile+"."+v+"."+tag)
+		return shared.JoinPath(c.SoongOutDir(), usedEnvFile+"."+v+c.CoverageSuffix()+"."+tag)
 	}
 	return shared.JoinPath(c.SoongOutDir(), usedEnvFile+"."+tag)
 }
@@ -1131,6 +1147,13 @@ func (c *configImpl) TargetProductOrErr() (string, error) {
 		return v, nil
 	}
 	return "", fmt.Errorf("TARGET_PRODUCT is not defined")
+}
+
+func (c *configImpl) CoverageSuffix() string {
+	if v := c.environ.IsEnvTrue("EMMA_INSTRUMENT"); v {
+		return ".coverage"
+	}
+	return ""
 }
 
 func (c *configImpl) TargetDevice() string {
@@ -1243,13 +1266,34 @@ func (c *configImpl) StartGoma() bool {
 }
 
 func (c *configImpl) canSupportRBE() bool {
+	// Only supported on linux
+	if runtime.GOOS != "linux" {
+		return false
+	}
+
 	// Do not use RBE with prod credentials in scenarios when stubby doesn't exist, since
 	// its unlikely that we will be able to obtain necessary creds without stubby.
 	authType, _ := c.rbeAuth()
 	if !c.StubbyExists() && strings.Contains(authType, "use_google_prod_creds") {
 		return false
 	}
+	if c.UseABFS() {
+		return false
+	}
 	return true
+}
+
+func (c *configImpl) UseABFS() bool {
+	if v, ok := c.environ.Get("NO_ABFS"); ok {
+		v = strings.ToLower(strings.TrimSpace(v))
+		if v == "true" || v == "1" {
+			return false
+		}
+	}
+
+	abfsBox := c.PrebuiltBuildTool("abfsbox")
+	err := exec.Command(abfsBox, "hash", srcDirFileCheck).Run()
+	return err == nil
 }
 
 func (c *configImpl) UseRBE() bool {
@@ -1304,8 +1348,7 @@ func (c *configImpl) rbeDownloadTmpDir() string {
 }
 
 func (c *configImpl) rbeTmpDir() string {
-	buildTmpDir := shared.TempDirForOutDir(c.SoongOutDir())
-	return filepath.Join(buildTmpDir, "rbe")
+	return filepath.Join(c.SoongOutDir(), "rbe")
 }
 
 func (c *configImpl) rbeCacheDir() string {
@@ -1484,7 +1527,16 @@ func (c *configImpl) SoongVarsFile() string {
 	if err != nil {
 		return filepath.Join(c.SoongOutDir(), "soong.variables")
 	} else {
-		return filepath.Join(c.SoongOutDir(), "soong."+targetProduct+".variables")
+		return filepath.Join(c.SoongOutDir(), "soong."+targetProduct+c.CoverageSuffix()+".variables")
+	}
+}
+
+func (c *configImpl) SoongExtraVarsFile() string {
+	targetProduct, err := c.TargetProductOrErr()
+	if err != nil {
+		return filepath.Join(c.SoongOutDir(), "soong.extra.variables")
+	} else {
+		return filepath.Join(c.SoongOutDir(), "soong."+targetProduct+c.CoverageSuffix()+".extra.variables")
 	}
 }
 
@@ -1493,7 +1545,7 @@ func (c *configImpl) SoongNinjaFile() string {
 	if err != nil {
 		return filepath.Join(c.SoongOutDir(), "build.ninja")
 	} else {
-		return filepath.Join(c.SoongOutDir(), "build."+targetProduct+".ninja")
+		return filepath.Join(c.SoongOutDir(), "build."+targetProduct+c.CoverageSuffix()+".ninja")
 	}
 }
 
@@ -1505,11 +1557,11 @@ func (c *configImpl) CombinedNinjaFile() string {
 }
 
 func (c *configImpl) SoongAndroidMk() string {
-	return filepath.Join(c.SoongOutDir(), "Android-"+c.TargetProduct()+".mk")
+	return filepath.Join(c.SoongOutDir(), "Android-"+c.TargetProduct()+c.CoverageSuffix()+".mk")
 }
 
 func (c *configImpl) SoongMakeVarsMk() string {
-	return filepath.Join(c.SoongOutDir(), "make_vars-"+c.TargetProduct()+".mk")
+	return filepath.Join(c.SoongOutDir(), "make_vars-"+c.TargetProduct()+c.CoverageSuffix()+".mk")
 }
 
 func (c *configImpl) SoongBuildMetrics() string {
@@ -1555,6 +1607,29 @@ func (c *configImpl) HostPrebuiltTag() string {
 	}
 }
 
+func (c *configImpl) KatiBin() string {
+	binName := "ckati"
+	if c.UseABFS() {
+		binName = "ckati-wrap"
+	}
+
+	return c.PrebuiltBuildTool(binName)
+}
+
+func (c *configImpl) NinjaBin() string {
+	binName := "ninja"
+	if c.UseABFS() {
+		binName = "ninjago"
+	}
+	return c.PrebuiltBuildTool(binName)
+}
+
+func (c *configImpl) N2Bin() string {
+	path := c.PrebuiltBuildTool("n2")
+	// Use musl instead of glibc because glibc on the build server is old and has bugs
+	return strings.ReplaceAll(path, "/linux-x86/", "/linux_musl-x86/")
+}
+
 func (c *configImpl) PrebuiltBuildTool(name string) string {
 	if v, ok := c.environ.Get("SANITIZE_HOST"); ok {
 		if sanitize := strings.Fields(v); inList("address", sanitize) {
@@ -1589,6 +1664,14 @@ func (c *configImpl) SetBuildBrokenNinjaUsesEnvVars(val []string) {
 
 func (c *configImpl) BuildBrokenNinjaUsesEnvVars() []string {
 	return c.brokenNinjaEnvVars
+}
+
+func (c *configImpl) SetBuildBrokenMissingOutputs(val bool) {
+	c.brokenMissingOutputs = val
+}
+
+func (c *configImpl) BuildBrokenMissingOutputs() bool {
+	return c.brokenMissingOutputs
 }
 
 func (c *configImpl) SetTargetDeviceDir(dir string) {

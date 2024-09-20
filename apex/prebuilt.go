@@ -15,9 +15,6 @@
 package apex
 
 import (
-	"fmt"
-	"io"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -42,6 +39,11 @@ var (
 			CommandDeps: []string{"${extract_apks}"},
 		},
 		"abis", "allow-prereleased", "sdk-version", "skip-sdk-check")
+	decompressApex = pctx.StaticRule("decompressApex", blueprint.RuleParams{
+		Command:     `rm -rf $out && ${deapexer} decompress --copy-if-uncompressed --input ${in} --output ${out}`,
+		CommandDeps: []string{"${deapexer}"},
+		Description: "decompress $out",
+	})
 )
 
 type prebuilt interface {
@@ -64,10 +66,6 @@ type prebuiltCommon struct {
 
 	// fragment for this apex for apexkeys.txt
 	apexKeysPath android.WritablePath
-
-	// A list of apexFile objects created in prebuiltCommon.initApexFilesForAndroidMk which are used
-	// to create make modules in prebuiltCommon.AndroidMkEntries.
-	apexFilesForAndroidMk []apexFile
 
 	// Installed locations of symlinks for backward compatibility.
 	compatSymlinks android.InstallPaths
@@ -231,11 +229,6 @@ func (p *prebuiltCommon) dexpreoptSystemServerJars(ctx android.ModuleContext) {
 }
 
 func (p *prebuiltCommon) addRequiredModules(entries *android.AndroidMkEntries) {
-	for _, fi := range p.apexFilesForAndroidMk {
-		entries.AddStrings("LOCAL_REQUIRED_MODULES", fi.requiredModuleNames...)
-		entries.AddStrings("LOCAL_TARGET_REQUIRED_MODULES", fi.targetRequiredModuleNames...)
-		entries.AddStrings("LOCAL_HOST_REQUIRED_MODULES", fi.hostRequiredModuleNames...)
-	}
 	entries.AddStrings("LOCAL_REQUIRED_MODULES", p.requiredModuleNames...)
 }
 
@@ -246,7 +239,6 @@ func (p *prebuiltCommon) AndroidMkEntries() []android.AndroidMkEntries {
 			OutputFile:    android.OptionalPathForPath(p.outputApex),
 			Include:       "$(BUILD_PREBUILT)",
 			Host_required: p.hostRequired,
-			OverrideName:  p.BaseModuleName(),
 			ExtraEntries: []android.AndroidMkExtraEntriesFunc{
 				func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
 					entries.SetString("LOCAL_MODULE_PATH", p.installDir.String())
@@ -268,52 +260,7 @@ func (p *prebuiltCommon) AndroidMkEntries() []android.AndroidMkEntries {
 		entriesList = append(entriesList, install.ToMakeEntries())
 	}
 
-	// Iterate over the apexFilesForAndroidMk list and create an AndroidMkEntries struct for each
-	// file. This provides similar behavior to that provided in apexBundle.AndroidMk() as it makes the
-	// apex specific variants of the exported java modules available for use from within make.
-	apexName := p.BaseModuleName()
-	for _, fi := range p.apexFilesForAndroidMk {
-		entries := p.createEntriesForApexFile(fi, apexName)
-		entriesList = append(entriesList, entries)
-	}
-
 	return entriesList
-}
-
-// createEntriesForApexFile creates an AndroidMkEntries for the supplied apexFile
-func (p *prebuiltCommon) createEntriesForApexFile(fi apexFile, apexName string) android.AndroidMkEntries {
-	moduleName := fi.androidMkModuleName + "." + apexName
-	entries := android.AndroidMkEntries{
-		Class:        fi.class.nameInMake(),
-		OverrideName: moduleName,
-		OutputFile:   android.OptionalPathForPath(fi.builtFile),
-		Include:      "$(BUILD_SYSTEM)/soong_java_prebuilt.mk",
-		ExtraEntries: []android.AndroidMkExtraEntriesFunc{
-			func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
-				entries.SetString("LOCAL_MODULE_PATH", p.installDir.String())
-				entries.SetString("LOCAL_SOONG_INSTALLED_MODULE", filepath.Join(p.installDir.String(), fi.stem()))
-				entries.SetString("LOCAL_SOONG_INSTALL_PAIRS",
-					fi.builtFile.String()+":"+filepath.Join(p.installDir.String(), fi.stem()))
-
-				// soong_java_prebuilt.mk sets LOCAL_MODULE_SUFFIX := .jar  Therefore
-				// we need to remove the suffix from LOCAL_MODULE_STEM, otherwise
-				// we will have foo.jar.jar
-				entries.SetString("LOCAL_MODULE_STEM", strings.TrimSuffix(fi.stem(), ".jar"))
-				entries.SetString("LOCAL_SOONG_DEX_JAR", fi.builtFile.String())
-				entries.SetString("LOCAL_DEX_PREOPT", "false")
-			},
-		},
-		ExtraFooters: []android.AndroidMkExtraFootersFunc{
-			func(w io.Writer, name, prefix, moduleDir string) {
-				// m <module_name> will build <module_name>.<apex_name> as well.
-				if fi.androidMkModuleName != moduleName {
-					fmt.Fprintf(w, ".PHONY: %s\n", fi.androidMkModuleName)
-					fmt.Fprintf(w, "%s: %s\n", fi.androidMkModuleName, moduleName)
-				}
-			},
-		},
-	}
-	return entries
 }
 
 // prebuiltApexModuleCreator defines the methods that need to be implemented by prebuilt_apex and
@@ -512,7 +459,7 @@ type ApexFileProperties struct {
 	// This cannot be marked as `android:"arch_variant"` because the `prebuilt_apex` is only mutated
 	// for android_common. That is so that it will have the same arch variant as, and so be compatible
 	// with, the source `apex` module type that it replaces.
-	Src  *string `android:"path"`
+	Src  proptools.Configurable[string] `android:"path,replace_instead_of_append"`
 	Arch struct {
 		Arm struct {
 			Src *string `android:"path"`
@@ -562,7 +509,7 @@ func (p *ApexFileProperties) prebuiltApexSelector(ctx android.BaseModuleContext,
 		src = String(p.Arch.X86_64.Src)
 	}
 	if src == "" {
-		src = String(p.Src)
+		src = p.Src.GetOrDefault(ctx, "")
 	}
 
 	if src == "" {
@@ -586,15 +533,6 @@ type PrebuiltProperties struct {
 
 func (a *Prebuilt) hasSanitizedSource(sanitizer string) bool {
 	return false
-}
-
-func (p *Prebuilt) OutputFiles(tag string) (android.Paths, error) {
-	switch tag {
-	case "":
-		return android.Paths{p.outputApex}, nil
-	default:
-		return nil, fmt.Errorf("unsupported module reference tag %q", tag)
-	}
 }
 
 // prebuilt_apex imports an `.apex` file into the build graph as if it was built with apex.
@@ -784,7 +722,7 @@ func (p *Prebuilt) ComponentDepsMutator(ctx android.BottomUpMutatorContext) {
 func (p *prebuiltCommon) DepsMutator(ctx android.BottomUpMutatorContext) {
 	if p.hasExportedDeps() {
 		// Create a dependency from the prebuilt apex (prebuilt_apex/apex_set) to the internal deapexer module
-		// The deapexer will return a provider that will be bubbled up to the rdeps of apexes (e.g. dex_bootjars)
+		// The deapexer will return a provider which will be used to determine the exported artfifacts from this prebuilt.
 		ctx.AddDependency(ctx.Module(), android.DeapexerTag, deapexerModuleName(p.Name()))
 	}
 }
@@ -895,6 +833,8 @@ func (p *Prebuilt) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		p.installedFile = ctx.InstallFile(p.installDir, p.installFilename, p.inputApex, p.compatSymlinks...)
 		p.provenanceMetaDataFile = provenance.GenerateArtifactProvenanceMetaData(ctx, p.inputApex, p.installedFile)
 	}
+
+	ctx.SetOutputFiles(android.Paths{p.outputApex}, "")
 }
 
 func (p *Prebuilt) ProvenanceMetaDataFile() android.OutputPath {
@@ -1010,15 +950,6 @@ func (a *ApexSet) hasSanitizedSource(sanitizer string) bool {
 	return false
 }
 
-func (a *ApexSet) OutputFiles(tag string) (android.Paths, error) {
-	switch tag {
-	case "":
-		return android.Paths{a.outputApex}, nil
-	default:
-		return nil, fmt.Errorf("unsupported module reference tag %q", tag)
-	}
-}
-
 // prebuilt_apex imports an `.apex` file into the build graph as if it was built with apex.
 func apexSetFactory() android.Module {
 	module := &ApexSet{}
@@ -1089,8 +1020,14 @@ func (a *ApexSet) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 
 	inputApex := android.OptionalPathForModuleSrc(ctx, a.prebuiltCommonProperties.Selected_apex).Path()
 	a.outputApex = android.PathForModuleOut(ctx, a.installFilename)
+
+	// Build the output APEX. If compression is not enabled, make sure the output is not compressed even if the input is compressed
+	buildRule := android.Cp
+	if !ctx.Config().ApexCompressionEnabled() {
+		buildRule = decompressApex
+	}
 	ctx.Build(pctx, android.BuildParams{
-		Rule:   android.Cp,
+		Rule:   buildRule,
 		Input:  inputApex,
 		Output: a.outputApex,
 	})
@@ -1122,6 +1059,8 @@ func (a *ApexSet) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	for _, overridden := range a.prebuiltCommonProperties.Overrides {
 		a.compatSymlinks = append(a.compatSymlinks, makeCompatSymlinks(overridden, ctx)...)
 	}
+
+	ctx.SetOutputFiles(android.Paths{a.outputApex}, "")
 }
 
 type systemExtContext struct {

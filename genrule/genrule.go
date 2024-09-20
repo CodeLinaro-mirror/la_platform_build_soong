@@ -139,13 +139,29 @@ type generatorProperties struct {
 	Export_include_dirs []string
 
 	// list of input files
-	Srcs []string `android:"path,arch_variant"`
+	Srcs         proptools.Configurable[[]string] `android:"path,arch_variant"`
+	ResolvedSrcs []string                         `blueprint:"mutated"`
 
 	// input files to exclude
 	Exclude_srcs []string `android:"path,arch_variant"`
 
 	// Enable restat to update the output only if the output is changed
 	Write_if_changed *bool
+
+	// When set to true, an additional $(build_number_file) label will be available
+	// to use in the cmd. This will be the location of a text file containing the
+	// build number. The dependency on this file will be "order-only", meaning that
+	// the genrule will not rerun when only this file changes, to avoid rerunning
+	// the genrule every build, because the build number changes every build.
+	// This also means that you should not attempt to consume the build number from
+	// the result of this genrule in another build rule. If you do, the build number
+	// in the second build rule will be stale when the second build rule rebuilds
+	// but this genrule does not. Only certain allowlisted modules are allowed to
+	// use this property, usages of the build number should be kept to the absolute
+	// minimum. Particularly no modules on the system image may include the build
+	// number. Prefer using libbuildversion via the use_version_lib property on
+	// cc modules.
+	Uses_order_only_build_number_file *bool
 }
 
 type Module struct {
@@ -213,21 +229,7 @@ func (g *Module) GeneratedDeps() android.Paths {
 	return g.outputDeps
 }
 
-func (g *Module) OutputFiles(tag string) (android.Paths, error) {
-	if tag == "" {
-		return append(android.Paths{}, g.outputFiles...), nil
-	}
-	// otherwise, tag should match one of outputs
-	for _, outputFile := range g.outputFiles {
-		if outputFile.Rel() == tag {
-			return android.Paths{outputFile}, nil
-		}
-	}
-	return nil, fmt.Errorf("unsupported module reference tag %q", tag)
-}
-
 var _ android.SourceFileProducer = (*Module)(nil)
-var _ android.OutputFileProducer = (*Module)(nil)
 
 func toolDepsMutator(ctx android.BottomUpMutatorContext) {
 	if g, ok := ctx.Module().(*Module); ok {
@@ -239,6 +241,15 @@ func toolDepsMutator(ctx android.BottomUpMutatorContext) {
 			ctx.AddFarVariationDependencies(ctx.Config().BuildOSTarget.Variations(), tag, tool)
 		}
 	}
+}
+
+// This allowlist should be kept to the bare minimum, it's
+// intended for things that existed before the build number
+// was tightly controlled. Prefer using libbuildversion
+// via the use_version_lib property of cc modules.
+var genrule_build_number_allowlist = map[string]bool{
+	"build/soong/tests:gen":                   true,
+	"tools/tradefederation/core:tradefed_zip": true,
 }
 
 // generateCommonBuildActions contains build action generation logic
@@ -309,7 +320,8 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 						ctx.ModuleErrorf("host tool %q missing output file", tool)
 						return
 					}
-					if specs := t.TransitivePackagingSpecs(); specs != nil {
+					if specs := android.OtherModuleProviderOrDefault(
+						ctx, t, android.InstallFilesProvider).TransitivePackagingSpecs.ToList(); specs != nil {
 						// If the HostToolProvider has PackgingSpecs, which are definitions of the
 						// required relative locations of the tool and its dependencies, use those
 						// instead.  They will be copied to those relative locations in the sbox
@@ -396,7 +408,8 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 		}
 		return srcFiles
 	}
-	srcFiles := addLabelsForInputs("srcs", g.properties.Srcs, g.properties.Exclude_srcs)
+	g.properties.ResolvedSrcs = g.properties.Srcs.GetOrDefault(ctx, nil)
+	srcFiles := addLabelsForInputs("srcs", g.properties.ResolvedSrcs, g.properties.Exclude_srcs)
 	android.SetProvider(ctx, blueprint.SrcsFileProviderKey, blueprint.SrcsFileProviderData{SrcPaths: srcFiles.Strings()})
 
 	var copyFrom android.Paths
@@ -482,6 +495,11 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 				return strings.Join(proptools.ShellEscapeList(sandboxOuts), " "), nil
 			case "genDir":
 				return proptools.ShellEscape(cmd.PathForOutput(task.genDir)), nil
+			case "build_number_file":
+				if !proptools.Bool(g.properties.Uses_order_only_build_number_file) {
+					return reportError("to use the $(build_number_file) label, you must set uses_order_only_build_number_file: true")
+				}
+				return proptools.ShellEscape(cmd.PathForInput(ctx.Config().BuildNumberFile(ctx))), nil
 			default:
 				if strings.HasPrefix(name, "location ") {
 					label := strings.TrimSpace(strings.TrimPrefix(name, "location "))
@@ -528,6 +546,12 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 		cmd.Implicits(task.in)
 		cmd.ImplicitTools(tools)
 		cmd.ImplicitPackagedTools(packagedTools)
+		if proptools.Bool(g.properties.Uses_order_only_build_number_file) {
+			if _, ok := genrule_build_number_allowlist[ctx.ModuleDir()+":"+ctx.ModuleName()]; !ok {
+				ctx.ModuleErrorf("Only allowlisted modules may use uses_order_only_build_number_file: true")
+			}
+			cmd.OrderOnly(ctx.Config().BuildNumberFile(ctx))
+		}
 
 		// Create the rule to run the genrule command inside sbox.
 		rule.Build(name, desc)
@@ -585,12 +609,25 @@ func (g *Module) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		})
 		g.outputDeps = android.Paths{phonyFile}
 	}
+
+	g.setOutputFiles(ctx)
+}
+
+func (g *Module) setOutputFiles(ctx android.ModuleContext) {
+	if len(g.outputFiles) == 0 {
+		return
+	}
+	ctx.SetOutputFiles(g.outputFiles, "")
+	// non-empty-string-tag should match one of the outputs
+	for _, files := range g.outputFiles {
+		ctx.SetOutputFiles(android.Paths{files}, files.Rel())
+	}
 }
 
 // Collect information for opening IDE project files in java/jdeps.go.
 func (g *Module) IDEInfo(dpInfo *android.IdeInfo) {
 	dpInfo.Srcs = append(dpInfo.Srcs, g.Srcs().Strings()...)
-	for _, src := range g.properties.Srcs {
+	for _, src := range g.properties.ResolvedSrcs {
 		if strings.HasPrefix(src, ":") {
 			src = strings.Trim(src, ":")
 			dpInfo.Deps = append(dpInfo.Deps, src)
@@ -644,6 +681,8 @@ func generatorFactory(taskGenerator taskFunc, props ...interface{}) *Module {
 type noopImageInterface struct{}
 
 func (x noopImageInterface) ImageMutatorBegin(android.BaseModuleContext)                 {}
+func (x noopImageInterface) VendorVariantNeeded(android.BaseModuleContext) bool          { return false }
+func (x noopImageInterface) ProductVariantNeeded(android.BaseModuleContext) bool         { return false }
 func (x noopImageInterface) CoreVariantNeeded(android.BaseModuleContext) bool            { return false }
 func (x noopImageInterface) RamdiskVariantNeeded(android.BaseModuleContext) bool         { return false }
 func (x noopImageInterface) VendorRamdiskVariantNeeded(android.BaseModuleContext) bool   { return false }
@@ -753,6 +792,7 @@ func NewGenSrcs() *Module {
 func GenSrcsFactory() android.Module {
 	m := NewGenSrcs()
 	android.InitAndroidModule(m)
+	android.InitDefaultableModule(m)
 	return m
 }
 

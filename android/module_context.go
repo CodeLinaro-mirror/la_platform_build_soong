@@ -107,65 +107,65 @@ type ModuleContext interface {
 	// InstallExecutable creates a rule to copy srcPath to name in the installPath directory,
 	// with the given additional dependencies.  The file is marked executable after copying.
 	//
-	// The installed file will be returned by FilesToInstall(), and the PackagingSpec for the
-	// installed file will be returned by PackagingSpecs() on this module or by
-	// TransitivePackagingSpecs() on modules that depend on this module through dependency tags
-	// for which IsInstallDepNeeded returns true.
+	// The installed file can be accessed by InstallFilesInfo.InstallFiles, and the PackagingSpec
+	// for the installed file can be accessed by InstallFilesInfo.PackagingSpecs on this module
+	// or by InstallFilesInfo.TransitivePackagingSpecs on modules that depend on this module through
+	// dependency tags for which IsInstallDepNeeded returns true.
 	InstallExecutable(installPath InstallPath, name string, srcPath Path, deps ...InstallPath) InstallPath
 
 	// InstallFile creates a rule to copy srcPath to name in the installPath directory,
 	// with the given additional dependencies.
 	//
-	// The installed file will be returned by FilesToInstall(), and the PackagingSpec for the
-	// installed file will be returned by PackagingSpecs() on this module or by
-	// TransitivePackagingSpecs() on modules that depend on this module through dependency tags
-	// for which IsInstallDepNeeded returns true.
+	// The installed file can be accessed by InstallFilesInfo.InstallFiles, and the PackagingSpec
+	// for the installed file can be accessed by InstallFilesInfo.PackagingSpecs on this module
+	// or by InstallFilesInfo.TransitivePackagingSpecs on modules that depend on this module through
+	// dependency tags for which IsInstallDepNeeded returns true.
 	InstallFile(installPath InstallPath, name string, srcPath Path, deps ...InstallPath) InstallPath
 
 	// InstallFileWithExtraFilesZip creates a rule to copy srcPath to name in the installPath
 	// directory, and also unzip a zip file containing extra files to install into the same
 	// directory.
 	//
-	// The installed file will be returned by FilesToInstall(), and the PackagingSpec for the
-	// installed file will be returned by PackagingSpecs() on this module or by
-	// TransitivePackagingSpecs() on modules that depend on this module through dependency tags
-	// for which IsInstallDepNeeded returns true.
+	// The installed file can be accessed by InstallFilesInfo.InstallFiles, and the PackagingSpec
+	// for the installed file can be accessed by InstallFilesInfo.PackagingSpecs on this module
+	// or by InstallFilesInfo.TransitivePackagingSpecs on modules that depend on this module through
+	// dependency tags for which IsInstallDepNeeded returns true.
 	InstallFileWithExtraFilesZip(installPath InstallPath, name string, srcPath Path, extraZip Path, deps ...InstallPath) InstallPath
 
 	// InstallSymlink creates a rule to create a symlink from src srcPath to name in the installPath
 	// directory.
 	//
-	// The installed symlink will be returned by FilesToInstall(), and the PackagingSpec for the
-	// installed file will be returned by PackagingSpecs() on this module or by
-	// TransitivePackagingSpecs() on modules that depend on this module through dependency tags
-	// for which IsInstallDepNeeded returns true.
+	// The installed symlink can be accessed by InstallFilesInfo.InstallFiles, and the PackagingSpec
+	// for the installed file can be accessed by InstallFilesInfo.PackagingSpecs on this module
+	// or by InstallFilesInfo.TransitivePackagingSpecs on modules that depend on this module through
+	// dependency tags for which IsInstallDepNeeded returns true.
 	InstallSymlink(installPath InstallPath, name string, srcPath InstallPath) InstallPath
 
 	// InstallAbsoluteSymlink creates a rule to create an absolute symlink from src srcPath to name
 	// in the installPath directory.
 	//
-	// The installed symlink will be returned by FilesToInstall(), and the PackagingSpec for the
-	// installed file will be returned by PackagingSpecs() on this module or by
-	// TransitivePackagingSpecs() on modules that depend on this module through dependency tags
-	// for which IsInstallDepNeeded returns true.
+	// The installed symlink can be accessed by InstallFilesInfo.InstallFiles, and the PackagingSpec
+	// for the installed file can be accessed by InstallFilesInfo.PackagingSpecs on this module
+	// or by InstallFilesInfo.TransitivePackagingSpecs on modules that depend on this module through
+	// dependency tags for which IsInstallDepNeeded returns true.
 	InstallAbsoluteSymlink(installPath InstallPath, name string, absPath string) InstallPath
 
 	// InstallTestData creates rules to install test data (e.g. data files used during a test) into
 	// the installPath directory.
 	//
-	// The installed files will be returned by FilesToInstall(), and the PackagingSpec for the
-	// installed files will be returned by PackagingSpecs() on this module or by
-	// TransitivePackagingSpecs() on modules that depend on this module through dependency tags
-	// for which IsInstallDepNeeded returns true.
+	// The installed files can be accessed by InstallFilesInfo.InstallFiles, and the PackagingSpec
+	// for the installed files can be accessed by InstallFilesInfo.PackagingSpecs on this module
+	// or by InstallFilesInfo.TransitivePackagingSpecs on modules that depend on this module through
+	// dependency tags for which IsInstallDepNeeded returns true.
 	InstallTestData(installPath InstallPath, data []DataPath) InstallPaths
 
 	// PackageFile creates a PackagingSpec as if InstallFile was called, but without creating
 	// the rule to copy the file.  This is useful to define how a module would be packaged
 	// without installing it into the global installation directories.
 	//
-	// The created PackagingSpec for the will be returned by PackagingSpecs() on this module or by
-	// TransitivePackagingSpecs() on modules that depend on this module through dependency tags
-	// for which IsInstallDepNeeded returns true.
+	// The created PackagingSpec can be accessed by InstallFilesInfo.PackagingSpecs on this module
+	// or by InstallFilesInfo.TransitivePackagingSpecs on modules that depend on this module through
+	// dependency tags for which IsInstallDepNeeded returns true.
 	PackageFile(installPath InstallPath, name string, srcPath Path) PackagingSpec
 
 	CheckbuildFile(srcPath Path)
@@ -183,12 +183,11 @@ type ModuleContext interface {
 	InstallInVendor() bool
 	InstallForceOS() (*OsType, *ArchType)
 
-	RequiredModuleNames() []string
+	RequiredModuleNames(ctx ConfigAndErrorContext) []string
 	HostRequiredModuleNames() []string
 	TargetRequiredModuleNames() []string
 
 	ModuleSubDir() string
-	SoongConfigTraceHash() string
 
 	Variable(pctx PackageContext, name, value string)
 	Rule(pctx PackageContext, name string, params blueprint.RuleParams, argNames ...string) blueprint.Rule
@@ -216,6 +215,17 @@ type ModuleContext interface {
 	// SetOutputFiles stores the outputFiles to outputFiles property, which is used
 	// to set the OutputFilesProvider later.
 	SetOutputFiles(outputFiles Paths, tag string)
+
+	GetOutputFiles() OutputFilesInfo
+
+	// SetLicenseInstallMap stores the set of dependency module:location mappings for files in an
+	// apex container for use when generation the license metadata file.
+	SetLicenseInstallMap(installMap []string)
+
+	// ComplianceMetadataInfo returns a ComplianceMetadataInfo instance for different module types to dump metadata,
+	// which usually happens in GenerateAndroidBuildActions() of a module type.
+	// See android.ModuleBase.complianceMetadataInfo
+	ComplianceMetadataInfo() *ComplianceMetadataInfo
 }
 
 type moduleContext struct {
@@ -226,9 +236,18 @@ type moduleContext struct {
 	checkbuildFiles Paths
 	module          Module
 	phonies         map[string]Paths
+	// outputFiles stores the output of a module by tag and is used to set
+	// the OutputFilesProvider in GenerateBuildActions
+	outputFiles OutputFilesInfo
 
-	katiInstalls []katiInstall
-	katiSymlinks []katiInstall
+	TransitiveInstallFiles *DepSet[InstallPath]
+
+	// set of dependency module:location mappings used to populate the license metadata for
+	// apex containers.
+	licenseInstallMap []string
+
+	katiInstalls katiInstalls
+	katiSymlinks katiInstalls
 
 	testData []DataPath
 
@@ -357,7 +376,7 @@ func (m *moduleContext) Build(pctx PackageContext, params BuildParams) {
 }
 
 func (m *moduleContext) Phony(name string, deps ...Path) {
-	addPhony(m.config, name, deps...)
+	m.phonies[name] = append(m.phonies[name], deps...)
 }
 
 func (m *moduleContext) GetMissingDependencies() []string {
@@ -375,10 +394,6 @@ func (m *moduleContext) GetDirectDepWithTag(name string, tag blueprint.Dependenc
 
 func (m *moduleContext) ModuleSubDir() string {
 	return m.bp.ModuleSubDir()
-}
-
-func (m *moduleContext) SoongConfigTraceHash() string {
-	return m.module.base().commonProperties.SoongConfigTraceHash
 }
 
 func (m *moduleContext) InstallInData() bool {
@@ -516,7 +531,7 @@ func (m *moduleContext) installFile(installPath InstallPath, name string, srcPat
 	}
 
 	if m.requiresFullInstall() {
-		deps = append(deps, InstallPaths(m.module.base().installFilesDepSet.ToList())...)
+		deps = append(deps, InstallPaths(m.TransitiveInstallFiles.ToList())...)
 		deps = append(deps, m.module.base().installedInitRcPaths...)
 		deps = append(deps, m.module.base().installedVintfFragmentsPaths...)
 
@@ -713,20 +728,37 @@ func (m *moduleContext) ModuleInfoJSON() *ModuleInfoJSON {
 
 func (m *moduleContext) SetOutputFiles(outputFiles Paths, tag string) {
 	if tag == "" {
-		if len(m.module.base().outputFiles.DefaultOutputFiles) > 0 {
+		if len(m.outputFiles.DefaultOutputFiles) > 0 {
 			m.ModuleErrorf("Module %s default OutputFiles cannot be overwritten", m.ModuleName())
 		}
-		m.module.base().outputFiles.DefaultOutputFiles = outputFiles
+		m.outputFiles.DefaultOutputFiles = outputFiles
 	} else {
-		if m.module.base().outputFiles.TaggedOutputFiles == nil {
-			m.module.base().outputFiles.TaggedOutputFiles = make(map[string]Paths)
+		if m.outputFiles.TaggedOutputFiles == nil {
+			m.outputFiles.TaggedOutputFiles = make(map[string]Paths)
 		}
-		if _, exists := m.module.base().outputFiles.TaggedOutputFiles[tag]; exists {
+		if _, exists := m.outputFiles.TaggedOutputFiles[tag]; exists {
 			m.ModuleErrorf("Module %s OutputFiles at tag %s cannot be overwritten", m.ModuleName(), tag)
 		} else {
-			m.module.base().outputFiles.TaggedOutputFiles[tag] = outputFiles
+			m.outputFiles.TaggedOutputFiles[tag] = outputFiles
 		}
 	}
+}
+
+func (m *moduleContext) GetOutputFiles() OutputFilesInfo {
+	return m.outputFiles
+}
+
+func (m *moduleContext) SetLicenseInstallMap(installMap []string) {
+	m.licenseInstallMap = append(m.licenseInstallMap, installMap...)
+}
+
+func (m *moduleContext) ComplianceMetadataInfo() *ComplianceMetadataInfo {
+	if complianceMetadataInfo := m.module.base().complianceMetadataInfo; complianceMetadataInfo != nil {
+		return complianceMetadataInfo
+	}
+	complianceMetadataInfo := NewComplianceMetadataInfo()
+	m.module.base().complianceMetadataInfo = complianceMetadataInfo
+	return complianceMetadataInfo
 }
 
 // Returns a list of paths expanded from globs and modules referenced using ":module" syntax.  The property must
@@ -755,8 +787,8 @@ func (m *moduleContext) ExpandOptionalSource(srcFile *string, _ string) Optional
 	return OptionalPath{}
 }
 
-func (m *moduleContext) RequiredModuleNames() []string {
-	return m.module.RequiredModuleNames()
+func (m *moduleContext) RequiredModuleNames(ctx ConfigAndErrorContext) []string {
+	return m.module.RequiredModuleNames(ctx)
 }
 
 func (m *moduleContext) HostRequiredModuleNames() []string {
