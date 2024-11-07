@@ -20,6 +20,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -49,17 +50,30 @@ var apexVersion = "28"
 
 func registerTestMutators(ctx android.RegistrationContext) {
 	ctx.PostDepsMutators(func(ctx android.RegisterMutatorsContext) {
-		ctx.BottomUp("apex", testApexMutator).Parallel()
+		ctx.Transition("apex", &testApexTransitionMutator{})
 	})
 }
 
-func testApexMutator(mctx android.BottomUpMutatorContext) {
-	modules := mctx.CreateVariations(apexVariationName)
+type testApexTransitionMutator struct{}
+
+func (t *testApexTransitionMutator) Split(ctx android.BaseModuleContext) []string {
+	return []string{apexVariationName}
+}
+
+func (t *testApexTransitionMutator) OutgoingTransition(ctx android.OutgoingTransitionContext, sourceVariation string) string {
+	return sourceVariation
+}
+
+func (t *testApexTransitionMutator) IncomingTransition(ctx android.IncomingTransitionContext, incomingVariation string) string {
+	return incomingVariation
+}
+
+func (t *testApexTransitionMutator) Mutate(ctx android.BottomUpMutatorContext, variation string) {
 	apexInfo := android.ApexInfo{
 		ApexVariationName: apexVariationName,
 		MinSdkVersion:     android.ApiLevelForTest(apexVersion),
 	}
-	mctx.SetVariationProvider(modules[0], android.ApexInfoProvider, apexInfo)
+	android.SetProvider(ctx, android.ApexInfoProvider, apexInfo)
 }
 
 // testCcWithConfig runs tests using the prepareForCcTest
@@ -927,7 +941,7 @@ func TestLlndkLibrary(t *testing.T) {
 
 	cc_prebuilt_library_shared {
 		name: "libllndkprebuilt",
-		stubs: { versions: ["1", "2"] },
+		stubs: { versions: ["1", "2"] , symbol_file: "libllndkprebuilt.map.txt" },
 		llndk: {
 			symbol_file: "libllndkprebuilt.map.txt",
 		},
@@ -1890,11 +1904,11 @@ func VerifyAFLFuzzTargetVariant(t *testing.T, variant string) {
 
 	moduleName = "afl_fuzz_static_lib"
 	checkPcGuardFlag(moduleName, variant+"_static", false)
-	checkPcGuardFlag(moduleName, variant+"_static_fuzzer", true)
+	checkPcGuardFlag(moduleName, variant+"_static_fuzzer_afl", true)
 
 	moduleName = "second_static_lib"
 	checkPcGuardFlag(moduleName, variant+"_static", false)
-	checkPcGuardFlag(moduleName, variant+"_static_fuzzer", true)
+	checkPcGuardFlag(moduleName, variant+"_static_fuzzer_afl", true)
 
 	ctx.ModuleForTests("afl_fuzz_shared_lib",
 		"android_arm64_armv8-a_shared").Rule("cc")
@@ -2720,6 +2734,11 @@ func TestIncludeDirsExporting(t *testing.T) {
 
 func TestIncludeDirectoryOrdering(t *testing.T) {
 	t.Parallel()
+
+	expectedPlatformFlags := []string{
+		"-nostdlibinc",
+	}
+
 	baseExpectedFlags := []string{
 		"${config.ArmThumbCflags}",
 		"${config.ArmCflags}",
@@ -2729,8 +2748,16 @@ func TestIncludeDirectoryOrdering(t *testing.T) {
 		"${config.ArmToolchainCflags}",
 		"${config.ArmArmv7ANeonCflags}",
 		"${config.ArmGenericCflags}",
+	}
+
+	expectedTargetNDKFlags := []string{
 		"-target",
 		"armv7a-linux-androideabi21",
+	}
+
+	expectedTargetPlatformFlags := []string{
+		"-target",
+		"armv7a-linux-androideabi10000",
 	}
 
 	expectedIncludes := []string{
@@ -2760,6 +2787,9 @@ func TestIncludeDirectoryOrdering(t *testing.T) {
 		"external/foo/libarm",
 		"external/foo/lib32",
 		"external/foo/libandroid_arm",
+	}
+
+	expectedNDKSTLIncludes := []string{
 		"defaults/cc/common/ndk_libc++_shared_include_dirs",
 	}
 
@@ -2770,38 +2800,92 @@ func TestIncludeDirectoryOrdering(t *testing.T) {
 	cstd := []string{"-std=gnu17", "-std=conly"}
 	cppstd := []string{"-std=gnu++20", "-std=cpp", "-fno-rtti"}
 
-	lastIncludes := []string{
-		"out/soong/ndk/sysroot/usr/include",
-		"out/soong/ndk/sysroot/usr/include/arm-linux-androideabi",
+	lastNDKFlags := []string{
+		"--sysroot",
+		"out/soong/ndk/sysroot",
 	}
 
-	combineSlices := func(slices ...[]string) []string {
-		var ret []string
-		for _, s := range slices {
-			ret = append(ret, s...)
-		}
-		return ret
+	lastPlatformIncludes := []string{
+		"${config.CommonGlobalIncludes}",
 	}
 
 	testCases := []struct {
-		name     string
-		src      string
-		expected []string
+		name             string
+		src              string
+		expectedNDK      []string
+		expectedPlatform []string
 	}{
 		{
-			name:     "c",
-			src:      "foo.c",
-			expected: combineSlices(baseExpectedFlags, conly, expectedIncludes, cflags, cstd, lastIncludes, []string{"${config.NoOverrideGlobalCflags}", "${config.NoOverrideExternalGlobalCflags}"}),
+			name: "c",
+			src:  "foo.c",
+			expectedNDK: slices.Concat(
+				baseExpectedFlags,
+				expectedTargetNDKFlags,
+				conly,
+				expectedIncludes,
+				expectedNDKSTLIncludes,
+				cflags,
+				cstd,
+				lastNDKFlags,
+				[]string{"${config.NoOverrideGlobalCflags}", "${config.NoOverrideExternalGlobalCflags}"},
+			),
+			expectedPlatform: slices.Concat(
+				expectedPlatformFlags,
+				baseExpectedFlags,
+				expectedTargetPlatformFlags,
+				conly,
+				expectedIncludes,
+				cflags,
+				cstd,
+				lastPlatformIncludes,
+				[]string{"${config.NoOverrideGlobalCflags}", "${config.NoOverrideExternalGlobalCflags}"},
+			),
 		},
 		{
-			name:     "cc",
-			src:      "foo.cc",
-			expected: combineSlices(baseExpectedFlags, cppOnly, expectedIncludes, cflags, cppstd, lastIncludes, []string{"${config.NoOverrideGlobalCflags}", "${config.NoOverrideExternalGlobalCflags}"}),
+			name: "cc",
+			src:  "foo.cc",
+			expectedNDK: slices.Concat(
+				baseExpectedFlags,
+				expectedTargetNDKFlags,
+				cppOnly,
+				expectedIncludes,
+				expectedNDKSTLIncludes,
+				cflags,
+				cppstd,
+				lastNDKFlags,
+				[]string{"${config.NoOverrideGlobalCflags}", "${config.NoOverrideExternalGlobalCflags}"},
+			),
+			expectedPlatform: slices.Concat(
+				expectedPlatformFlags,
+				baseExpectedFlags,
+				expectedTargetPlatformFlags,
+				cppOnly,
+				expectedIncludes,
+				cflags,
+				cppstd,
+				lastPlatformIncludes,
+				[]string{"${config.NoOverrideGlobalCflags}", "${config.NoOverrideExternalGlobalCflags}"},
+			),
 		},
 		{
-			name:     "assemble",
-			src:      "foo.s",
-			expected: combineSlices(baseExpectedFlags, []string{"${config.CommonGlobalAsflags}"}, expectedIncludes, lastIncludes),
+			name: "assemble",
+			src:  "foo.s",
+			expectedNDK: slices.Concat(
+				baseExpectedFlags,
+				expectedTargetNDKFlags,
+				[]string{"${config.CommonGlobalAsflags}"},
+				expectedIncludes,
+				expectedNDKSTLIncludes,
+				lastNDKFlags,
+			),
+			expectedPlatform: slices.Concat(
+				expectedPlatformFlags,
+				baseExpectedFlags,
+				expectedTargetPlatformFlags,
+				[]string{"${config.CommonGlobalAsflags}"},
+				expectedIncludes,
+				lastPlatformIncludes,
+			),
 		},
 	}
 
@@ -2896,7 +2980,8 @@ func TestIncludeDirectoryOrdering(t *testing.T) {
 		`, lib, lib)
 			}
 
-			ctx := android.GroupFixturePreparers(
+			runTest := func(t *testing.T, variant string, expected []string) {
+				ctx := android.GroupFixturePreparers(
 				PrepareForIntegrationTestWithCc,
 				android.FixtureAddTextFile("external/foo/Android.bp", bp),
 			).RunTest(t)
@@ -2914,9 +2999,16 @@ func TestIncludeDirectoryOrdering(t *testing.T) {
 				} else if len(flag) > 0 {
 					includes = append(includes, flag)
 				}
+
+				android.AssertArrayString(t, "includes", expected, includes)
 			}
 
-			android.AssertArrayString(t, "includes", tc.expected, includes)
+			t.Run("platform", func(t *testing.T) {
+				runTest(t, "android_arm_armv7-a-neon_static", tc.expectedPlatform)
+			})
+			t.Run("ndk", func(t *testing.T) {
+				runTest(t, "android_arm_armv7-a-neon_sdk_static", tc.expectedNDK)
+			})
 		})
 	}
 

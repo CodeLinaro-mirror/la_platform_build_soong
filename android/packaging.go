@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/google/blueprint"
+	"github.com/google/blueprint/gobtools"
 	"github.com/google/blueprint/proptools"
 )
 
@@ -56,6 +57,64 @@ type PackagingSpec struct {
 
 	// ArchType of the module which produced this packaging spec
 	archType ArchType
+
+	// List of module names that this packaging spec overrides
+	overrides *[]string
+
+	// Name of the module where this packaging spec is output of
+	owner string
+}
+
+type packagingSpecGob struct {
+	RelPathInPackage      string
+	SrcPath               Path
+	SymlinkTarget         string
+	Executable            bool
+	EffectiveLicenseFiles *Paths
+	Partition             string
+	SkipInstall           bool
+	AconfigPaths          *Paths
+	ArchType              ArchType
+	Overrides             *[]string
+	Owner                 string
+}
+
+func (p *PackagingSpec) ToGob() *packagingSpecGob {
+	return &packagingSpecGob{
+		RelPathInPackage:      p.relPathInPackage,
+		SrcPath:               p.srcPath,
+		SymlinkTarget:         p.symlinkTarget,
+		Executable:            p.executable,
+		EffectiveLicenseFiles: p.effectiveLicenseFiles,
+		Partition:             p.partition,
+		SkipInstall:           p.skipInstall,
+		AconfigPaths:          p.aconfigPaths,
+		ArchType:              p.archType,
+		Overrides:             p.overrides,
+		Owner:                 p.owner,
+	}
+}
+
+func (p *PackagingSpec) FromGob(data *packagingSpecGob) {
+	p.relPathInPackage = data.RelPathInPackage
+	p.srcPath = data.SrcPath
+	p.symlinkTarget = data.SymlinkTarget
+	p.executable = data.Executable
+	p.effectiveLicenseFiles = data.EffectiveLicenseFiles
+	p.partition = data.Partition
+	p.skipInstall = data.SkipInstall
+	p.aconfigPaths = data.AconfigPaths
+	p.archType = data.ArchType
+	p.overrides = data.Overrides
+	p.owner = data.Owner
+}
+
+func (p *PackagingSpec) GobEncode() ([]byte, error) {
+	return gobtools.CustomGobEncode[packagingSpecGob](p)
+}
+
+func (p *PackagingSpec) GobDecode(data []byte) error {
+	return gobtools.CustomGobDecode[packagingSpecGob](data, p)
 }
 
 func (p *PackagingSpec) Equals(other *PackagingSpec) bool {
@@ -319,13 +378,31 @@ func (p *PackagingBase) AddDeps(ctx BottomUpMutatorContext, depTag blueprint.Dep
 			if p.IgnoreMissingDependencies && !ctx.OtherModuleExists(dep) {
 				continue
 			}
-			ctx.AddFarVariationDependencies(t.Variations(), depTag, dep)
+			targetVariation := t.Variations()
+			sharedVariation := blueprint.Variation{
+				Mutator:   "link",
+				Variation: "shared",
+			}
+			// If a shared variation exists, use that. Static variants do not provide any standalone files
+			// for packaging.
+			if ctx.OtherModuleFarDependencyVariantExists([]blueprint.Variation{sharedVariation}, dep) {
+				targetVariation = append(targetVariation, sharedVariation)
+			}
+			ctx.AddFarVariationDependencies(targetVariation, depTag, dep)
 		}
 	}
 }
 
 func (p *PackagingBase) GatherPackagingSpecsWithFilter(ctx ModuleContext, filter func(PackagingSpec) bool) map[string]PackagingSpec {
-	m := make(map[string]PackagingSpec)
+	// all packaging specs gathered from the dep.
+	var all []PackagingSpec
+	// Name of the dependency which requested the packaging spec.
+	// If this dep is overridden, the packaging spec will not be installed via this dependency chain.
+	// (the packaging spec might still be installed if there are some other deps which depend on it).
+	var depNames []string
+
+	// list of module names overridden
+	var overridden []string
 
 	var arches []ArchType
 	for _, target := range getSupportedTargets(ctx) {
@@ -357,17 +434,38 @@ func (p *PackagingBase) GatherPackagingSpecsWithFilter(ctx ModuleContext, filter
 					continue
 				}
 			}
-			dstPath := ps.relPathInPackage
-			if existingPs, ok := m[dstPath]; ok {
-				if !existingPs.Equals(&ps) {
-					ctx.ModuleErrorf("packaging conflict at %v:\n%v\n%v", dstPath, existingPs, ps)
-				}
-				continue
+			all = append(all, ps)
+			depNames = append(depNames, child.Name())
+			if ps.overrides != nil {
+				overridden = append(overridden, *ps.overrides...)
 			}
-
-			m[dstPath] = ps
 		}
 	})
+
+	// all minus packaging specs that are overridden
+	var filtered []PackagingSpec
+	for index, ps := range all {
+		if ps.owner != "" && InList(ps.owner, overridden) {
+			continue
+		}
+		// The dependency which requested this packaging spec has been overridden.
+		if InList(depNames[index], overridden) {
+			continue
+		}
+		filtered = append(filtered, ps)
+	}
+
+	m := make(map[string]PackagingSpec)
+	for _, ps := range filtered {
+		dstPath := ps.relPathInPackage
+		if existingPs, ok := m[dstPath]; ok {
+			if !existingPs.Equals(&ps) {
+				ctx.ModuleErrorf("packaging conflict at %v:\n%v\n%v", dstPath, existingPs, ps)
+			}
+			continue
+		}
+		m[dstPath] = ps
+	}
 	return m
 }
 

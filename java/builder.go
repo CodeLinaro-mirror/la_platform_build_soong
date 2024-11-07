@@ -260,8 +260,15 @@ var (
 
 	ravenizer = pctx.AndroidStaticRule("ravenizer",
 		blueprint.RuleParams{
-			Command:     "rm -f $out && ${ravenizer} --in-jar $in --out-jar $out",
+			Command:     "rm -f $out && ${ravenizer} --in-jar $in --out-jar $out $ravenizerArgs",
 			CommandDeps: []string{"${ravenizer}"},
+		},
+		"ravenizerArgs")
+
+	apimapper = pctx.AndroidStaticRule("apimapper",
+		blueprint.RuleParams{
+			Command:     "${apimapper} --in-jar $in --out-jar $out",
+			CommandDeps: []string{"${apimapper}"},
 		},
 	)
 
@@ -294,7 +301,7 @@ var (
 
 	gatherReleasedFlaggedApisRule = pctx.AndroidStaticRule("gatherReleasedFlaggedApisRule",
 		blueprint.RuleParams{
-			Command: `${aconfig} dump-cache --dedup --format='{fully_qualified_name}={state:bool}' ` +
+			Command: `${aconfig} dump-cache --dedup --format='{fully_qualified_name}' ` +
 				`--out ${out} ` +
 				`${flags_path} ` +
 				`${filter_args} `,
@@ -315,6 +322,7 @@ func init() {
 
 	pctx.HostBinToolVariable("aconfig", "aconfig")
 	pctx.HostBinToolVariable("ravenizer", "ravenizer")
+	pctx.HostBinToolVariable("apimapper", "apimapper")
 	pctx.HostBinToolVariable("keep-flagged-apis", "keep-flagged-apis")
 }
 
@@ -695,6 +703,7 @@ func TransformJarsToJar(ctx android.ModuleContext, outputFile android.WritablePa
 	// Remove any module-info.class files that may have come from prebuilt jars, they cause problems
 	// for downstream tools like desugar.
 	jarArgs = append(jarArgs, "-stripFile module-info.class")
+	jarArgs = append(jarArgs, "-stripFile META-INF/versions/*/module-info.class")
 
 	if stripDirEntries {
 		jarArgs = append(jarArgs, "-D")
@@ -774,12 +783,15 @@ func TransformJetifier(ctx android.ModuleContext, outputFile android.WritablePat
 }
 
 func TransformRavenizer(ctx android.ModuleContext, outputFile android.WritablePath,
-	inputFile android.Path) {
+	inputFile android.Path, ravenizerArgs string) {
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        ravenizer,
 		Description: "ravenizer",
 		Output:      outputFile,
 		Input:       inputFile,
+		Args: map[string]string{
+			"ravenizerArgs": ravenizerArgs,
+		},
 	})
 }
 

@@ -127,6 +127,26 @@ func (s *SystemServerClasspathModule) GenerateAndroidBuildActions(ctx android.Mo
 	configuredJars = configuredJars.AppendList(&standaloneConfiguredJars)
 	classpathJars = append(classpathJars, standaloneClasspathJars...)
 	s.classpathFragmentBase().generateClasspathProtoBuildActions(ctx, configuredJars, classpathJars)
+	s.setPartitionInfoOfLibraries(ctx)
+}
+
+// Map of java library name to their install partition.
+type LibraryNameToPartitionInfo struct {
+	LibraryNameToPartition map[string]string
+}
+
+// LibraryNameToPartitionInfoProvider will be used by the top-level apex to enforce that dexpreopt files
+// of apex system server jars are installed in the same partition as the top-level apex.
+var LibraryNameToPartitionInfoProvider = blueprint.NewProvider[LibraryNameToPartitionInfo]()
+
+func (s *SystemServerClasspathModule) setPartitionInfoOfLibraries(ctx android.ModuleContext) {
+	libraryNameToPartition := map[string]string{}
+	ctx.VisitDirectDepsWithTag(systemServerClasspathFragmentContentDepTag, func(m android.Module) {
+		libraryNameToPartition[m.Name()] = m.PartitionTag(ctx.DeviceConfig())
+	})
+	android.SetProvider(ctx, LibraryNameToPartitionInfoProvider, LibraryNameToPartitionInfo{
+		LibraryNameToPartition: libraryNameToPartition,
+	})
 }
 
 func (s *SystemServerClasspathModule) configuredJars(ctx android.ModuleContext) android.ConfiguredJarList {
@@ -216,6 +236,11 @@ func IsSystemServerClasspathFragmentContentDepTag(tag blueprint.DependencyTag) b
 	return tag == systemServerClasspathFragmentContentDepTag
 }
 
+// The dexpreopt artifacts of apex system server jars are installed onto system image.
+func (s systemServerClasspathFragmentContentDependencyTag) InstallDepNeeded() bool {
+	return true
+}
+
 func (s *SystemServerClasspathModule) ComponentDepsMutator(ctx android.BottomUpMutatorContext) {
 	module := ctx.Module()
 	_, isSourceModule := module.(*SystemServerClasspathModule)
@@ -234,7 +259,7 @@ func (s *SystemServerClasspathModule) ComponentDepsMutator(ctx android.BottomUpM
 }
 
 // Collect information for opening IDE project files in java/jdeps.go.
-func (s *SystemServerClasspathModule) IDEInfo(dpInfo *android.IdeInfo) {
+func (s *SystemServerClasspathModule) IDEInfo(ctx android.BaseModuleContext, dpInfo *android.IdeInfo) {
 	dpInfo.Deps = append(dpInfo.Deps, s.properties.Contents...)
 	dpInfo.Deps = append(dpInfo.Deps, s.properties.Standalone_contents...)
 }

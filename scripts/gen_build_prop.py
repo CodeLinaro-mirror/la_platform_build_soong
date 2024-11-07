@@ -196,6 +196,7 @@ def generate_build_info(args):
     print(f"ro.build.display.id?={config['BuildDesc']}")
   print(f"ro.build.version.incremental={config['BuildNumber']}")
   print(f"ro.build.version.sdk={config['Platform_sdk_version']}")
+  print(f"ro.build.version.sdk_minor={build_flags['RELEASE_PLATFORM_SDK_MINOR_VERSION']}")
   print(f"ro.build.version.preview_sdk={config['Platform_preview_sdk_version']}")
   print(f"ro.build.version.preview_sdk_fingerprint={config['PlatformPreviewSdkFingerprint']}")
   print(f"ro.build.version.codename={config['Platform_sdk_codename']}")
@@ -429,7 +430,9 @@ def append_additional_vendor_props(args):
   # Build system set BOARD_API_LEVEL to show the api level of the vendor API surface.
   # This must not be altered outside of build system.
   if config["VendorApiLevel"]:
-    props.append(f"ro.board.api_level={config['VendorApiLevel']}")
+    props.append(f"ro.board.api_level?={config['VendorApiLevel']}")
+    if config["VendorApiLevelPropOverride"]:
+      props.append(f"ro.board.api_level={config['VendorApiLevelPropOverride']}")
 
   # RELEASE_BOARD_API_LEVEL_FROZEN is true when the vendor API surface is frozen.
   if build_flags["RELEASE_BOARD_API_LEVEL_FROZEN"]:

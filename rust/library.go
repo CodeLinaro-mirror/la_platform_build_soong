@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/google/blueprint"
+	"github.com/google/blueprint/depset"
 
 	"android/soong/android"
 	"android/soong/cc"
@@ -70,6 +71,10 @@ type LibraryCompilerProperties struct {
 
 	// Whether this library is part of the Rust toolchain sysroot.
 	Sysroot *bool
+
+	// Exclude this rust_ffi target from being included in APEXes.
+	// TODO(b/362509506): remove this once stubs are properly supported by rust_ffi targets.
+	Apex_exclude *bool
 }
 
 type LibraryMutatedProperties struct {
@@ -122,6 +127,7 @@ type libraryInterface interface {
 	shared() bool
 	sysroot() bool
 	source() bool
+	apexExclude() bool
 
 	// Returns true if the build options for the module have selected a particular build type
 	buildRlib() bool
@@ -184,6 +190,10 @@ func (library *libraryDecorator) static() bool {
 
 func (library *libraryDecorator) source() bool {
 	return library.MutatedProperties.VariantIsSource
+}
+
+func (library *libraryDecorator) apexExclude() bool {
+	return Bool(library.Properties.Apex_exclude)
 }
 
 func (library *libraryDecorator) buildRlib() bool {
@@ -611,7 +621,7 @@ func (library *libraryDecorator) compile(ctx ModuleContext, flags Flags, deps Pa
 	}
 
 	if library.static() {
-		depSet := android.NewDepSetBuilder[android.Path](android.TOPOLOGICAL).Direct(outputFile).Build()
+		depSet := depset.NewBuilder[android.Path](depset.TOPOLOGICAL).Direct(outputFile).Build()
 		android.SetProvider(ctx, cc.StaticLibraryInfoProvider, cc.StaticLibraryInfo{
 			StaticLibrary: outputFile,
 
