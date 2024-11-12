@@ -119,10 +119,7 @@ func TestAppSplits(t *testing.T) {
 		foo.Output(expectedOutput)
 	}
 
-	outputFiles, err := foo.Module().(*AndroidApp).OutputFiles("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	outputFiles := foo.OutputFiles(ctx, t, "")
 	android.AssertPathsRelativeToTopEquals(t, `OutputFiles("")`, expectedOutputs, outputFiles)
 }
 
@@ -517,6 +514,49 @@ func TestUpdatableApps_ErrorIfDepMinSdkVersionIsHigher(t *testing.T) {
 		}
 	`
 	testJavaError(t, `"libjni" .*: links "libbar" built against newer API version "current"`, bp)
+}
+
+func TestUpdatableApps_ApplyDefaultUpdatableModuleVersion(t *testing.T) {
+	result := android.GroupFixturePreparers(
+		PrepareForTestWithJavaDefaultModules,
+	).RunTestWithBp(t, `
+		android_app {
+			name: "com.android.foo",
+			srcs: ["a.java"],
+			sdk_version: "current",
+			min_sdk_version: "31",
+			updatable: true,
+		}
+	`)
+	foo := result.ModuleForTests("com.android.foo", "android_common").Rule("manifestFixer")
+	android.AssertStringDoesContain(t,
+		"com.android.foo: expected manifest fixer to set override-placeholder-version to RELEASE_DEFAULT_UPDATABLE_MODULE_VERSION",
+		foo.BuildParams.Args["args"],
+		fmt.Sprintf("--override-placeholder-version %s", testDefaultUpdatableModuleVersion),
+	)
+}
+
+func TestUpdatableApps_ApplyOverrideApexManifestDefaultVersion(t *testing.T) {
+	result := android.GroupFixturePreparers(
+		PrepareForTestWithJavaDefaultModules,
+		android.FixtureMergeEnv(map[string]string{
+			"OVERRIDE_APEX_MANIFEST_DEFAULT_VERSION": "1234",
+		}),
+	).RunTestWithBp(t, `
+		android_app {
+			name: "com.android.foo",
+			srcs: ["a.java"],
+			sdk_version: "current",
+			min_sdk_version: "31",
+			updatable: true,
+		}
+	`)
+	foo := result.ModuleForTests("com.android.foo", "android_common").Rule("manifestFixer")
+	android.AssertStringDoesContain(t,
+		"com.android.foo: expected manifest fixer to set override-placeholder-version to 1234",
+		foo.BuildParams.Args["args"],
+		"--override-placeholder-version 1234",
+	)
 }
 
 func TestResourceDirs(t *testing.T) {
@@ -1379,26 +1419,31 @@ func TestAndroidResourceProcessor(t *testing.T) {
 }
 
 func TestAndroidResourceOverlays(t *testing.T) {
+	type moduleAndVariant struct {
+		module  string
+		variant string
+	}
+
 	testCases := []struct {
 		name                       string
 		enforceRROTargets          []string
 		enforceRROExcludedOverlays []string
-		resourceFiles              map[string][]string
-		overlayFiles               map[string][]string
-		rroDirs                    map[string][]string
+		resourceFiles              map[moduleAndVariant][]string
+		overlayFiles               map[moduleAndVariant][]string
+		rroDirs                    map[moduleAndVariant][]string
 	}{
 		{
 			name:                       "no RRO",
 			enforceRROTargets:          nil,
 			enforceRROExcludedOverlays: nil,
-			resourceFiles: map[string][]string{
-				"foo":  nil,
-				"bar":  {"bar/res/res/values/strings.xml"},
-				"lib":  nil,
-				"lib2": {"lib2/res/res/values/strings.xml"},
+			resourceFiles: map[moduleAndVariant][]string{
+				{"foo", "android_common"}:  nil,
+				{"bar", "android_common"}:  {"bar/res/res/values/strings.xml"},
+				{"lib", "android_common"}:  nil,
+				{"lib2", "android_common"}: {"lib2/res/res/values/strings.xml"},
 			},
-			overlayFiles: map[string][]string{
-				"foo": {
+			overlayFiles: map[moduleAndVariant][]string{
+				{"foo", "android_common"}: {
 					"out/soong/.intermediates/lib2/android_common/package-res.apk",
 					"out/soong/.intermediates/lib/android_common/package-res.apk",
 					"out/soong/.intermediates/lib3/android_common/package-res.apk",
@@ -1407,57 +1452,65 @@ func TestAndroidResourceOverlays(t *testing.T) {
 					"device/vendor/blah/overlay/foo/res/values/strings.xml",
 					"product/vendor/blah/overlay/foo/res/values/strings.xml",
 				},
-				"bar": {
+				{"bar", "android_common"}: {
 					"device/vendor/blah/static_overlay/bar/res/values/strings.xml",
 					"device/vendor/blah/overlay/bar/res/values/strings.xml",
 				},
-				"lib": {
+				{"lib", "android_common"}: {
 					"out/soong/.intermediates/lib2/android_common/package-res.apk",
 					"lib/res/res/values/strings.xml",
 					"device/vendor/blah/overlay/lib/res/values/strings.xml",
 				},
 			},
-			rroDirs: map[string][]string{
-				"foo": nil,
-				"bar": nil,
+			rroDirs: map[moduleAndVariant][]string{
+				{"foo", "android_common"}: nil,
+				{"bar", "android_common"}: nil,
 			},
 		},
 		{
 			name:                       "enforce RRO on foo",
 			enforceRROTargets:          []string{"foo"},
 			enforceRROExcludedOverlays: []string{"device/vendor/blah/static_overlay"},
-			resourceFiles: map[string][]string{
-				"foo":  nil,
-				"bar":  {"bar/res/res/values/strings.xml"},
-				"lib":  nil,
-				"lib2": {"lib2/res/res/values/strings.xml"},
+			resourceFiles: map[moduleAndVariant][]string{
+				{"foo", "android_common"}:      nil,
+				{"bar", "android_common"}:      {"bar/res/res/values/strings.xml"},
+				{"lib", "android_common"}:      nil,
+				{"lib", "android_common_rro"}:  nil,
+				{"lib2", "android_common"}:     {"lib2/res/res/values/strings.xml"},
+				{"lib2", "android_common_rro"}: {"lib2/res/res/values/strings.xml"},
 			},
-			overlayFiles: map[string][]string{
-				"foo": {
-					"out/soong/.intermediates/lib2/android_common/package-res.apk",
-					"out/soong/.intermediates/lib/android_common/package-res.apk",
-					"out/soong/.intermediates/lib3/android_common/package-res.apk",
+			overlayFiles: map[moduleAndVariant][]string{
+				{"foo", "android_common"}: {
+					"out/soong/.intermediates/lib2/android_common_rro/package-res.apk",
+					"out/soong/.intermediates/lib/android_common_rro/package-res.apk",
+					"out/soong/.intermediates/lib3/android_common_rro/package-res.apk",
 					"foo/res/res/values/strings.xml",
 					"device/vendor/blah/static_overlay/foo/res/values/strings.xml",
 				},
-				"bar": {
+				{"bar", "android_common"}: {
 					"device/vendor/blah/static_overlay/bar/res/values/strings.xml",
 					"device/vendor/blah/overlay/bar/res/values/strings.xml",
 				},
-				"lib": {
+				{"lib", "android_common"}: {
 					"out/soong/.intermediates/lib2/android_common/package-res.apk",
+					"lib/res/res/values/strings.xml",
+					"device/vendor/blah/overlay/lib/res/values/strings.xml",
+				},
+				{"lib", "android_common_rro"}: {
+					"out/soong/.intermediates/lib2/android_common_rro/package-res.apk",
 					"lib/res/res/values/strings.xml",
 				},
 			},
 
-			rroDirs: map[string][]string{
-				"foo": {
+			rroDirs: map[moduleAndVariant][]string{
+				{"foo", "android_common"}: {
 					"device:device/vendor/blah/overlay/foo/res",
 					"product:product/vendor/blah/overlay/foo/res",
 					"device:device/vendor/blah/overlay/lib/res",
 				},
-				"bar": nil,
-				"lib": {"device:device/vendor/blah/overlay/lib/res"},
+				{"bar", "android_common"}:     nil,
+				{"lib", "android_common"}:     nil,
+				{"lib", "android_common_rro"}: {"device:device/vendor/blah/overlay/lib/res"},
 			},
 		},
 		{
@@ -1468,35 +1521,35 @@ func TestAndroidResourceOverlays(t *testing.T) {
 				"device/vendor/blah/static_overlay/foo",
 				"device/vendor/blah/static_overlay/bar/res",
 			},
-			resourceFiles: map[string][]string{
-				"foo":  nil,
-				"bar":  {"bar/res/res/values/strings.xml"},
-				"lib":  nil,
-				"lib2": {"lib2/res/res/values/strings.xml"},
+			resourceFiles: map[moduleAndVariant][]string{
+				{"foo", "android_common"}:  nil,
+				{"bar", "android_common"}:  {"bar/res/res/values/strings.xml"},
+				{"lib", "android_common"}:  nil,
+				{"lib2", "android_common"}: {"lib2/res/res/values/strings.xml"},
 			},
-			overlayFiles: map[string][]string{
-				"foo": {
+			overlayFiles: map[moduleAndVariant][]string{
+				{"foo", "android_common"}: {
 					"out/soong/.intermediates/lib2/android_common/package-res.apk",
 					"out/soong/.intermediates/lib/android_common/package-res.apk",
 					"out/soong/.intermediates/lib3/android_common/package-res.apk",
 					"foo/res/res/values/strings.xml",
 					"device/vendor/blah/static_overlay/foo/res/values/strings.xml",
 				},
-				"bar": {"device/vendor/blah/static_overlay/bar/res/values/strings.xml"},
-				"lib": {
+				{"bar", "android_common"}: {"device/vendor/blah/static_overlay/bar/res/values/strings.xml"},
+				{"lib", "android_common"}: {
 					"out/soong/.intermediates/lib2/android_common/package-res.apk",
 					"lib/res/res/values/strings.xml",
 				},
 			},
-			rroDirs: map[string][]string{
-				"foo": {
+			rroDirs: map[moduleAndVariant][]string{
+				{"foo", "android_common"}: {
 					"device:device/vendor/blah/overlay/foo/res",
 					"product:product/vendor/blah/overlay/foo/res",
 					// Lib dep comes after the direct deps
 					"device:device/vendor/blah/overlay/lib/res",
 				},
-				"bar": {"device:device/vendor/blah/overlay/bar/res"},
-				"lib": {"device:device/vendor/blah/overlay/lib/res"},
+				{"bar", "android_common"}: {"device:device/vendor/blah/overlay/bar/res"},
+				{"lib", "android_common"}: {"device:device/vendor/blah/overlay/lib/res"},
 			},
 		},
 	}
@@ -1581,19 +1634,19 @@ func TestAndroidResourceOverlays(t *testing.T) {
 				for _, o := range list {
 					res := module.MaybeOutput(o)
 					if res.Rule != nil {
-						// If the overlay is compiled as part of this module (i.e. a .arsc.flat file),
+						// If the overlay is compiled as part of this moduleAndVariant (i.e. a .arsc.flat file),
 						// verify the inputs to the .arsc.flat rule.
 						files = append(files, res.Inputs.Strings()...)
 					} else {
-						// Otherwise, verify the full path to the output of the other module
+						// Otherwise, verify the full path to the output of the other moduleAndVariant
 						files = append(files, o)
 					}
 				}
 				return files
 			}
 
-			getResources := func(moduleName string) (resourceFiles, overlayFiles, rroDirs []string) {
-				module := result.ModuleForTests(moduleName, "android_common")
+			getResources := func(moduleName, variantName string) (resourceFiles, overlayFiles, rroDirs []string) {
+				module := result.ModuleForTests(moduleName, variantName)
 				resourceList := module.MaybeOutput("aapt2/res.list")
 				if resourceList.Rule != nil {
 					resourceFiles = resourceListToFiles(module, android.PathsRelativeToTop(resourceList.Inputs))
@@ -1618,21 +1671,33 @@ func TestAndroidResourceOverlays(t *testing.T) {
 				return resourceFiles, overlayFiles, rroDirs
 			}
 
-			modules := []string{"foo", "bar", "lib", "lib2"}
-			for _, module := range modules {
-				resourceFiles, overlayFiles, rroDirs := getResources(module)
+			modules := []moduleAndVariant{
+				{"foo", "android_common"},
+				{"foo", "android_common_rro"},
+				{"bar", "android_common"},
+				{"bar", "android_common_rro"},
+				{"lib", "android_common"},
+				{"lib", "android_common_rro"},
+				{"lib2", "android_common"},
+				{"lib2", "android_common_rro"},
+			}
+			for _, moduleAndVariant := range modules {
+				if _, exists := testCase.resourceFiles[moduleAndVariant]; !exists {
+					continue
+				}
+				resourceFiles, overlayFiles, rroDirs := getResources(moduleAndVariant.module, moduleAndVariant.variant)
 
-				if !reflect.DeepEqual(resourceFiles, testCase.resourceFiles[module]) {
+				if !reflect.DeepEqual(resourceFiles, testCase.resourceFiles[moduleAndVariant]) {
 					t.Errorf("expected %s resource files:\n  %#v\n got:\n  %#v",
-						module, testCase.resourceFiles[module], resourceFiles)
+						moduleAndVariant, testCase.resourceFiles[moduleAndVariant], resourceFiles)
 				}
-				if !reflect.DeepEqual(overlayFiles, testCase.overlayFiles[module]) {
+				if !reflect.DeepEqual(overlayFiles, testCase.overlayFiles[moduleAndVariant]) {
 					t.Errorf("expected %s overlay files:\n  %#v\n got:\n  %#v",
-						module, testCase.overlayFiles[module], overlayFiles)
+						moduleAndVariant, testCase.overlayFiles[moduleAndVariant], overlayFiles)
 				}
-				if !reflect.DeepEqual(rroDirs, testCase.rroDirs[module]) {
+				if !reflect.DeepEqual(rroDirs, testCase.rroDirs[moduleAndVariant]) {
 					t.Errorf("expected %s rroDirs:  %#v\n got:\n  %#v",
-						module, testCase.rroDirs[module], rroDirs)
+						moduleAndVariant, testCase.rroDirs[moduleAndVariant], rroDirs)
 				}
 			}
 		})
@@ -3201,7 +3266,7 @@ func TestUsesLibraries(t *testing.T) {
 		java_library {
 			name: "static-runtime-helper",
 			srcs: ["a.java"],
-			libs: ["runtime-library"],
+			libs: ["runtime-library.impl"],
 			sdk_version: "current",
 		}
 
@@ -3265,7 +3330,7 @@ func TestUsesLibraries(t *testing.T) {
 			name: "app",
 			srcs: ["a.java"],
 			libs: [
-				"qux",
+				"qux.impl",
 				"quuz.stubs"
 			],
 			static_libs: [
@@ -4146,6 +4211,7 @@ func TestTargetSdkVersionMtsTests(t *testing.T) {
 	bpTemplate := `
 	%v {
 		name: "mytest",
+		min_sdk_version: "34",
 		target_sdk_version: "%v",
 		test_suites: ["othersuite", "%v"],
 	}
@@ -4323,7 +4389,16 @@ func TestPrivappAllowlistAndroidMk(t *testing.T) {
 }
 
 func TestAppFlagsPackages(t *testing.T) {
-	ctx := testApp(t, `
+	ctx := android.GroupFixturePreparers(
+		prepareForJavaTest,
+		android.FixtureMergeMockFs(
+			map[string][]byte{
+				"res/layout/layout.xml":         nil,
+				"res/values/strings.xml":        nil,
+				"res/values-en-rUS/strings.xml": nil,
+			},
+		),
+	).RunTestWithBp(t, `
 		android_app {
 			name: "foo",
 			srcs: ["a.java"],
@@ -4355,10 +4430,10 @@ func TestAppFlagsPackages(t *testing.T) {
 
 	// android_app module depends on aconfig_declarations listed in flags_packages
 	android.AssertBoolEquals(t, "foo expected to depend on bar", true,
-		CheckModuleHasDependency(t, ctx, "foo", "android_common", "bar"))
+		CheckModuleHasDependency(t, ctx.TestContext, "foo", "android_common", "bar"))
 
 	android.AssertBoolEquals(t, "foo expected to depend on baz", true,
-		CheckModuleHasDependency(t, ctx, "foo", "android_common", "baz"))
+		CheckModuleHasDependency(t, ctx.TestContext, "foo", "android_common", "baz"))
 
 	aapt2LinkRule := foo.Rule("android/soong/java.aapt2Link")
 	linkInFlags := aapt2LinkRule.Args["inFlags"]
@@ -4366,6 +4441,90 @@ func TestAppFlagsPackages(t *testing.T) {
 		"aapt2 link command expected to pass feature flags arguments",
 		linkInFlags,
 		"--feature-flags @out/soong/.intermediates/bar/intermediate.txt --feature-flags @out/soong/.intermediates/baz/intermediate.txt",
+	)
+
+	aapt2CompileRule := foo.Rule("android/soong/java.aapt2Compile")
+	compileFlags := aapt2CompileRule.Args["cFlags"]
+	android.AssertStringDoesContain(t,
+		"aapt2 compile command expected to pass feature flags arguments",
+		compileFlags,
+		"--feature-flags @out/soong/.intermediates/bar/intermediate.txt --feature-flags @out/soong/.intermediates/baz/intermediate.txt",
+	)
+}
+
+func TestAppFlagsPackagesPropagation(t *testing.T) {
+	ctx := testApp(t, `
+		aconfig_declarations {
+			name: "foo",
+			package: "com.example.package.foo",
+			container: "com.android.foo",
+			srcs: [
+				"foo.aconfig",
+			],
+		}
+		aconfig_declarations {
+			name: "bar",
+			package: "com.example.package.bar",
+			container: "com.android.bar",
+			srcs: [
+				"bar.aconfig",
+			],
+		}
+		aconfig_declarations {
+			name: "baz",
+			package: "com.example.package.baz",
+			container: "com.android.baz",
+			srcs: [
+				"baz.aconfig",
+			],
+		}
+		android_library {
+			name: "foo_lib",
+			srcs: ["a.java"],
+			sdk_version: "current",
+			flags_packages: [
+				"foo",
+			],
+		}
+		android_library {
+			name: "bar_lib",
+			srcs: ["a.java"],
+			sdk_version: "current",
+			flags_packages: [
+				"bar",
+			],
+		}
+		android_app {
+			name: "baz_app",
+			srcs: ["a.java"],
+			sdk_version: "current",
+			flags_packages: [
+				"baz",
+			],
+			static_libs: [
+				"bar_lib",
+			],
+			libs: [
+				"foo_lib",
+			],
+		}
+	`)
+
+	bazApp := ctx.ModuleForTests("baz_app", "android_common")
+
+	// android_app module depends on aconfig_declarations listed in flags_packages
+	// and that of static libs, but not libs
+	aapt2LinkRule := bazApp.Rule("android/soong/java.aapt2Link")
+	linkInFlags := aapt2LinkRule.Args["inFlags"]
+	android.AssertStringDoesContain(t,
+		"aapt2 link command expected to pass feature flags arguments of flags_packages and that of its static libs",
+		linkInFlags,
+		"--feature-flags @out/soong/.intermediates/bar/intermediate.txt --feature-flags @out/soong/.intermediates/baz/intermediate.txt",
+	)
+	android.AssertStringDoesNotContain(t,
+		"aapt2 link command expected to not pass feature flags arguments of flags_packages of its libs",
+		linkInFlags,
+		"--feature-flags @out/soong/.intermediates/foo/intermediate.txt",
 	)
 }
 
@@ -4478,4 +4637,93 @@ func TestAppMinSdkVersionOverride(t *testing.T) {
 		"--minSdkVersion  33",
 	)
 
+}
+
+func TestNotApplyDefaultUpdatableModuleVersion(t *testing.T) {
+	result := android.GroupFixturePreparers(
+		PrepareForTestWithJavaDefaultModules,
+	).RunTestWithBp(t, `
+		android_app {
+			name: "com.android.foo",
+			srcs: ["a.java"],
+			sdk_version: "current",
+			min_sdk_version: "31",
+		}
+	`)
+	foo := result.ModuleForTests("com.android.foo", "android_common").Rule("manifestFixer")
+	android.AssertStringDoesNotContain(t,
+		"com.android.foo: expected manifest fixer to not set override-placeholder-version",
+		foo.BuildParams.Args["args"],
+		"--override-placeholder-version",
+	)
+}
+
+func TestNotApplyOverrideApexManifestDefaultVersion(t *testing.T) {
+	result := android.GroupFixturePreparers(
+		PrepareForTestWithJavaDefaultModules,
+		android.FixtureMergeEnv(map[string]string{
+			"OVERRIDE_APEX_MANIFEST_DEFAULT_VERSION": "1234",
+		}),
+	).RunTestWithBp(t, `
+		android_app {
+			name: "com.android.foo",
+			srcs: ["a.java"],
+			sdk_version: "current",
+			min_sdk_version: "31",
+		}
+	`)
+	foo := result.ModuleForTests("com.android.foo", "android_common").Rule("manifestFixer")
+	android.AssertStringDoesNotContain(t,
+		"com.android.foo: expected manifest fixer to not set override-placeholder-version",
+		foo.BuildParams.Args["args"],
+		"--override-placeholder-version",
+	)
+}
+
+func TestResourcesWithFlagDirectories(t *testing.T) {
+	result := android.GroupFixturePreparers(
+		PrepareForTestWithJavaDefaultModules,
+		android.FixtureMergeMockFs(android.MockFS{
+			"res/flag(test.package.flag1)/values/bools.xml":                          nil,
+			"res/flag(!test.package.flag2)/values/bools.xml":                         nil,
+			"res/flag(test.package.flag1)/values-config/strings_google_services.xml": nil,
+			"res/flags(test.package.flag1)/values/strings.xml":                       nil,
+		}),
+	).RunTestWithBp(t, `
+		android_library {
+			name: "foo",
+			srcs: ["a.java"],
+			use_resource_processor: true,
+			resource_dirs: [
+				"res",
+			],
+		}
+	`)
+	fooModule := result.ModuleForTests("foo", "android_common")
+	compileOutputPaths := fooModule.Rule("aapt2Compile").Outputs.Strings()
+
+	android.AssertStringListContains(
+		t,
+		"Expected to generate flag path",
+		compileOutputPaths,
+		"out/soong/.intermediates/foo/android_common/aapt2/res/values_bools.(test.package.flag1).arsc.flat",
+	)
+	android.AssertStringListContains(
+		t,
+		"Expected to generate flag path with ! prefix in name",
+		compileOutputPaths,
+		"out/soong/.intermediates/foo/android_common/aapt2/res/values_bools.(!test.package.flag2).arsc.flat",
+	)
+	android.AssertStringListContains(
+		t,
+		"Expected to generate flag path with configs",
+		compileOutputPaths,
+		"out/soong/.intermediates/foo/android_common/aapt2/res/values-config_strings_google_services.(test.package.flag1).arsc.flat",
+	)
+	android.AssertStringListDoesNotContain(
+		t,
+		"Expected to not generate flag path with non-flag(flag_name) pattern",
+		compileOutputPaths,
+		"out/soong/.intermediates/foo/android_common/aapt2/res/values_strings.(test.package.flag1).arsc.flat",
+	)
 }

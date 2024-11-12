@@ -27,19 +27,23 @@ type systemImage struct {
 
 type systemImageProperties struct {
 	// Path to the input linker config json file.
-	Linker_config_src *string
+	Linker_config_src *string `android:"path"`
 }
 
 // android_system_image is a specialization of android_filesystem for the 'system' partition.
 // Currently, the only difference is the inclusion of linker.config.pb file which specifies
 // the provided and the required libraries to and from APEXes.
-func systemImageFactory() android.Module {
+func SystemImageFactory() android.Module {
 	module := &systemImage{}
 	module.AddProperties(&module.properties)
 	module.filesystem.buildExtraFiles = module.buildExtraFiles
 	module.filesystem.filterPackagingSpec = module.filterPackagingSpec
-	initFilesystemModule(&module.filesystem)
+	initFilesystemModule(module, &module.filesystem)
 	return module
+}
+
+func (s systemImage) FsProps() FilesystemProperties {
+	return s.filesystem.properties
 }
 
 func (s *systemImage) buildExtraFiles(ctx android.ModuleContext, root android.OutputPath) android.OutputPaths {
@@ -61,7 +65,8 @@ func (s *systemImage) buildLinkerConfigFile(ctx android.ModuleContext, root andr
 
 	deps := s.gatherFilteredPackagingSpecs(ctx)
 	ctx.WalkDeps(func(child, parent android.Module) bool {
-		for _, ps := range child.PackagingSpecs() {
+		for _, ps := range android.OtherModuleProviderOrDefault(
+			ctx, child, android.InstallFilesProvider).PackagingSpecs {
 			if _, ok := deps[ps.RelPathInPackage()]; ok {
 				modulesInPackageByModule[child] = true
 				modulesInPackageByName[child.Name()] = true
@@ -94,9 +99,10 @@ func (s *systemImage) buildLinkerConfigFile(ctx android.ModuleContext, root andr
 	return output
 }
 
-// Filter the result of GatherPackagingSpecs to discard items targeting outside "system" partition.
-// Note that "apex" module installs its contents to "apex"(fake partition) as well
+// Filter the result of GatherPackagingSpecs to discard items targeting outside "system" / "root"
+// partition.  Note that "apex" module installs its contents to "apex"(fake partition) as well
 // for symbol lookup by imitating "activated" paths.
 func (s *systemImage) filterPackagingSpec(ps android.PackagingSpec) bool {
-	return s.filesystem.filterInstallablePackagingSpec(ps) && ps.Partition() == "system"
+	return !ps.SkipInstall() &&
+		(ps.Partition() == "system" || ps.Partition() == "root")
 }

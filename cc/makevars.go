@@ -122,6 +122,7 @@ func makeVarsProvider(ctx android.MakeVarsContext) {
 	sort.Strings(exportedVendorPublicLibraries)
 	ctx.Strict("VENDOR_PUBLIC_LIBRARIES", strings.Join(exportedVendorPublicLibraries, " "))
 
+	lsdumpPaths := *lsdumpPaths(ctx.Config())
 	sort.Strings(lsdumpPaths)
 	ctx.Strict("LSDUMP_PATHS", strings.Join(lsdumpPaths, " "))
 
@@ -138,10 +139,8 @@ func makeVarsProvider(ctx android.MakeVarsContext) {
 	ctx.Strict("CLANG_COVERAGE_HWASAN_FLAGS", strings.Join(clangCoverageHWASanFlags, " "))
 
 	ctx.Strict("ADDRESS_SANITIZER_CONFIG_EXTRA_CFLAGS", strings.Join(asanCflags, " "))
-	ctx.Strict("ADDRESS_SANITIZER_CONFIG_EXTRA_LDFLAGS", strings.Join(asanLdflags, " "))
 
 	ctx.Strict("HWADDRESS_SANITIZER_CONFIG_EXTRA_CFLAGS", strings.Join(hwasanCflags, " "))
-	ctx.Strict("HWADDRESS_SANITIZER_GLOBAL_OPTIONS", strings.Join(hwasanGlobalOptions, ","))
 
 	ctx.Strict("CFI_EXTRA_CFLAGS", strings.Join(cfiCflags, " "))
 	ctx.Strict("CFI_EXTRA_ASFLAGS", strings.Join(cfiAsflags, " "))

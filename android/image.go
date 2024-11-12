@@ -14,41 +14,72 @@
 
 package android
 
-// ImageInterface is implemented by modules that need to be split by the imageMutator.
+type ImageInterfaceContext interface {
+	ArchModuleContext
+
+	Module() Module
+
+	ModuleErrorf(fmt string, args ...interface{})
+	PropertyErrorf(property, fmt string, args ...interface{})
+
+	DeviceSpecific() bool
+	SocSpecific() bool
+	ProductSpecific() bool
+	SystemExtSpecific() bool
+	Platform() bool
+
+	Config() Config
+}
+
+// ImageInterface is implemented by modules that need to be split by the imageTransitionMutator.
 type ImageInterface interface {
 	// ImageMutatorBegin is called before any other method in the ImageInterface.
-	ImageMutatorBegin(ctx BaseModuleContext)
+	ImageMutatorBegin(ctx ImageInterfaceContext)
+
+	// VendorVariantNeeded should return true if the module needs a vendor variant (installed on the vendor image).
+	VendorVariantNeeded(ctx ImageInterfaceContext) bool
+
+	// ProductVariantNeeded should return true if the module needs a product variant (installed on the product image).
+	ProductVariantNeeded(ctx ImageInterfaceContext) bool
 
 	// CoreVariantNeeded should return true if the module needs a core variant (installed on the system image).
-	CoreVariantNeeded(ctx BaseModuleContext) bool
+	CoreVariantNeeded(ctx ImageInterfaceContext) bool
 
 	// RamdiskVariantNeeded should return true if the module needs a ramdisk variant (installed on the
 	// ramdisk partition).
-	RamdiskVariantNeeded(ctx BaseModuleContext) bool
+	RamdiskVariantNeeded(ctx ImageInterfaceContext) bool
 
 	// VendorRamdiskVariantNeeded should return true if the module needs a vendor ramdisk variant (installed on the
 	// vendor ramdisk partition).
-	VendorRamdiskVariantNeeded(ctx BaseModuleContext) bool
+	VendorRamdiskVariantNeeded(ctx ImageInterfaceContext) bool
 
 	// DebugRamdiskVariantNeeded should return true if the module needs a debug ramdisk variant (installed on the
 	// debug ramdisk partition: $(PRODUCT_OUT)/debug_ramdisk).
-	DebugRamdiskVariantNeeded(ctx BaseModuleContext) bool
+	DebugRamdiskVariantNeeded(ctx ImageInterfaceContext) bool
 
 	// RecoveryVariantNeeded should return true if the module needs a recovery variant (installed on the
 	// recovery partition).
-	RecoveryVariantNeeded(ctx BaseModuleContext) bool
+	RecoveryVariantNeeded(ctx ImageInterfaceContext) bool
 
 	// ExtraImageVariations should return a list of the additional variations needed for the module.  After the
 	// variants are created the SetImageVariation method will be called on each newly created variant with the
 	// its variation.
-	ExtraImageVariations(ctx BaseModuleContext) []string
+	ExtraImageVariations(ctx ImageInterfaceContext) []string
 
 	// SetImageVariation is called for each newly created image variant. The receiver is the original
 	// module, "variation" is the name of the newly created variant. "variation" is set on the receiver.
-	SetImageVariation(ctx BaseModuleContext, variation string)
+	SetImageVariation(ctx ImageInterfaceContext, variation string)
 }
 
 const (
+	// VendorVariation is the variant name used for /vendor code that does not
+	// compile against the VNDK.
+	VendorVariation string = "vendor"
+
+	// ProductVariation is the variant name used for /product code that does not
+	// compile against the VNDK.
+	ProductVariation string = "product"
+
 	// CoreVariation is the variant used for framework-private libraries, or
 	// SDK libraries. (which framework-private libraries can use), which
 	// will be installed to the system image.
@@ -67,17 +98,15 @@ const (
 	DebugRamdiskVariation string = "debug_ramdisk"
 )
 
-// imageMutator creates variants for modules that implement the ImageInterface that
+// imageTransitionMutator creates variants for modules that implement the ImageInterface that
 // allow them to build differently for each partition (recovery, core, vendor, etc.).
-func imageMutator(ctx BottomUpMutatorContext) {
-	if ctx.Os() != Android {
-		return
-	}
+type imageTransitionMutator struct{}
 
-	if m, ok := ctx.Module().(ImageInterface); ok {
+func (imageTransitionMutator) Split(ctx BaseModuleContext) []string {
+	var variations []string
+
+	if m, ok := ctx.Module().(ImageInterface); ctx.Os() == Android && ok {
 		m.ImageMutatorBegin(ctx)
-
-		var variations []string
 
 		if m.CoreVariantNeeded(ctx) {
 			variations = append(variations, CoreVariation)
@@ -94,18 +123,38 @@ func imageMutator(ctx BottomUpMutatorContext) {
 		if m.RecoveryVariantNeeded(ctx) {
 			variations = append(variations, RecoveryVariation)
 		}
+		if m.VendorVariantNeeded(ctx) {
+			variations = append(variations, VendorVariation)
+		}
+		if m.ProductVariantNeeded(ctx) {
+			variations = append(variations, ProductVariation)
+		}
 
 		extraVariations := m.ExtraImageVariations(ctx)
 		variations = append(variations, extraVariations...)
+	}
 
-		if len(variations) == 0 {
-			return
-		}
+	if len(variations) == 0 {
+		variations = append(variations, "")
+	}
 
-		mod := ctx.CreateVariations(variations...)
-		for i, v := range variations {
-			mod[i].base().setImageVariation(v)
-			mod[i].(ImageInterface).SetImageVariation(ctx, v)
-		}
+	return variations
+}
+
+func (imageTransitionMutator) OutgoingTransition(ctx OutgoingTransitionContext, sourceVariation string) string {
+	return sourceVariation
+}
+
+func (imageTransitionMutator) IncomingTransition(ctx IncomingTransitionContext, incomingVariation string) string {
+	if _, ok := ctx.Module().(ImageInterface); ctx.Os() != Android || !ok {
+		return CoreVariation
+	}
+	return incomingVariation
+}
+
+func (imageTransitionMutator) Mutate(ctx BottomUpMutatorContext, variation string) {
+	ctx.Module().base().setImageVariation(variation)
+	if m, ok := ctx.Module().(ImageInterface); ok {
+		m.SetImageVariation(ctx, variation)
 	}
 }

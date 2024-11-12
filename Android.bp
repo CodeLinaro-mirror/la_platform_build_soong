@@ -1,5 +1,9 @@
 package {
     default_applicable_licenses: ["Android-Apache-2.0"],
+    default_visibility: [
+        "//build/soong:__subpackages__",
+    ],
+    default_team: "trendy_team_build",
 }
 
 subdirs = [
@@ -23,6 +27,8 @@ bootstrap_go_package {
     srcs: [
         "doc.go",
     ],
+    // Used by plugins, though probably shouldn't be.
+    visibility: ["//visibility:public"],
 }
 
 //
@@ -40,6 +46,7 @@ cc_defaults {
             enabled: true,
         },
     },
+    defaults_visibility: ["//visibility:public"],
 }
 
 //
@@ -51,6 +58,7 @@ kernel_headers {
     vendor: true,
     recovery_available: true,
     min_sdk_version: "apex_inherit",
+    visibility: ["//visibility:public"],
 }
 
 cc_genrule {
@@ -75,6 +83,7 @@ cc_genrule {
     cmd: "$(location) -s $(out) $(in)",
     srcs: [":linker"],
     out: ["linker.s"],
+    visibility: ["//bionic/libc"],
 }
 
 cc_genrule {
@@ -99,12 +108,18 @@ cc_genrule {
     cmd: "$(location) -T $(out) $(in)",
     srcs: [":linker"],
     out: ["linker.script"],
+    visibility: ["//visibility:public"],
 }
 
 // Instantiate the dex_bootjars singleton module.
 dex_bootjars {
     name: "dex_bootjars",
-    no_full_install: true,
+    visibility: ["//visibility:public"],
+}
+
+art_boot_images {
+    name: "art_boot_images",
+    visibility: ["//art:__subpackages__"],
 }
 
 // Pseudo-test that's run on checkbuilds to ensure that get_clang_version can
@@ -121,18 +136,72 @@ dexpreopt_systemserver_check {
     name: "dexpreopt_systemserver_check",
 }
 
-// buildinfo.prop contains common properties for system/build.prop, like ro.build.version.*
-buildinfo_prop {
-    name: "buildinfo.prop",
-
-    // not installable because this will be included to system/build.prop
-    installable: false,
-
-    // Currently, only microdroid can refer to buildinfo.prop
-    visibility: ["//packages/modules/Virtualization/microdroid"],
-}
-
 // container for apex_contributions selected using build flags
 all_apex_contributions {
     name: "all_apex_contributions",
+    visibility: ["//visibility:public"],
+}
+
+// Defaults to share configs between "baremetal" Soong modules, currently only
+// used for code running in kernel context within Android Virtualization
+// Framework guests.
+cc_defaults {
+    name: "cc_baremetal_defaults",
+    arch: {
+        arm64: {
+            cflags: [
+                // Prevent the compiler from optimizing code using SVE, as the
+                // baremetal environment might not have configured the hardware.
+                "-Xclang -target-feature",
+                "-Xclang -sve",
+            ],
+        },
+    },
+    defaults_visibility: ["//visibility:public"],
+}
+
+product_config {
+    name: "product_config",
+    visibility: [
+        "//build/make/target/product/generic",
+    ],
+}
+
+build_prop {
+    name: "system-build.prop",
+    stem: "build.prop",
+    product_config: ":product_config",
+    // Currently, only microdroid, Ravenwood, and cf system image can refer to system-build.prop
+    visibility: [
+        "//build/make/target/product/generic",
+        "//packages/modules/Virtualization/build/microdroid",
+        "//frameworks/base/ravenwood",
+    ],
+}
+
+build_prop {
+    name: "system_ext-build.prop",
+    stem: "build.prop",
+    system_ext_specific: true,
+    product_config: ":product_config",
+    relative_install_path: "etc", // system_ext/etc/build.prop
+    visibility: ["//visibility:private"],
+}
+
+build_prop {
+    name: "product-build.prop",
+    stem: "build.prop",
+    product_specific: true,
+    product_config: ":product_config",
+    relative_install_path: "etc", // product/etc/build.prop
+    visibility: ["//visibility:private"],
+}
+
+build_prop {
+    name: "odm-build.prop",
+    stem: "build.prop",
+    device_specific: true,
+    product_config: ":product_config",
+    relative_install_path: "etc", // odm/etc/build.prop
+    visibility: ["//visibility:private"],
 }

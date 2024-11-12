@@ -17,7 +17,6 @@ package java
 // This file contains the module implementations for android_app_import and android_test_import.
 
 import (
-	"fmt"
 	"reflect"
 	"strings"
 
@@ -62,6 +61,9 @@ var (
 func RegisterAppImportBuildComponents(ctx android.RegistrationContext) {
 	ctx.RegisterModuleType("android_app_import", AndroidAppImportFactory)
 	ctx.RegisterModuleType("android_test_import", AndroidTestImportFactory)
+	ctx.PreArchMutators(func(ctx android.RegisterMutatorsContext) {
+		ctx.BottomUp("disable_prebuilts_without_apk", disablePrebuiltsWithoutApkMutator)
+	})
 }
 
 type AndroidAppImport struct {
@@ -91,7 +93,7 @@ type AndroidAppImport struct {
 
 type AndroidAppImportProperties struct {
 	// A prebuilt apk to import
-	Apk *string `android:"path"`
+	Apk proptools.Configurable[string] `android:"path,replace_instead_of_append"`
 
 	// The name of a certificate in the default certificate directory or an android_app_certificate
 	// module name in the form ":module". Should be empty if presigned or default_dev_cert is set.
@@ -194,13 +196,6 @@ func (a *AndroidAppImport) processVariants(ctx android.DefaultableHookContext) {
 			}
 		}
 	}
-
-	if String(a.properties.Apk) == "" {
-		// Disable this module since the apk property is still empty after processing all matching
-		// variants. This likely means there is no matching variant, and the default variant doesn't
-		// have an apk property value either.
-		a.Disable()
-	}
 }
 
 func MergePropertiesFromVariant(ctx android.EarlyModuleContext,
@@ -216,6 +211,30 @@ func MergePropertiesFromVariant(ctx android.EarlyModuleContext,
 			ctx.PropertyErrorf(propertyErr.Property, "%s", propertyErr.Err.Error())
 		} else {
 			panic(err)
+		}
+	}
+}
+
+// disablePrebuiltsWithoutApkMutator is a pre-arch mutator that disables AndroidAppImport or
+// AndroidTestImport modules that don't have an apk set. We need this separate mutator instead
+// of doing it in processVariants because processVariants is a defaultable hook, and configurable
+// properties can only be evaluated after the defaults (and eventually, base configurabtion)
+// mutators.
+func disablePrebuiltsWithoutApkMutator(ctx android.BottomUpMutatorContext) {
+	switch a := ctx.Module().(type) {
+	case *AndroidAppImport:
+		if a.properties.Apk.GetOrDefault(ctx, "") == "" {
+			// Disable this module since the apk property is still empty after processing all
+			// matching variants. This likely means there is no matching variant, and the default
+			// variant doesn't have an apk property value either.
+			a.Disable()
+		}
+	case *AndroidTestImport:
+		if a.properties.Apk.GetOrDefault(ctx, "") == "" {
+			// Disable this module since the apk property is still empty after processing all
+			// matching variants. This likely means there is no matching variant, and the default
+			// variant doesn't have an apk property value either.
+			a.Disable()
 		}
 	}
 }
@@ -345,13 +364,13 @@ func (a *AndroidAppImport) generateAndroidBuildActions(ctx android.ModuleContext
 	a.dexpreopter.isPresignedPrebuilt = Bool(a.properties.Presigned)
 	a.dexpreopter.uncompressedDex = a.shouldUncompressDex(ctx)
 
-	a.dexpreopter.enforceUsesLibs = a.usesLibrary.enforceUsesLibraries()
+	a.dexpreopter.enforceUsesLibs = a.usesLibrary.enforceUsesLibraries(ctx)
 	a.dexpreopter.classLoaderContexts = a.usesLibrary.classLoaderContextForUsesLibDeps(ctx)
 	if a.usesLibrary.shouldDisableDexpreopt {
 		a.dexpreopter.disableDexpreopt()
 	}
 
-	if a.usesLibrary.enforceUsesLibraries() {
+	if a.usesLibrary.enforceUsesLibraries(ctx) {
 		a.usesLibrary.verifyUsesLibrariesAPK(ctx, srcApk, &a.dexpreopter.classLoaderContexts)
 	}
 
@@ -410,7 +429,7 @@ func (a *AndroidAppImport) generateAndroidBuildActions(ctx android.ModuleContext
 
 	if apexInfo.IsForPlatform() {
 		a.installPath = ctx.InstallFile(installDir, apkFilename, a.outputFile)
-		artifactPath := android.PathForModuleSrc(ctx, *a.properties.Apk)
+		artifactPath := android.PathForModuleSrc(ctx, a.properties.Apk.GetOrDefault(ctx, ""))
 		a.provenanceMetaDataFile = provenance.GenerateArtifactProvenanceMetaData(ctx, artifactPath, a.installPath)
 	}
 
@@ -422,6 +441,8 @@ func (a *AndroidAppImport) generateAndroidBuildActions(ctx android.ModuleContext
 		},
 	)
 
+	ctx.SetOutputFiles([]android.Path{a.outputFile}, "")
+
 	// TODO: androidmk converter jni libs
 }
 
@@ -430,6 +451,9 @@ func (a *AndroidAppImport) validatePresignedApk(ctx android.ModuleContext, srcAp
 	var extraArgs []string
 	if a.Privileged() {
 		extraArgs = append(extraArgs, "--privileged")
+		if ctx.Config().UncompressPrivAppDex() {
+			extraArgs = append(extraArgs, "--uncompress-priv-app-dex")
+		}
 	}
 	if proptools.Bool(a.properties.Skip_preprocessed_apk_checks) {
 		extraArgs = append(extraArgs, "--skip-preprocessed-apk-checks")
@@ -459,15 +483,6 @@ func (a *AndroidAppImport) Name() string {
 
 func (a *AndroidAppImport) OutputFile() android.Path {
 	return a.outputFile
-}
-
-func (a *AndroidAppImport) OutputFiles(tag string) (android.Paths, error) {
-	switch tag {
-	case "":
-		return []android.Path{a.outputFile}, nil
-	default:
-		return nil, fmt.Errorf("unsupported module reference tag %q", tag)
-	}
 }
 
 func (a *AndroidAppImport) JacocoReportClassesFile() android.Path {
@@ -536,10 +551,6 @@ func (a *AndroidAppImport) SdkVersion(ctx android.EarlyModuleContext) android.Sd
 
 func (a *AndroidAppImport) MinSdkVersion(ctx android.EarlyModuleContext) android.ApiLevel {
 	return android.SdkSpecPrivate.ApiLevel
-}
-
-func (a *AndroidAppImport) LintDepSets() LintDepSets {
-	return LintDepSets{}
 }
 
 var _ android.ApexModule = (*AndroidAppImport)(nil)
@@ -642,7 +653,7 @@ func AndroidAppImportFactory() android.Module {
 	android.InitApexModule(module)
 	android.InitAndroidMultiTargetsArchModule(module, android.DeviceSupported, android.MultilibCommon)
 	android.InitDefaultableModule(module)
-	android.InitSingleSourcePrebuiltModule(module, &module.properties, "Apk")
+	android.InitConfigurablePrebuiltModuleString(module, &module.properties.Apk, "Apk")
 
 	module.usesLibrary.enforce = true
 
@@ -695,7 +706,7 @@ func AndroidTestImportFactory() android.Module {
 	android.InitApexModule(module)
 	android.InitAndroidMultiTargetsArchModule(module, android.DeviceSupported, android.MultilibCommon)
 	android.InitDefaultableModule(module)
-	android.InitSingleSourcePrebuiltModule(module, &module.properties, "Apk")
+	android.InitConfigurablePrebuiltModuleString(module, &module.properties.Apk, "Apk")
 
 	return module
 }

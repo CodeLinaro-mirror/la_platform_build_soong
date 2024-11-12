@@ -77,7 +77,15 @@ func (mod *Module) SetCoreVariantNeeded(b bool) {
 	mod.Properties.CoreVariantNeeded = b
 }
 
-func (mod *Module) SnapshotVersion(mctx android.BaseModuleContext) string {
+func (mod *Module) SetProductVariantNeeded(b bool) {
+	mod.Properties.ProductVariantNeeded = b
+}
+
+func (mod *Module) SetVendorVariantNeeded(b bool) {
+	mod.Properties.VendorVariantNeeded = b
+}
+
+func (mod *Module) SnapshotVersion(mctx android.ImageInterfaceContext) string {
 	if snapshot, ok := mod.compiler.(cc.SnapshotInterface); ok {
 		return snapshot.Version()
 	} else {
@@ -86,27 +94,35 @@ func (mod *Module) SnapshotVersion(mctx android.BaseModuleContext) string {
 	}
 }
 
-func (mod *Module) VendorRamdiskVariantNeeded(ctx android.BaseModuleContext) bool {
+func (mod *Module) VendorVariantNeeded(ctx android.ImageInterfaceContext) bool {
+	return mod.Properties.VendorVariantNeeded
+}
+
+func (mod *Module) ProductVariantNeeded(ctx android.ImageInterfaceContext) bool {
+	return mod.Properties.ProductVariantNeeded
+}
+
+func (mod *Module) VendorRamdiskVariantNeeded(ctx android.ImageInterfaceContext) bool {
 	return mod.Properties.VendorRamdiskVariantNeeded
 }
 
-func (mod *Module) CoreVariantNeeded(ctx android.BaseModuleContext) bool {
+func (mod *Module) CoreVariantNeeded(ctx android.ImageInterfaceContext) bool {
 	return mod.Properties.CoreVariantNeeded
 }
 
-func (mod *Module) RamdiskVariantNeeded(android.BaseModuleContext) bool {
+func (mod *Module) RamdiskVariantNeeded(android.ImageInterfaceContext) bool {
 	return mod.Properties.RamdiskVariantNeeded
 }
 
-func (mod *Module) DebugRamdiskVariantNeeded(ctx android.BaseModuleContext) bool {
+func (mod *Module) DebugRamdiskVariantNeeded(ctx android.ImageInterfaceContext) bool {
 	return false
 }
 
-func (mod *Module) RecoveryVariantNeeded(android.BaseModuleContext) bool {
+func (mod *Module) RecoveryVariantNeeded(android.ImageInterfaceContext) bool {
 	return mod.Properties.RecoveryVariantNeeded
 }
 
-func (mod *Module) ExtraImageVariations(android.BaseModuleContext) []string {
+func (mod *Module) ExtraImageVariations(android.ImageInterfaceContext) []string {
 	return mod.Properties.ExtraVariants
 }
 
@@ -184,12 +200,12 @@ func (mod *Module) HasNonSystemVariants() bool {
 }
 
 func (mod *Module) InProduct() bool {
-	return mod.Properties.ImageVariation == cc.ProductVariation
+	return mod.Properties.ImageVariation == android.ProductVariation
 }
 
 // Returns true if the module is "vendor" variant. Usually these modules are installed in /vendor
 func (mod *Module) InVendor() bool {
-	return mod.Properties.ImageVariation == cc.VendorVariation
+	return mod.Properties.ImageVariation == android.VendorVariation
 }
 
 // Returns true if the module is "vendor" or "product" variant.
@@ -197,25 +213,25 @@ func (mod *Module) InVendorOrProduct() bool {
 	return mod.InVendor() || mod.InProduct()
 }
 
-func (mod *Module) SetImageVariation(ctx android.BaseModuleContext, variant string) {
+func (mod *Module) SetImageVariation(ctx android.ImageInterfaceContext, variant string) {
 	if variant == android.VendorRamdiskVariation {
 		mod.MakeAsPlatform()
 	} else if variant == android.RecoveryVariation {
 		mod.MakeAsPlatform()
-	} else if strings.HasPrefix(variant, cc.VendorVariation) {
-		mod.Properties.ImageVariation = cc.VendorVariation
+	} else if strings.HasPrefix(variant, android.VendorVariation) {
+		mod.Properties.ImageVariation = android.VendorVariation
 		if strings.HasPrefix(variant, cc.VendorVariationPrefix) {
 			mod.Properties.VndkVersion = strings.TrimPrefix(variant, cc.VendorVariationPrefix)
 		}
-	} else if strings.HasPrefix(variant, cc.ProductVariation) {
-		mod.Properties.ImageVariation = cc.ProductVariation
+	} else if strings.HasPrefix(variant, android.ProductVariation) {
+		mod.Properties.ImageVariation = android.ProductVariation
 		if strings.HasPrefix(variant, cc.ProductVariationPrefix) {
 			mod.Properties.VndkVersion = strings.TrimPrefix(variant, cc.ProductVariationPrefix)
 		}
 	}
 }
 
-func (mod *Module) ImageMutatorBegin(mctx android.BaseModuleContext) {
+func (mod *Module) ImageMutatorBegin(mctx android.ImageInterfaceContext) {
 	if Bool(mod.VendorProperties.Double_loadable) {
 		mctx.PropertyErrorf("double_loadable",
 			"Rust modules do not yet support double loading")

@@ -21,11 +21,11 @@ package genrule
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/google/blueprint"
-	"github.com/google/blueprint/bootstrap"
 	"github.com/google/blueprint/proptools"
 
 	"android/soong/android"
@@ -63,7 +63,7 @@ func RegisterGenruleBuildComponents(ctx android.RegistrationContext) {
 	ctx.RegisterModuleType("genrule", GenRuleFactory)
 
 	ctx.FinalDepsMutators(func(ctx android.RegisterMutatorsContext) {
-		ctx.BottomUp("genrule_tool_deps", toolDepsMutator).Parallel()
+		ctx.BottomUp("genrule_tool_deps", toolDepsMutator)
 	})
 }
 
@@ -112,6 +112,12 @@ func (t hostToolDependencyTag) AllowDisabledModuleDependency(target android.Modu
 	return target.IsReplacedByPrebuilt()
 }
 
+func (t hostToolDependencyTag) AllowDisabledModuleDependencyProxy(
+	ctx android.OtherModuleProviderContext, target android.ModuleProxy) bool {
+	return android.OtherModuleProviderOrDefault(
+		ctx, target, android.CommonPropertiesProviderKey).ReplacedByPrebuilt
+}
+
 var _ android.AllowDisabledModuleDependency = (*hostToolDependencyTag)(nil)
 
 type generatorProperties struct {
@@ -139,13 +145,40 @@ type generatorProperties struct {
 	Export_include_dirs []string
 
 	// list of input files
-	Srcs []string `android:"path,arch_variant"`
+	Srcs proptools.Configurable[[]string] `android:"path,arch_variant"`
+
+	// Same as srcs, but will add dependencies on modules via a device os variation and the device's
+	// first supported arch's variation. Can be used to add a dependency from a host genrule to
+	// a device module.
+	Device_first_srcs proptools.Configurable[[]string] `android:"path_device_first"`
+
+	// Same as srcs, but will add dependencies on modules via a device os variation and the common
+	// arch variation. Can be used to add a dependency from a host genrule to a device module.
+	Device_common_srcs proptools.Configurable[[]string] `android:"path_device_common"`
+
+	// Same as srcs, but will add dependencies on modules via a common_os os variation.
+	Common_os_srcs proptools.Configurable[[]string] `android:"path_common_os"`
 
 	// input files to exclude
 	Exclude_srcs []string `android:"path,arch_variant"`
 
 	// Enable restat to update the output only if the output is changed
 	Write_if_changed *bool
+
+	// When set to true, an additional $(build_number_file) label will be available
+	// to use in the cmd. This will be the location of a text file containing the
+	// build number. The dependency on this file will be "order-only", meaning that
+	// the genrule will not rerun when only this file changes, to avoid rerunning
+	// the genrule every build, because the build number changes every build.
+	// This also means that you should not attempt to consume the build number from
+	// the result of this genrule in another build rule. If you do, the build number
+	// in the second build rule will be stale when the second build rule rebuilds
+	// but this genrule does not. Only certain allowlisted modules are allowed to
+	// use this property, usages of the build number should be kept to the absolute
+	// minimum. Particularly no modules on the system image may include the build
+	// number. Prefer using libbuildversion via the use_version_lib property on
+	// cc modules.
+	Uses_order_only_build_number_file *bool
 }
 
 type Module struct {
@@ -195,6 +228,10 @@ type generateTask struct {
 	// For gensrsc sharding.
 	shard  int
 	shards int
+
+	// For nsjail tasks
+	useNsjail bool
+	dirSrcs   android.Paths
 }
 
 func (g *Module) GeneratedSourceFiles() android.Paths {
@@ -213,21 +250,7 @@ func (g *Module) GeneratedDeps() android.Paths {
 	return g.outputDeps
 }
 
-func (g *Module) OutputFiles(tag string) (android.Paths, error) {
-	if tag == "" {
-		return append(android.Paths{}, g.outputFiles...), nil
-	}
-	// otherwise, tag should match one of outputs
-	for _, outputFile := range g.outputFiles {
-		if outputFile.Rel() == tag {
-			return android.Paths{outputFile}, nil
-		}
-	}
-	return nil, fmt.Errorf("unsupported module reference tag %q", tag)
-}
-
 var _ android.SourceFileProducer = (*Module)(nil)
-var _ android.OutputFileProducer = (*Module)(nil)
 
 func toolDepsMutator(ctx android.BottomUpMutatorContext) {
 	if g, ok := ctx.Module().(*Module); ok {
@@ -241,13 +264,52 @@ func toolDepsMutator(ctx android.BottomUpMutatorContext) {
 	}
 }
 
+var buildNumberAllowlistKey = android.NewOnceKey("genruleBuildNumberAllowlistKey")
+
+// This allowlist should be kept to the bare minimum, it's
+// intended for things that existed before the build number
+// was tightly controlled. Prefer using libbuildversion
+// via the use_version_lib property of cc modules.
+// This is a function instead of a global map so that
+// soong plugins cannot add entries to the allowlist
+func isModuleInBuildNumberAllowlist(ctx android.ModuleContext) bool {
+	allowlist := ctx.Config().Once(buildNumberAllowlistKey, func() interface{} {
+		// Define the allowlist as a list and then copy it into a map so that
+		// gofmt doesn't change unnecessary lines trying to align the values of the map.
+		allowlist := []string{
+			// go/keep-sorted start
+			"build/soong/tests:gen",
+			"hardware/google/camera/common/hal/aidl_service:aidl_camera_build_version",
+			"tools/tradefederation/core:tradefed_zip",
+			"vendor/google/services/LyricCameraHAL/src/apex:com.google.pixel.camera.hal.manifest",
+			// go/keep-sorted end
+		}
+		allowlistMap := make(map[string]bool, len(allowlist))
+		for _, a := range allowlist {
+			allowlistMap[a] = true
+		}
+		return allowlistMap
+	}).(map[string]bool)
+
+	_, ok := allowlist[ctx.ModuleDir()+":"+ctx.ModuleName()]
+	return ok
+}
+
 // generateCommonBuildActions contains build action generation logic
 // common to both the mixed build case and the legacy case of genrule processing.
 // To fully support genrule in mixed builds, the contents of this function should
 // approach zero; there should be no genrule action registration done directly
 // by Soong logic in the mixed-build case.
 func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
-	g.subName = ctx.ModuleSubDir()
+	// Add the variant as a suffix to the make modules to create, so that the make modules
+	// don't conflict because make doesn't know about variants. However, this causes issues with
+	// tracking required dependencies as the required property in soong is passed straight to make
+	// without accounting for these suffixes. To make it a little easier to work with, don't use
+	// a suffix for android_common variants so that java_genrules look like regular 1-variant
+	// genrules to make.
+	if ctx.ModuleSubDir() != "android_common" {
+		g.subName = ctx.ModuleSubDir()
+	}
 
 	if len(g.properties.Export_include_dirs) > 0 {
 		for _, dir := range g.properties.Export_include_dirs {
@@ -280,23 +342,18 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 	var packagedTools []android.PackagingSpec
 	if len(g.properties.Tools) > 0 {
 		seenTools := make(map[string]bool)
-
-		ctx.VisitDirectDepsBlueprint(func(module blueprint.Module) {
-			switch tag := ctx.OtherModuleDependencyTag(module).(type) {
+		ctx.VisitDirectDepsProxyAllowDisabled(func(proxy android.ModuleProxy) {
+			switch tag := ctx.OtherModuleDependencyTag(proxy).(type) {
 			case hostToolDependencyTag:
+				// Necessary to retrieve any prebuilt replacement for the tool, since
+				// toolDepsMutator runs too late for the prebuilt mutators to have
+				// replaced the dependency.
+				module := android.PrebuiltGetPreferred(ctx, proxy)
 				tool := ctx.OtherModuleName(module)
-				if m, ok := module.(android.Module); ok {
-					// Necessary to retrieve any prebuilt replacement for the tool, since
-					// toolDepsMutator runs too late for the prebuilt mutators to have
-					// replaced the dependency.
-					module = android.PrebuiltGetPreferred(ctx, m)
-				}
-
-				switch t := module.(type) {
-				case android.HostToolProvider:
+				if h, ok := android.OtherModuleProvider(ctx, module, android.HostToolProviderKey); ok {
 					// A HostToolProvider provides the path to a tool, which will be copied
 					// into the sandbox.
-					if !t.(android.Module).Enabled(ctx) {
+					if !android.OtherModuleProviderOrDefault(ctx, module, android.CommonPropertiesProviderKey).Enabled {
 						if ctx.Config().AllowMissingDependencies() {
 							ctx.AddMissingDependencies([]string{tool})
 						} else {
@@ -304,12 +361,13 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 						}
 						return
 					}
-					path := t.HostToolPath()
+					path := h.HostToolPath
 					if !path.Valid() {
 						ctx.ModuleErrorf("host tool %q missing output file", tool)
 						return
 					}
-					if specs := t.TransitivePackagingSpecs(); specs != nil {
+					if specs := android.OtherModuleProviderOrDefault(
+						ctx, module, android.InstallFilesProvider).TransitivePackagingSpecs.ToList(); specs != nil {
 						// If the HostToolProvider has PackgingSpecs, which are definitions of the
 						// required relative locations of the tool and its dependencies, use those
 						// instead.  They will be copied to those relative locations in the sbox
@@ -331,12 +389,7 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 						tools = append(tools, path.Path())
 						addLocationLabel(tag.label, toolLocation{android.Paths{path.Path()}})
 					}
-				case bootstrap.GoBinaryTool:
-					// A GoBinaryTool provides the install path to a tool, which will be copied.
-					p := android.PathForGoBinary(ctx, t)
-					tools = append(tools, p)
-					addLocationLabel(tag.label, toolLocation{android.Paths{p}})
-				default:
+				} else {
 					ctx.ModuleErrorf("%q is not a host tool provider", tool)
 					return
 				}
@@ -396,7 +449,11 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 		}
 		return srcFiles
 	}
-	srcFiles := addLabelsForInputs("srcs", g.properties.Srcs, g.properties.Exclude_srcs)
+	srcs := g.properties.Srcs.GetOrDefault(ctx, nil)
+	srcFiles := addLabelsForInputs("srcs", srcs, g.properties.Exclude_srcs)
+	srcFiles = append(srcFiles, addLabelsForInputs("device_first_srcs", g.properties.Device_first_srcs.GetOrDefault(ctx, nil), nil)...)
+	srcFiles = append(srcFiles, addLabelsForInputs("device_common_srcs", g.properties.Device_common_srcs.GetOrDefault(ctx, nil), nil)...)
+	srcFiles = append(srcFiles, addLabelsForInputs("common_os_srcs", g.properties.Common_os_srcs.GetOrDefault(ctx, nil), nil)...)
 	android.SetProvider(ctx, blueprint.SrcsFileProviderKey, blueprint.SrcsFileProviderData{SrcPaths: srcFiles.Strings()})
 
 	var copyFrom android.Paths
@@ -425,21 +482,26 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 
 		// Pick a unique path outside the task.genDir for the sbox manifest textproto,
 		// a unique rule name, and the user-visible description.
-		manifestName := "genrule.sbox.textproto"
+		var rule *android.RuleBuilder
 		desc := "generate"
 		name := "generator"
-		if task.shards > 0 {
-			manifestName = "genrule_" + strconv.Itoa(task.shard) + ".sbox.textproto"
-			desc += " " + strconv.Itoa(task.shard)
-			name += strconv.Itoa(task.shard)
-		} else if len(task.out) == 1 {
-			desc += " " + task.out[0].Base()
+		if task.useNsjail {
+			rule = android.NewRuleBuilder(pctx, ctx).Nsjail(task.genDir, android.PathForModuleOut(ctx, "nsjail_build_sandbox"))
+		} else {
+			manifestName := "genrule.sbox.textproto"
+			if task.shards > 0 {
+				manifestName = "genrule_" + strconv.Itoa(task.shard) + ".sbox.textproto"
+				desc += " " + strconv.Itoa(task.shard)
+				name += strconv.Itoa(task.shard)
+			} else if len(task.out) == 1 {
+				desc += " " + task.out[0].Base()
+			}
+
+			manifestPath := android.PathForModuleOut(ctx, manifestName)
+
+			// Use a RuleBuilder to create a rule that runs the command inside an sbox sandbox.
+			rule = getSandboxedRuleBuilder(ctx, android.NewRuleBuilder(pctx, ctx).Sbox(task.genDir, manifestPath))
 		}
-
-		manifestPath := android.PathForModuleOut(ctx, manifestName)
-
-		// Use a RuleBuilder to create a rule that runs the command inside an sbox sandbox.
-		rule := getSandboxedRuleBuilder(ctx, android.NewRuleBuilder(pctx, ctx).Sbox(task.genDir, manifestPath))
 		if Bool(g.properties.Write_if_changed) {
 			rule.Restat()
 		}
@@ -482,6 +544,11 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 				return strings.Join(proptools.ShellEscapeList(sandboxOuts), " "), nil
 			case "genDir":
 				return proptools.ShellEscape(cmd.PathForOutput(task.genDir)), nil
+			case "build_number_file":
+				if !proptools.Bool(g.properties.Uses_order_only_build_number_file) {
+					return reportError("to use the $(build_number_file) label, you must set uses_order_only_build_number_file: true")
+				}
+				return proptools.ShellEscape(cmd.PathForInput(ctx.Config().BuildNumberFile(ctx))), nil
 			default:
 				if strings.HasPrefix(name, "location ") {
 					label := strings.TrimSpace(strings.TrimPrefix(name, "location "))
@@ -528,6 +595,23 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 		cmd.Implicits(task.in)
 		cmd.ImplicitTools(tools)
 		cmd.ImplicitPackagedTools(packagedTools)
+		if proptools.Bool(g.properties.Uses_order_only_build_number_file) {
+			if !isModuleInBuildNumberAllowlist(ctx) {
+				ctx.ModuleErrorf("Only allowlisted modules may use uses_order_only_build_number_file: true")
+			}
+			cmd.OrderOnly(ctx.Config().BuildNumberFile(ctx))
+		}
+
+		if task.useNsjail {
+			for _, input := range task.dirSrcs {
+				cmd.Implicit(input)
+				if paths, err := ctx.GlobWithDeps(filepath.Join(input.String(), "**/*"), nil); err == nil {
+					rule.NsjailImplicits(android.PathsForSource(ctx, paths))
+				} else {
+					ctx.PropertyErrorf("dir_srcs", "can't glob %q", input.String())
+				}
+			}
+		}
 
 		// Create the rule to run the genrule command inside sbox.
 		rule.Build(name, desc)
@@ -585,12 +669,31 @@ func (g *Module) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		})
 		g.outputDeps = android.Paths{phonyFile}
 	}
+
+	g.setOutputFiles(ctx)
+
+	if ctx.Os() == android.Windows {
+		// Make doesn't support windows:
+		// https://cs.android.com/android/platform/superproject/main/+/main:build/make/core/module_arch_supported.mk;l=66;drc=f264690860bb6ee7762784d6b7201aae057ba6f2
+		g.HideFromMake()
+	}
+}
+
+func (g *Module) setOutputFiles(ctx android.ModuleContext) {
+	if len(g.outputFiles) == 0 {
+		return
+	}
+	ctx.SetOutputFiles(g.outputFiles, "")
+	// non-empty-string-tag should match one of the outputs
+	for _, files := range g.outputFiles {
+		ctx.SetOutputFiles(android.Paths{files}, files.Rel())
+	}
 }
 
 // Collect information for opening IDE project files in java/jdeps.go.
-func (g *Module) IDEInfo(dpInfo *android.IdeInfo) {
+func (g *Module) IDEInfo(ctx android.BaseModuleContext, dpInfo *android.IdeInfo) {
 	dpInfo.Srcs = append(dpInfo.Srcs, g.Srcs().Strings()...)
-	for _, src := range g.properties.Srcs {
+	for _, src := range g.properties.Srcs.GetOrDefault(ctx, nil) {
 		if strings.HasPrefix(src, ":") {
 			src = strings.Trim(src, ":")
 			dpInfo.Deps = append(dpInfo.Deps, src)
@@ -643,14 +746,22 @@ func generatorFactory(taskGenerator taskFunc, props ...interface{}) *Module {
 
 type noopImageInterface struct{}
 
-func (x noopImageInterface) ImageMutatorBegin(android.BaseModuleContext)                 {}
-func (x noopImageInterface) CoreVariantNeeded(android.BaseModuleContext) bool            { return false }
-func (x noopImageInterface) RamdiskVariantNeeded(android.BaseModuleContext) bool         { return false }
-func (x noopImageInterface) VendorRamdiskVariantNeeded(android.BaseModuleContext) bool   { return false }
-func (x noopImageInterface) DebugRamdiskVariantNeeded(android.BaseModuleContext) bool    { return false }
-func (x noopImageInterface) RecoveryVariantNeeded(android.BaseModuleContext) bool        { return false }
-func (x noopImageInterface) ExtraImageVariations(ctx android.BaseModuleContext) []string { return nil }
-func (x noopImageInterface) SetImageVariation(ctx android.BaseModuleContext, variation string) {
+func (x noopImageInterface) ImageMutatorBegin(android.ImageInterfaceContext)         {}
+func (x noopImageInterface) VendorVariantNeeded(android.ImageInterfaceContext) bool  { return false }
+func (x noopImageInterface) ProductVariantNeeded(android.ImageInterfaceContext) bool { return false }
+func (x noopImageInterface) CoreVariantNeeded(android.ImageInterfaceContext) bool    { return false }
+func (x noopImageInterface) RamdiskVariantNeeded(android.ImageInterfaceContext) bool { return false }
+func (x noopImageInterface) VendorRamdiskVariantNeeded(android.ImageInterfaceContext) bool {
+	return false
+}
+func (x noopImageInterface) DebugRamdiskVariantNeeded(android.ImageInterfaceContext) bool {
+	return false
+}
+func (x noopImageInterface) RecoveryVariantNeeded(android.ImageInterfaceContext) bool { return false }
+func (x noopImageInterface) ExtraImageVariations(ctx android.ImageInterfaceContext) []string {
+	return nil
+}
+func (x noopImageInterface) SetImageVariation(ctx android.ImageInterfaceContext, variation string) {
 }
 
 func NewGenSrcs() *Module {
@@ -753,6 +864,7 @@ func NewGenSrcs() *Module {
 func GenSrcsFactory() android.Module {
 	m := NewGenSrcs()
 	android.InitAndroidModule(m)
+	android.InitDefaultableModule(m)
 	return m
 }
 
@@ -776,15 +888,25 @@ func NewGenRule() *Module {
 	properties := &genRuleProperties{}
 
 	taskGenerator := func(ctx android.ModuleContext, rawCommand string, srcFiles android.Paths) []generateTask {
+		useNsjail := Bool(properties.Use_nsjail)
+
+		dirSrcs := android.DirectoryPathsForModuleSrc(ctx, properties.Dir_srcs)
+		if len(dirSrcs) > 0 && !useNsjail {
+			ctx.PropertyErrorf("dir_srcs", "can't use dir_srcs if use_nsjail is false")
+			return nil
+		}
+
 		outs := make(android.WritablePaths, len(properties.Out))
 		for i, out := range properties.Out {
 			outs[i] = android.PathForModuleGen(ctx, out)
 		}
 		return []generateTask{{
-			in:     srcFiles,
-			out:    outs,
-			genDir: android.PathForModuleGen(ctx),
-			cmd:    rawCommand,
+			in:        srcFiles,
+			out:       outs,
+			genDir:    android.PathForModuleGen(ctx),
+			cmd:       rawCommand,
+			useNsjail: useNsjail,
+			dirSrcs:   dirSrcs,
 		}}
 	}
 
@@ -799,6 +921,12 @@ func GenRuleFactory() android.Module {
 }
 
 type genRuleProperties struct {
+	Use_nsjail *bool
+
+	// List of input directories. Can be set only when use_nsjail is true. Currently, usage of
+	// dir_srcs is limited only to Trusty build.
+	Dir_srcs []string `android:"path"`
+
 	// names of the output files that will be generated
 	Out []string `android:"arch_variant"`
 }

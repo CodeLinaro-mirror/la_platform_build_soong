@@ -41,7 +41,7 @@ const katiPackageSuffix = "-package"
 // arguments.
 func genKatiSuffix(ctx Context, config Config) {
 	// Construct the base suffix.
-	katiSuffix := "-" + config.TargetProduct()
+	katiSuffix := "-" + config.TargetProduct() + config.CoverageSuffix()
 
 	// Append kati arguments to the suffix.
 	if args := config.KatiArgs(); len(args) > 0 {
@@ -84,7 +84,7 @@ func writeValueIfChanged(ctx Context, config Config, dir string, filename string
 // arguments, and a custom function closure to mutate the environment Kati runs
 // in.
 func runKati(ctx Context, config Config, extraSuffix string, args []string, envFunc func(*Environment)) {
-	executable := config.PrebuiltBuildTool("ckati")
+	executable := config.KatiBin()
 	// cKati arguments.
 	args = append([]string{
 		// Instead of executing commands directly, generate a Ninja file.
@@ -182,6 +182,23 @@ func runKati(ctx Context, config Config, extraSuffix string, args []string, envF
 	} else {
 		username = usernameFromEnv
 	}
+
+	// SOONG_USE_PARTIAL_COMPILE may be used in makefiles, but both cases must be supported.
+	//
+	// In general, the partial compile features will be implemented in Soong-based rules. We
+	// also allow them to be used in makefiles.  Clear the environment variable when calling
+	// kati so that we avoid reanalysis when the user changes it.  We will pass it to Ninja.
+	// As a result, rules where we want to allow the developer to toggle the feature ("use
+	// the partial compile feature" vs "legacy, aka full compile behavior") need to use this
+	// in the rule, since changing it will not cause reanalysis.
+	//
+	// Shell syntax in the rule might look something like this:
+	//     if [[ -n ${SOONG_USE_PARTIAL_COMPILE} ]]; then
+	//         # partial compile behavior
+	//     else
+	//         # legacy behavior
+	//     fi
+	cmd.Environment.Unset("SOONG_USE_PARTIAL_COMPILE")
 
 	hostname, ok := cmd.Environment.Get("BUILD_HOSTNAME")
 	// Unset BUILD_HOSTNAME during kati run to avoid kati rerun, kati will use BUILD_HOSTNAME from a file.

@@ -126,6 +126,10 @@ var PrepareForTestWithMakevars = FixtureRegisterWithContext(func(ctx Registratio
 	ctx.RegisterSingletonType("makevars", makeVarsSingletonFunc)
 })
 
+var PrepareForTestVintfFragmentModules = FixtureRegisterWithContext(func(ctx RegistrationContext) {
+	registerVintfFragmentComponents(ctx)
+})
+
 // Test fixture preparer that will register most java build components.
 //
 // Singletons and mutators should only be added here if they are needed for a majority of java
@@ -149,6 +153,7 @@ var PrepareForTestWithAndroidBuildComponents = GroupFixturePreparers(
 	PrepareForTestWithPackageModule,
 	PrepareForTestWithPrebuilts,
 	PrepareForTestWithVisibility,
+	PrepareForTestVintfFragmentModules,
 )
 
 // Prepares an integration test with all build components from the android package.
@@ -174,6 +179,16 @@ var PrepareForTestDisallowNonExistentPaths = FixtureModifyConfig(func(config Con
 	config.TestAllowNonExistentPaths = false
 })
 
+// PrepareForTestWithBuildFlag returns a FixturePreparer that sets the given flag to the given value.
+func PrepareForTestWithBuildFlag(flag, value string) FixturePreparer {
+	return FixtureModifyProductVariables(func(variables FixtureProductVariables) {
+		if variables.BuildFlags == nil {
+			variables.BuildFlags = make(map[string]string)
+		}
+		variables.BuildFlags[flag] = value
+	})
+}
+
 func NewTestArchContext(config Config) *TestContext {
 	ctx := NewTestContext(config)
 	ctx.preDeps = append(ctx.preDeps, registerArchMutator)
@@ -182,8 +197,8 @@ func NewTestArchContext(config Config) *TestContext {
 
 type TestContext struct {
 	*Context
-	preArch, preDeps, postDeps, finalDeps []RegisterMutatorFunc
-	NameResolver                          *NameResolver
+	preArch, preDeps, postDeps, postApex, finalDeps []RegisterMutatorFunc
+	NameResolver                                    *NameResolver
 
 	// The list of singletons registered for the test.
 	singletons sortableComponents
@@ -202,7 +217,7 @@ func (ctx *TestContext) HardCodedPreArchMutators(f RegisterMutatorFunc) {
 	ctx.PreArchMutators(f)
 }
 
-func (ctx *TestContext) moduleProvider(m blueprint.Module, p blueprint.AnyProviderKey) (any, bool) {
+func (ctx *TestContext) otherModuleProvider(m blueprint.Module, p blueprint.AnyProviderKey) (any, bool) {
 	return ctx.Context.ModuleProvider(m, p)
 }
 
@@ -214,14 +229,22 @@ func (ctx *TestContext) PostDepsMutators(f RegisterMutatorFunc) {
 	ctx.postDeps = append(ctx.postDeps, f)
 }
 
+func (ctx *TestContext) PostApexMutators(f RegisterMutatorFunc) {
+	ctx.postApex = append(ctx.postApex, f)
+}
+
 func (ctx *TestContext) FinalDepsMutators(f RegisterMutatorFunc) {
 	ctx.finalDeps = append(ctx.finalDeps, f)
 }
 
 func (ctx *TestContext) OtherModuleProviderAdaptor() OtherModuleProviderContext {
 	return NewOtherModuleProviderAdaptor(func(module blueprint.Module, provider blueprint.AnyProviderKey) (any, bool) {
-		return ctx.moduleProvider(module, provider)
+		return ctx.otherModuleProvider(module, provider)
 	})
+}
+
+func (ctx *TestContext) OtherModulePropertyErrorf(module Module, property string, fmt_ string, args ...interface{}) {
+	panic(fmt.Sprintf(fmt_, args...))
 }
 
 // registeredComponentOrder defines the order in which a sortableComponent type is registered at
@@ -430,7 +453,7 @@ func globallyRegisteredComponentsOrder() *registrationSorter {
 func (ctx *TestContext) Register() {
 	globalOrder := globallyRegisteredComponentsOrder()
 
-	mutators := collateRegisteredMutators(ctx.preArch, ctx.preDeps, ctx.postDeps, ctx.finalDeps)
+	mutators := collateRegisteredMutators(ctx.preArch, ctx.preDeps, ctx.postDeps, ctx.postApex, ctx.finalDeps)
 	// Ensure that the mutators used in the test are in the same order as they are used at runtime.
 	globalOrder.mutatorOrder.enforceOrdering(mutators)
 	mutators.registerAll(ctx.Context)
@@ -818,15 +841,15 @@ func newBaseTestingComponent(config Config, provider testBuildProvider) baseTest
 // containing at most one instance of the temporary build directory at the start of the path while
 // this assumes that there can be any number at any position.
 func normalizeStringRelativeToTop(config Config, s string) string {
-	// The soongOutDir usually looks something like: /tmp/testFoo2345/001
+	// The outDir usually looks something like: /tmp/testFoo2345/001
 	//
-	// Replace any usage of the soongOutDir with out/soong, e.g. replace "/tmp/testFoo2345/001" with
+	// Replace any usage of the outDir with out/soong, e.g. replace "/tmp/testFoo2345/001" with
 	// "out/soong".
 	outSoongDir := filepath.Clean(config.soongOutDir)
 	re := regexp.MustCompile(`\Q` + outSoongDir + `\E\b`)
 	s = re.ReplaceAllString(s, "out/soong")
 
-	// Replace any usage of the soongOutDir/.. with out, e.g. replace "/tmp/testFoo2345" with
+	// Replace any usage of the outDir/.. with out, e.g. replace "/tmp/testFoo2345" with
 	// "out". This must come after the previous replacement otherwise this would replace
 	// "/tmp/testFoo2345/001" with "out/001" instead of "out/soong".
 	outDir := filepath.Dir(outSoongDir)
@@ -1014,28 +1037,21 @@ func (m TestingModule) VariablesForTestsRelativeToTop() map[string]string {
 	return normalizeStringMapRelativeToTop(m.config, m.module.VariablesForTests())
 }
 
-// OutputFiles first checks if module base outputFiles property has any output
+// OutputFiles checks if module base outputFiles property has any output
 // files can be used to return.
-// If not, it calls OutputFileProducer.OutputFiles on the
-// encapsulated module, exits the test immediately if there is an error and
+// Exits the test immediately if there is an error and
 // otherwise returns the result of calling Paths.RelativeToTop
 // on the returned Paths.
-func (m TestingModule) OutputFiles(t *testing.T, tag string) Paths {
-	// TODO: add non-empty-string tag case and remove OutputFileProducer part
-	if tag == "" && m.module.base().outputFiles.DefaultOutputFiles != nil {
-		return m.module.base().outputFiles.DefaultOutputFiles.RelativeToTop()
+func (m TestingModule) OutputFiles(ctx *TestContext, t *testing.T, tag string) Paths {
+	outputFiles := OtherModuleProviderOrDefault(ctx.OtherModuleProviderAdaptor(), m.Module(), OutputFilesProvider)
+	if tag == "" && outputFiles.DefaultOutputFiles != nil {
+		return outputFiles.DefaultOutputFiles.RelativeToTop()
+	} else if taggedOutputFiles, hasTag := outputFiles.TaggedOutputFiles[tag]; hasTag {
+		return taggedOutputFiles.RelativeToTop()
 	}
 
-	producer, ok := m.module.(OutputFileProducer)
-	if !ok {
-		t.Fatalf("%q must implement OutputFileProducer\n", m.module.Name())
-	}
-	paths, err := producer.OutputFiles(tag)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return paths.RelativeToTop()
+	t.Fatal(fmt.Errorf("No test output file has been set for tag %q", tag))
+	return nil
 }
 
 // TestingSingleton is wrapper around an android.Singleton that provides methods to find information about individual
@@ -1237,8 +1253,14 @@ func StringPathRelativeToTop(soongOutDir string, path string) string {
 	}
 
 	if isRel {
-		// The path is in the soong out dir so indicate that in the relative path.
-		return filepath.Join("out/soong", rel)
+		if strings.HasSuffix(soongOutDir, testOutSoongSubDir) {
+			// The path is in the soong out dir so indicate that in the relative path.
+			return filepath.Join(TestOutSoongDir, rel)
+		} else {
+			// Handle the PathForArbitraryOutput case
+			return filepath.Join(testOutDir, rel)
+
+		}
 	}
 
 	// Check to see if the path is relative to the top level out dir.
@@ -1308,7 +1330,15 @@ func (ctx *panickingConfigAndErrorContext) Config() Config {
 	return ctx.ctx.Config()
 }
 
-func PanickingConfigAndErrorContext(ctx *TestContext) ConfigAndErrorContext {
+func (ctx *panickingConfigAndErrorContext) HasMutatorFinished(mutatorName string) bool {
+	return ctx.ctx.HasMutatorFinished(mutatorName)
+}
+
+func (ctx *panickingConfigAndErrorContext) otherModuleProvider(m blueprint.Module, p blueprint.AnyProviderKey) (any, bool) {
+	return ctx.ctx.otherModuleProvider(m, p)
+}
+
+func PanickingConfigAndErrorContext(ctx *TestContext) ConfigurableEvaluatorContext {
 	return &panickingConfigAndErrorContext{
 		ctx: ctx,
 	}

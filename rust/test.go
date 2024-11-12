@@ -27,7 +27,7 @@ import (
 type TestProperties struct {
 	// Disables the creation of a test-specific directory when used with
 	// relative_install_path. Useful if several tests need to be in the same
-	// directory, but test_per_src doesn't work.
+	// directory.
 	No_named_install_directory *bool
 
 	// the name of the test configuration (for example "AndroidTest.xml") that should be
@@ -45,6 +45,9 @@ type TestProperties struct {
 	// list of files or filegroup modules that provide data that should be installed alongside
 	// the test
 	Data []string `android:"path,arch_variant"`
+
+	// Same as data, but will add dependencies on the device's
+	Device_common_data []string `android:"path_device_common"`
 
 	// list of shared library modules that should be installed alongside the test
 	Data_libs []string `android:"arch_variant"`
@@ -116,7 +119,8 @@ func (test *testDecorator) compilerProps() []interface{} {
 }
 
 func (test *testDecorator) install(ctx ModuleContext) {
-	testInstallBase := "/data/local/tests/unrestricted"
+	// TODO: (b/167308193) Switch to /data/local/tests/unrestricted as the default install base.
+	testInstallBase := "/data/local/tmp"
 	if ctx.RustModule().InVendorOrProduct() {
 		testInstallBase = "/data/local/tests/vendor"
 	}
@@ -142,6 +146,7 @@ func (test *testDecorator) install(ctx ModuleContext) {
 	})
 
 	dataSrcPaths := android.PathsForModuleSrc(ctx, test.Properties.Data)
+	dataSrcPaths = append(dataSrcPaths, android.PathsForModuleSrc(ctx, test.Properties.Device_common_data)...)
 
 	ctx.VisitDirectDepsWithTag(dataLibDepTag, func(dep android.Module) {
 		depName := ctx.OtherModuleName(dep)

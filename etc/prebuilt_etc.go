@@ -50,6 +50,7 @@ func RegisterPrebuiltEtcBuildComponents(ctx android.RegistrationContext) {
 	ctx.RegisterModuleType("prebuilt_etc", PrebuiltEtcFactory)
 	ctx.RegisterModuleType("prebuilt_etc_host", PrebuiltEtcHostFactory)
 	ctx.RegisterModuleType("prebuilt_etc_cacerts", PrebuiltEtcCaCertsFactory)
+	ctx.RegisterModuleType("prebuilt_avb", PrebuiltAvbFactory)
 	ctx.RegisterModuleType("prebuilt_root", PrebuiltRootFactory)
 	ctx.RegisterModuleType("prebuilt_root_host", PrebuiltRootHostFactory)
 	ctx.RegisterModuleType("prebuilt_usr_share", PrebuiltUserShareFactory)
@@ -64,6 +65,7 @@ func RegisterPrebuiltEtcBuildComponents(ctx android.RegistrationContext) {
 	ctx.RegisterModuleType("prebuilt_dsp", PrebuiltDSPFactory)
 	ctx.RegisterModuleType("prebuilt_rfsa", PrebuiltRFSAFactory)
 	ctx.RegisterModuleType("prebuilt_renderscript_bitcode", PrebuiltRenderScriptBitcodeFactory)
+	ctx.RegisterModuleType("prebuilt_media_audio", PrebuiltMediaAudioFactory)
 
 	ctx.RegisterModuleType("prebuilt_defaults", defaultsFactory)
 
@@ -77,8 +79,15 @@ type prebuiltEtcProperties struct {
 	Src proptools.Configurable[string] `android:"path,arch_variant,replace_instead_of_append"`
 
 	// Source files of this prebuilt. Can reference a genrule type module with the ":module" syntax.
-	// Mutually exclusive with src. When used, filename_from_src is set to true.
+	// Mutually exclusive with src. When used, filename_from_src is set to true unless dsts is also
+	// set. May use globs in filenames.
 	Srcs proptools.Configurable[[]string] `android:"path,arch_variant"`
+
+	// Destination files of this prebuilt. Requires srcs to be used and causes srcs not to implicitly
+	// set filename_from_src. This can be used to install each source file to a different directory
+	// and/or change filenames when files are installed. Must be exactly one entry per source file,
+	// which means care must be taken if srcs has globs.
+	Dsts proptools.Configurable[[]string] `android:"path,arch_variant"`
 
 	// Optional name for the installed file. If unspecified, name of the module is used as the file
 	// name. Only available when using a single source (src).
@@ -125,6 +134,15 @@ type prebuiltSubdirProperties struct {
 	Relative_install_path *string `android:"arch_variant"`
 }
 
+type prebuiltRootProperties struct {
+	// Install this module to the root directory, without partition subdirs.  When this module is
+	// added to PRODUCT_PACKAGES, this module will be installed to $PRODUCT_OUT/root, which will
+	// then be copied to the root of system.img. When this module is packaged by other modules like
+	// android_filesystem, this module will be installed to the root ("/"), unlike normal
+	// prebuilt_root modules which are installed to the partition subdir (e.g. "/system/").
+	Install_in_root *bool
+}
+
 type PrebuiltEtcModule interface {
 	android.Module
 
@@ -139,7 +157,12 @@ type PrebuiltEtc struct {
 	android.ModuleBase
 	android.DefaultableModuleBase
 
-	properties       prebuiltEtcProperties
+	properties prebuiltEtcProperties
+
+	// rootProperties is used to return the value of the InstallInRoot() method. Currently, only
+	// prebuilt_avb and prebuilt_root modules use this.
+	rootProperties prebuiltRootProperties
+
 	subdirProperties prebuiltSubdirProperties
 
 	sourceFilePaths android.Paths
@@ -151,7 +174,7 @@ type PrebuiltEtc struct {
 	// The base install location when soc_specific property is set to true, e.g. "firmware" for
 	// prebuilt_firmware.
 	socInstallDirBase      string
-	installDirPath         android.InstallPath
+	installDirPaths        []android.InstallPath
 	additionalDependencies *android.Paths
 
 	usedSrcsProperty bool
@@ -214,34 +237,46 @@ func (p *PrebuiltEtc) InstallInRecovery() bool {
 
 var _ android.ImageInterface = (*PrebuiltEtc)(nil)
 
-func (p *PrebuiltEtc) ImageMutatorBegin(ctx android.BaseModuleContext) {}
+func (p *PrebuiltEtc) ImageMutatorBegin(ctx android.ImageInterfaceContext) {}
 
-func (p *PrebuiltEtc) CoreVariantNeeded(ctx android.BaseModuleContext) bool {
+func (p *PrebuiltEtc) VendorVariantNeeded(ctx android.ImageInterfaceContext) bool {
+	return false
+}
+
+func (p *PrebuiltEtc) ProductVariantNeeded(ctx android.ImageInterfaceContext) bool {
+	return false
+}
+
+func (p *PrebuiltEtc) CoreVariantNeeded(ctx android.ImageInterfaceContext) bool {
 	return !p.ModuleBase.InstallInRecovery() && !p.ModuleBase.InstallInRamdisk() &&
 		!p.ModuleBase.InstallInVendorRamdisk() && !p.ModuleBase.InstallInDebugRamdisk()
 }
 
-func (p *PrebuiltEtc) RamdiskVariantNeeded(ctx android.BaseModuleContext) bool {
+func (p *PrebuiltEtc) RamdiskVariantNeeded(ctx android.ImageInterfaceContext) bool {
 	return proptools.Bool(p.properties.Ramdisk_available) || p.ModuleBase.InstallInRamdisk()
 }
 
-func (p *PrebuiltEtc) VendorRamdiskVariantNeeded(ctx android.BaseModuleContext) bool {
+func (p *PrebuiltEtc) VendorRamdiskVariantNeeded(ctx android.ImageInterfaceContext) bool {
 	return proptools.Bool(p.properties.Vendor_ramdisk_available) || p.ModuleBase.InstallInVendorRamdisk()
 }
 
-func (p *PrebuiltEtc) DebugRamdiskVariantNeeded(ctx android.BaseModuleContext) bool {
+func (p *PrebuiltEtc) DebugRamdiskVariantNeeded(ctx android.ImageInterfaceContext) bool {
 	return proptools.Bool(p.properties.Debug_ramdisk_available) || p.ModuleBase.InstallInDebugRamdisk()
 }
 
-func (p *PrebuiltEtc) RecoveryVariantNeeded(ctx android.BaseModuleContext) bool {
+func (p *PrebuiltEtc) InstallInRoot() bool {
+	return proptools.Bool(p.rootProperties.Install_in_root)
+}
+
+func (p *PrebuiltEtc) RecoveryVariantNeeded(ctx android.ImageInterfaceContext) bool {
 	return proptools.Bool(p.properties.Recovery_available) || p.ModuleBase.InstallInRecovery()
 }
 
-func (p *PrebuiltEtc) ExtraImageVariations(ctx android.BaseModuleContext) []string {
+func (p *PrebuiltEtc) ExtraImageVariations(ctx android.ImageInterfaceContext) []string {
 	return nil
 }
 
-func (p *PrebuiltEtc) SetImageVariation(ctx android.BaseModuleContext, variation string) {
+func (p *PrebuiltEtc) SetImageVariation(ctx android.ImageInterfaceContext, variation string) {
 }
 
 func (p *PrebuiltEtc) SourceFilePath(ctx android.ModuleContext) android.Path {
@@ -252,7 +287,10 @@ func (p *PrebuiltEtc) SourceFilePath(ctx android.ModuleContext) android.Path {
 }
 
 func (p *PrebuiltEtc) InstallDirPath() android.InstallPath {
-	return p.installDirPath
+	if len(p.installDirPaths) != 1 {
+		panic(fmt.Errorf("InstallDirPath not available on multi-source prebuilt %q", p.Name()))
+	}
+	return p.installDirPaths[0]
 }
 
 // This allows other derivative modules (e.g. prebuilt_etc_xml) to perform
@@ -311,12 +349,16 @@ func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	if srcProperty.IsPresent() && len(srcsProperty) > 0 {
 		ctx.PropertyErrorf("src", "src is set. Cannot set srcs")
 	}
+	dstsProperty := p.properties.Dsts.GetOrDefault(ctx, nil)
+	if len(dstsProperty) > 0 && len(srcsProperty) == 0 {
+		ctx.PropertyErrorf("dsts", "dsts is set. Must use srcs")
+	}
 
 	// Check that `sub_dir` and `relative_install_path` are not set at the same time.
 	if p.subdirProperties.Sub_dir != nil && p.subdirProperties.Relative_install_path != nil {
 		ctx.PropertyErrorf("sub_dir", "relative_install_path is set. Cannot set sub_dir")
 	}
-	p.installDirPath = android.PathForModuleInstall(ctx, p.installBaseDir(ctx), p.SubDir())
+	baseInstallDirPath := android.PathForModuleInstall(ctx, p.installBaseDir(ctx), p.SubDir())
 
 	filename := proptools.String(p.properties.Filename)
 	filenameFromSrc := proptools.Bool(p.properties.Filename_from_src)
@@ -352,10 +394,11 @@ func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 			filename:       filename,
 			sourceFilePath: p.sourceFilePaths[0],
 			outputFilePath: p.outputFilePaths[0],
-			installDirPath: p.installDirPath,
+			installDirPath: baseInstallDirPath,
 			symlinks:       p.properties.Symlinks,
 		}
 		installs = append(installs, ip)
+		p.installDirPaths = append(p.installDirPaths, baseInstallDirPath)
 	} else if len(srcsProperty) > 0 {
 		p.usedSrcsProperty = true
 		if filename != "" {
@@ -365,20 +408,39 @@ func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 			ctx.PropertyErrorf("symlinks", "symlinks cannot be set when using srcs")
 		}
 		if p.properties.Filename_from_src != nil {
-			ctx.PropertyErrorf("filename_from_src", "filename_from_src is implicitly set to true when using srcs")
+			if len(dstsProperty) > 0 {
+				ctx.PropertyErrorf("filename_from_src", "dsts is set. Cannot set filename_from_src")
+			} else {
+				ctx.PropertyErrorf("filename_from_src", "filename_from_src is implicitly set to true when using srcs")
+			}
 		}
 		p.sourceFilePaths = android.PathsForModuleSrc(ctx, srcsProperty)
-		for _, src := range p.sourceFilePaths {
-			filename := src.Base()
+		if len(dstsProperty) > 0 && len(p.sourceFilePaths) != len(dstsProperty) {
+			ctx.PropertyErrorf("dsts", "Must have one entry in dsts per source file")
+		}
+		for i, src := range p.sourceFilePaths {
+			var filename string
+			var installDirPath android.InstallPath
+
+			if len(dstsProperty) > 0 {
+				var dstdir string
+
+				dstdir, filename = filepath.Split(dstsProperty[i])
+				installDirPath = baseInstallDirPath.Join(ctx, dstdir)
+			} else {
+				filename = src.Base()
+				installDirPath = baseInstallDirPath
+			}
 			output := android.PathForModuleOut(ctx, filename).OutputPath
 			ip := installProperties{
 				filename:       filename,
 				sourceFilePath: src,
 				outputFilePath: output,
-				installDirPath: p.installDirPath,
+				installDirPath: installDirPath,
 			}
 			p.outputFilePaths = append(p.outputFilePaths, output)
 			installs = append(installs, ip)
+			p.installDirPaths = append(p.installDirPaths, installDirPath)
 		}
 	} else if ctx.Config().AllowMissingDependencies() {
 		// If no srcs was set and AllowMissingDependencies is enabled then
@@ -394,9 +456,10 @@ func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 			filename:       filename,
 			sourceFilePath: p.sourceFilePaths[0],
 			outputFilePath: p.outputFilePaths[0],
-			installDirPath: p.installDirPath,
+			installDirPath: baseInstallDirPath,
 		}
 		installs = append(installs, ip)
+		p.installDirPaths = append(p.installDirPaths, baseInstallDirPath)
 	} else {
 		ctx.PropertyErrorf("src", "missing prebuilt source file")
 		return
@@ -466,7 +529,7 @@ func (p *PrebuiltEtc) AndroidMkEntries() []android.AndroidMkEntries {
 		ExtraEntries: []android.AndroidMkExtraEntriesFunc{
 			func(ctx android.AndroidMkExtraEntriesContext, entries *android.AndroidMkEntries) {
 				entries.SetString("LOCAL_MODULE_TAGS", "optional")
-				entries.SetString("LOCAL_MODULE_PATH", p.installDirPath.String())
+				entries.SetString("LOCAL_MODULE_PATH", p.installDirPaths[0].String())
 				entries.SetString("LOCAL_INSTALLED_MODULE_STEM", p.outputFilePaths[0].Base())
 				if len(p.properties.Symlinks) > 0 {
 					entries.AddStrings("LOCAL_MODULE_SYMLINKS", p.properties.Symlinks...)
@@ -493,6 +556,13 @@ func InitPrebuiltEtcModule(p *PrebuiltEtc, dirBase string) {
 func InitPrebuiltRootModule(p *PrebuiltEtc) {
 	p.installDirBase = "."
 	p.AddProperties(&p.properties)
+	p.AddProperties(&p.rootProperties)
+}
+
+func InitPrebuiltAvbModule(p *PrebuiltEtc) {
+	p.installDirBase = "avb"
+	p.AddProperties(&p.properties)
+	p.rootProperties.Install_in_root = proptools.BoolPtr(true)
 }
 
 // prebuilt_etc is for a prebuilt artifact that is installed in
@@ -542,6 +612,20 @@ func PrebuiltEtcCaCertsFactory() android.Module {
 	InitPrebuiltEtcModule(module, "cacerts")
 	// This module is device-only
 	android.InitAndroidArchModule(module, android.DeviceSupported, android.MultilibFirst)
+	return module
+}
+
+// Generally, a <partition> directory will contain a `system` subdirectory, but the <partition> of
+// `prebuilt_avb` will not have a `system` subdirectory.
+// Ultimately, prebuilt_avb will install the prebuilt artifact to the `avb` subdirectory under the
+// root directory of the partition: <partition_root>/avb.
+// prebuilt_avb does not allow adding any other subdirectories.
+func PrebuiltAvbFactory() android.Module {
+	module := &PrebuiltEtc{}
+	InitPrebuiltAvbModule(module)
+	// This module is device-only
+	android.InitAndroidArchModule(module, android.DeviceSupported, android.MultilibFirst)
+	android.InitDefaultableModule(module)
 	return module
 }
 
@@ -702,6 +786,16 @@ func PrebuiltRFSAFactory() android.Module {
 	InitPrebuiltEtcModule(module, "lib/rfsa")
 	// This module is device-only
 	android.InitAndroidArchModule(module, android.DeviceSupported, android.MultilibFirst)
+	android.InitDefaultableModule(module)
+	return module
+}
+
+// prebuilt_media_audio installs audio files in <partition>/media/audio directory.
+func PrebuiltMediaAudioFactory() android.Module {
+	module := &PrebuiltEtc{}
+	InitPrebuiltEtcModule(module, "media/audio")
+	// This module is device-only
+	android.InitAndroidArchModule(module, android.DeviceSupported, android.MultilibCommon)
 	android.InitDefaultableModule(module)
 	return module
 }

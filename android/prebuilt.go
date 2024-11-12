@@ -61,7 +61,7 @@ var _ ExcludeFromApexContentsTag = PrebuiltDepTag
 type UserSuppliedPrebuiltProperties struct {
 	// When prefer is set to true the prebuilt will be used instead of any source module with
 	// a matching name.
-	Prefer *bool `android:"arch_variant"`
+	Prefer proptools.Configurable[bool] `android:"arch_variant,replace_instead_of_append"`
 
 	// When specified this names a Soong config variable that controls the prefer property.
 	//
@@ -148,11 +148,7 @@ func PrebuiltNameFromSource(name string) string {
 }
 
 func (p *Prebuilt) ForcePrefer() {
-	p.properties.Prefer = proptools.BoolPtr(true)
-}
-
-func (p *Prebuilt) Prefer() bool {
-	return proptools.Bool(p.properties.Prefer)
+	p.properties.Prefer = NewSimpleConfigurable(true)
 }
 
 // SingleSourcePathFromSupplier invokes the supplied supplier for the current module in the
@@ -248,6 +244,8 @@ func InitPrebuiltModuleWithSrcSupplier(module PrebuiltInterface, srcsSupplier Pr
 	p.srcsPropertyName = srcsPropertyName
 }
 
+// InitPrebuiltModule is the same as InitPrebuiltModuleWithSrcSupplier, but uses the
+// provided list of strings property as the source provider.
 func InitPrebuiltModule(module PrebuiltInterface, srcs *[]string) {
 	if srcs == nil {
 		panic(fmt.Errorf("srcs must not be nil"))
@@ -258,6 +256,39 @@ func InitPrebuiltModule(module PrebuiltInterface, srcs *[]string) {
 	}
 
 	InitPrebuiltModuleWithSrcSupplier(module, srcsSupplier, "srcs")
+}
+
+// InitConfigurablePrebuiltModule is the same as InitPrebuiltModule, but uses a
+// Configurable list of strings property instead of a regular list of strings.
+func InitConfigurablePrebuiltModule(module PrebuiltInterface, srcs *proptools.Configurable[[]string]) {
+	if srcs == nil {
+		panic(fmt.Errorf("srcs must not be nil"))
+	}
+
+	srcsSupplier := func(ctx BaseModuleContext, _ Module) []string {
+		return srcs.GetOrDefault(ctx, nil)
+	}
+
+	InitPrebuiltModuleWithSrcSupplier(module, srcsSupplier, "srcs")
+}
+
+// InitConfigurablePrebuiltModuleString is the same as InitPrebuiltModule, but uses a
+// Configurable string property instead of a regular list of strings. It only produces a single
+// source file.
+func InitConfigurablePrebuiltModuleString(module PrebuiltInterface, srcs *proptools.Configurable[string], propertyName string) {
+	if srcs == nil {
+		panic(fmt.Errorf("%s must not be nil", propertyName))
+	}
+
+	srcsSupplier := func(ctx BaseModuleContext, _ Module) []string {
+		src := srcs.GetOrDefault(ctx, "")
+		if src == "" {
+			return nil
+		}
+		return []string{src}
+	}
+
+	InitPrebuiltModuleWithSrcSupplier(module, srcsSupplier, propertyName)
 }
 
 func InitSingleSourcePrebuiltModule(module PrebuiltInterface, srcProps interface{}, srcField string) {
@@ -347,13 +378,13 @@ func GetEmbeddedPrebuilt(module Module) *Prebuilt {
 //
 // This function is for use on dependencies after PrebuiltPostDepsMutator has
 // run - any dependency that is registered before that will already reference
-// the right module. This function is only safe to call after all mutators that
-// may call CreateVariations, e.g. in GenerateAndroidBuildActions.
+// the right module. This function is only safe to call after all TransitionMutators
+// have run, e.g. in GenerateAndroidBuildActions.
 func PrebuiltGetPreferred(ctx BaseModuleContext, module Module) Module {
-	if !module.IsReplacedByPrebuilt() {
+	if !OtherModuleProviderOrDefault(ctx, module, CommonPropertiesProviderKey).ReplacedByPrebuilt {
 		return module
 	}
-	if IsModulePrebuilt(module) {
+	if _, ok := OtherModuleProvider(ctx, module, PrebuiltModuleProviderKey); ok {
 		// If we're given a prebuilt then assume there's no source module around.
 		return module
 	}
@@ -361,11 +392,11 @@ func PrebuiltGetPreferred(ctx BaseModuleContext, module Module) Module {
 	sourceModDepFound := false
 	var prebuiltMod Module
 
-	ctx.WalkDeps(func(child, parent Module) bool {
+	ctx.WalkDepsProxy(func(child, parent ModuleProxy) bool {
 		if prebuiltMod != nil {
 			return false
 		}
-		if parent == ctx.Module() {
+		if ctx.EqualModules(parent, ctx.Module()) {
 			// First level: Only recurse if the module is found as a direct dependency.
 			sourceModDepFound = child == module
 			return sourceModDepFound
@@ -388,13 +419,13 @@ func PrebuiltGetPreferred(ctx BaseModuleContext, module Module) Module {
 }
 
 func RegisterPrebuiltsPreArchMutators(ctx RegisterMutatorsContext) {
-	ctx.BottomUp("prebuilt_rename", PrebuiltRenameMutator).Parallel()
+	ctx.BottomUp("prebuilt_rename", PrebuiltRenameMutator).UsesRename()
 }
 
 func RegisterPrebuiltsPostDepsMutators(ctx RegisterMutatorsContext) {
-	ctx.BottomUp("prebuilt_source", PrebuiltSourceDepsMutator).Parallel()
-	ctx.BottomUp("prebuilt_select", PrebuiltSelectModuleMutator).Parallel()
-	ctx.BottomUp("prebuilt_postdeps", PrebuiltPostDepsMutator).Parallel()
+	ctx.BottomUp("prebuilt_source", PrebuiltSourceDepsMutator).UsesReverseDependencies()
+	ctx.BottomUp("prebuilt_select", PrebuiltSelectModuleMutator)
+	ctx.BottomUp("prebuilt_postdeps", PrebuiltPostDepsMutator).UsesReplaceDependencies()
 }
 
 // Returns the name of the source module corresponding to a prebuilt module
@@ -423,15 +454,7 @@ func PrebuiltRenameMutator(ctx BottomUpMutatorContext) {
 // The metadata will be used for source vs prebuilts selection
 func PrebuiltSourceDepsMutator(ctx BottomUpMutatorContext) {
 	m := ctx.Module()
-	// If this module is a prebuilt, is enabled and has not been renamed to source then add a
-	// dependency onto the source if it is present.
-	if p := GetEmbeddedPrebuilt(m); p != nil && m.Enabled(ctx) && !p.properties.PrebuiltRenamedToSource {
-		bmn, _ := m.(baseModuleName)
-		name := bmn.BaseModuleName()
-		if ctx.OtherModuleReverseDependencyVariantExists(name) {
-			ctx.AddReverseDependency(ctx.Module(), PrebuiltDepTag, name)
-			p.properties.SourceExists = true
-		}
+	if p := GetEmbeddedPrebuilt(m); p != nil {
 		// Add a dependency from the prebuilt to the `all_apex_contributions`
 		// metadata module
 		// TODO: When all branches contain this singleton module, make this strict
@@ -439,7 +462,16 @@ func PrebuiltSourceDepsMutator(ctx BottomUpMutatorContext) {
 		if ctx.OtherModuleExists("all_apex_contributions") {
 			ctx.AddDependency(m, AcDepTag, "all_apex_contributions")
 		}
-
+		if m.Enabled(ctx) && !p.properties.PrebuiltRenamedToSource {
+			// If this module is a prebuilt, is enabled and has not been renamed to source then add a
+			// dependency onto the source if it is present.
+			bmn, _ := m.(baseModuleName)
+			name := bmn.BaseModuleName()
+			if ctx.OtherModuleReverseDependencyVariantExists(name) {
+				ctx.AddReverseDependency(ctx.Module(), PrebuiltDepTag, name)
+				p.properties.SourceExists = true
+			}
+		}
 	}
 }
 
@@ -664,16 +696,41 @@ type createdByJavaSdkLibraryName interface {
 //
 // Even though this is a cc_prebuilt_library_shared, we create both the variants today
 // https://source.corp.google.com/h/googleplex-android/platform/build/soong/+/e08e32b45a18a77bc3c3e751f730539b1b374f1b:cc/library.go;l=2113-2116;drc=2c4a9779cd1921d0397a12b3d3521f4c9b30d747;bpv=1;bpt=0
-func (p *Prebuilt) variantIsDisabled(ctx BaseMutatorContext, prebuilt Module) bool {
+func (p *Prebuilt) variantIsDisabled(ctx BaseModuleContext, prebuilt Module) bool {
 	return p.srcsSupplier != nil && len(p.srcsSupplier(ctx, prebuilt)) == 0
+}
+
+type apexVariationName interface {
+	ApexVariationName() string
 }
 
 // usePrebuilt returns true if a prebuilt should be used instead of the source module.  The prebuilt
 // will be used if it is marked "prefer" or if the source module is disabled.
-func (p *Prebuilt) usePrebuilt(ctx BaseMutatorContext, source Module, prebuilt Module) bool {
+func (p *Prebuilt) usePrebuilt(ctx BaseModuleContext, source Module, prebuilt Module) bool {
+	isMainlinePrebuilt := func(prebuilt Module) bool {
+		apex, ok := prebuilt.(apexVariationName)
+		if !ok {
+			return false
+		}
+		// Prebuilts of aosp apexes in prebuilts/runtime
+		// Used in minimal art branches
+		if prebuilt.base().BaseModuleName() == apex.ApexVariationName() {
+			return false
+		}
+		return InList(apex.ApexVariationName(), ctx.Config().AllMainlineApexNames())
+	}
+
 	// Use `all_apex_contributions` for source vs prebuilt selection.
 	psi := PrebuiltSelectionInfoMap{}
-	ctx.VisitDirectDepsWithTag(PrebuiltDepTag, func(am Module) {
+	var psiDepTag blueprint.DependencyTag
+	if p := GetEmbeddedPrebuilt(ctx.Module()); p != nil {
+		// This is a prebuilt module, visit all_apex_contributions to get the info
+		psiDepTag = AcDepTag
+	} else {
+		// This is a source module, visit any of its prebuilts to get the info
+		psiDepTag = PrebuiltDepTag
+	}
+	ctx.VisitDirectDepsWithTag(psiDepTag, func(am Module) {
 		psi, _ = OtherModuleProvider(ctx, am, PrebuiltSelectionInfoProvider)
 	})
 
@@ -684,6 +741,11 @@ func (p *Prebuilt) usePrebuilt(ctx BaseMutatorContext, source Module, prebuilt M
 	// If the prebuilt module is explicitly listed in the metadata module, use that
 	if isSelected(psi, prebuilt) && !p.variantIsDisabled(ctx, prebuilt) {
 		return true
+	}
+
+	// If this is a mainline prebuilt, but has not been flagged, hide it.
+	if isMainlinePrebuilt(prebuilt) {
+		return false
 	}
 
 	// If the baseModuleName could not be found in the metadata module,
@@ -707,7 +769,7 @@ func (p *Prebuilt) usePrebuilt(ctx BaseMutatorContext, source Module, prebuilt M
 	}
 
 	// TODO: use p.Properties.Name and ctx.ModuleDir to override preference
-	return Bool(p.properties.Prefer)
+	return p.properties.Prefer.GetOrDefault(ctx, false)
 }
 
 func (p *Prebuilt) SourceExists() bool {

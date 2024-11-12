@@ -15,8 +15,6 @@
 package java
 
 import (
-	"fmt"
-
 	"android/soong/android"
 	"android/soong/dexpreopt"
 )
@@ -35,6 +33,7 @@ var (
 	platformBootclasspathArtBootJarDepTag  = bootclasspathDependencyTag{name: "art-boot-jar"}
 	platformBootclasspathBootJarDepTag     = bootclasspathDependencyTag{name: "platform-boot-jar"}
 	platformBootclasspathApexBootJarDepTag = bootclasspathDependencyTag{name: "apex-boot-jar"}
+	platformBootclasspathImplLibDepTag     = dependencyTag{name: "impl-lib-tag"}
 )
 
 type platformBootclasspathModule struct {
@@ -57,9 +56,6 @@ type platformBootclasspathModule struct {
 
 	// Path to the monolithic hiddenapi-unsupported.csv file.
 	hiddenAPIMetadataCSV android.OutputPath
-
-	// Path to a srcjar containing all the transitive sources of the bootclasspath.
-	srcjar android.OutputPath
 }
 
 type platformBootclasspathProperties struct {
@@ -76,8 +72,6 @@ func platformBootclasspathFactory() android.SingletonModule {
 	return m
 }
 
-var _ android.OutputFileProducer = (*platformBootclasspathModule)(nil)
-
 func (b *platformBootclasspathModule) AndroidMkEntries() (entries []android.AndroidMkEntries) {
 	entries = append(entries, android.AndroidMkEntries{
 		Class: "FAKE",
@@ -87,22 +81,6 @@ func (b *platformBootclasspathModule) AndroidMkEntries() (entries []android.Andr
 	})
 	entries = append(entries, b.classpathFragmentBase().androidMkEntries()...)
 	return
-}
-
-// Make the hidden API files available from the platform-bootclasspath module.
-func (b *platformBootclasspathModule) OutputFiles(tag string) (android.Paths, error) {
-	switch tag {
-	case "hiddenapi-flags.csv":
-		return android.Paths{b.hiddenAPIFlagsCSV}, nil
-	case "hiddenapi-index.csv":
-		return android.Paths{b.hiddenAPIIndexCSV}, nil
-	case "hiddenapi-metadata.csv":
-		return android.Paths{b.hiddenAPIMetadataCSV}, nil
-	case ".srcjar":
-		return android.Paths{b.srcjar}, nil
-	}
-
-	return nil, fmt.Errorf("unknown tag %s", tag)
 }
 
 func (b *platformBootclasspathModule) DepsMutator(ctx android.BottomUpMutatorContext) {
@@ -134,12 +112,18 @@ func (b *platformBootclasspathModule) BootclasspathDepsMutator(ctx android.Botto
 	// Add dependencies on all the ART jars.
 	global := dexpreopt.GetGlobalConfig(ctx)
 	addDependenciesOntoSelectedBootImageApexes(ctx, "com.android.art")
+
+	var bootImageModuleNames []string
+
 	// TODO: b/308174306 - Remove the mechanism of depending on the java_sdk_library(_import) directly
 	addDependenciesOntoBootImageModules(ctx, global.ArtApexJars, platformBootclasspathArtBootJarDepTag)
+	bootImageModuleNames = append(bootImageModuleNames, global.ArtApexJars.CopyOfJars()...)
 
 	// Add dependencies on all the non-updatable jars, which are on the platform or in non-updatable
 	// APEXes.
-	addDependenciesOntoBootImageModules(ctx, b.platformJars(ctx), platformBootclasspathBootJarDepTag)
+	platformJars := b.platformJars(ctx)
+	addDependenciesOntoBootImageModules(ctx, platformJars, platformBootclasspathBootJarDepTag)
+	bootImageModuleNames = append(bootImageModuleNames, platformJars.CopyOfJars()...)
 
 	// Add dependencies on all the updatable jars, except the ART jars.
 	apexJars := dexpreopt.GetGlobalConfig(ctx).ApexBootJars
@@ -150,9 +134,17 @@ func (b *platformBootclasspathModule) BootclasspathDepsMutator(ctx android.Botto
 	addDependenciesOntoSelectedBootImageApexes(ctx, android.FirstUniqueStrings(apexes)...)
 	// TODO: b/308174306 - Remove the mechanism of depending on the java_sdk_library(_import) directly
 	addDependenciesOntoBootImageModules(ctx, apexJars, platformBootclasspathApexBootJarDepTag)
+	bootImageModuleNames = append(bootImageModuleNames, apexJars.CopyOfJars()...)
 
 	// Add dependencies on all the fragments.
 	b.properties.BootclasspathFragmentsDepsProperties.addDependenciesOntoFragments(ctx)
+
+	for _, bootImageModuleName := range bootImageModuleNames {
+		implLibName := implLibraryModuleName(bootImageModuleName)
+		if ctx.OtherModuleExists(implLibName) {
+			ctx.AddFarVariationDependencies(nil, platformBootclasspathImplLibDepTag, implLibName)
+		}
+	}
 }
 
 func addDependenciesOntoBootImageModules(ctx android.BottomUpMutatorContext, modules android.ConfiguredJarList, tag bootclasspathDependencyTag) {
@@ -189,17 +181,23 @@ func (b *platformBootclasspathModule) GenerateAndroidBuildActions(ctx android.Mo
 	allModules = append(allModules, apexModules...)
 	b.configuredModules = allModules
 
+	// Do not add implLibModule to allModules as the impl lib is only used to collect the
+	// transitive source files
+	var implLibModule []android.Module
+	ctx.VisitDirectDepsWithTag(implLibraryTag, func(m android.Module) {
+		implLibModule = append(implLibModule, m)
+	})
+
 	var transitiveSrcFiles android.Paths
-	for _, module := range allModules {
-		depInfo, _ := android.OtherModuleProvider(ctx, module, JavaInfoProvider)
-		if depInfo.TransitiveSrcFiles != nil {
+	for _, module := range append(allModules, implLibModule...) {
+		if depInfo, ok := android.OtherModuleProvider(ctx, module, JavaInfoProvider); ok {
 			transitiveSrcFiles = append(transitiveSrcFiles, depInfo.TransitiveSrcFiles.ToList()...)
 		}
 	}
 	jarArgs := resourcePathsToJarArgs(transitiveSrcFiles)
 	jarArgs = append(jarArgs, "-srcjar") // Move srcfiles to the right package
-	b.srcjar = android.PathForModuleOut(ctx, ctx.ModuleName()+"-transitive.srcjar").OutputPath
-	TransformResourcesToJar(ctx, b.srcjar, jarArgs, transitiveSrcFiles)
+	srcjar := android.PathForModuleOut(ctx, ctx.ModuleName()+"-transitive.srcjar").OutputPath
+	TransformResourcesToJar(ctx, srcjar, jarArgs, transitiveSrcFiles)
 
 	// Gather all the fragments dependencies.
 	b.fragments = gatherApexModulePairDepsWithTag(ctx, bootclasspathFragmentDepTag)
@@ -213,6 +211,11 @@ func (b *platformBootclasspathModule) GenerateAndroidBuildActions(ctx android.Mo
 
 	bootDexJarByModule := b.generateHiddenAPIBuildActions(ctx, b.configuredModules, b.fragments)
 	buildRuleForBootJarsPackageCheck(ctx, bootDexJarByModule)
+
+	ctx.SetOutputFiles(android.Paths{b.hiddenAPIFlagsCSV}, "hiddenapi-flags.csv")
+	ctx.SetOutputFiles(android.Paths{b.hiddenAPIIndexCSV}, "hiddenapi-index.csv")
+	ctx.SetOutputFiles(android.Paths{b.hiddenAPIMetadataCSV}, "hiddenapi-metadata.csv")
+	ctx.SetOutputFiles(android.Paths{srcjar}, ".srcjar")
 }
 
 // Generate classpaths.proto config

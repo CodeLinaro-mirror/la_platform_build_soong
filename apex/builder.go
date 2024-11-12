@@ -83,6 +83,7 @@ func init() {
 	pctx.HostBinToolVariable("assemble_vintf", "assemble_vintf")
 	pctx.HostBinToolVariable("apex_elf_checker", "apex_elf_checker")
 	pctx.HostBinToolVariable("aconfig", "aconfig")
+	pctx.HostBinToolVariable("host_apex_verifier", "host_apex_verifier")
 }
 
 type createStorageStruct struct {
@@ -95,6 +96,7 @@ var createStorageInfo = []createStorageStruct{
 	{"package.map", "create_aconfig_package_map_file", "package_map"},
 	{"flag.map", "create_aconfig_flag_map_file", "flag_map"},
 	{"flag.val", "create_aconfig_flag_val_file", "flag_val"},
+	{"flag.info", "create_aconfig_flag_info_file", "flag_info"},
 }
 
 var (
@@ -249,6 +251,13 @@ var (
 		Description: "run apex_linkerconfig_validation",
 	}, "image_dir")
 
+	apexHostVerifierRule = pctx.StaticRule("apexHostVerifierRule", blueprint.RuleParams{
+		Command: `${host_apex_verifier} --deapexer=${deapexer} --debugfs=${debugfs_static} ` +
+			`--fsckerofs=${fsck_erofs} --apex=${in} --partition_tag=${partition_tag} && touch ${out}`,
+		CommandDeps: []string{"${host_apex_verifier}", "${deapexer}", "${debugfs_static}", "${fsck_erofs}"},
+		Description: "run host_apex_verifier",
+	}, "partition_tag")
+
 	assembleVintfRule = pctx.StaticRule("assembleVintfRule", blueprint.RuleParams{
 		Command:     `rm -f $out && VINTF_IGNORE_TARGET_FCM_VERSION=true ${assemble_vintf} -i $in -o $out`,
 		CommandDeps: []string{"${assemble_vintf}"},
@@ -261,6 +270,58 @@ var (
 		Description: "run apex_elf_checker --unwanted",
 	}, "tool_path", "unwanted")
 )
+
+func (a *apexBundle) buildAconfigFiles(ctx android.ModuleContext) []apexFile {
+	var aconfigFiles android.Paths
+	for _, file := range a.filesInfo {
+		if file.module == nil {
+			continue
+		}
+		if dep, ok := android.OtherModuleProvider(ctx, file.module, android.AconfigPropagatingProviderKey); ok {
+			if len(dep.AconfigFiles) > 0 && dep.AconfigFiles[ctx.ModuleName()] != nil {
+				aconfigFiles = append(aconfigFiles, dep.AconfigFiles[ctx.ModuleName()]...)
+			}
+		}
+
+		validationFlag := ctx.DeviceConfig().AconfigContainerValidation()
+		if validationFlag == "error" || validationFlag == "warning" {
+			android.VerifyAconfigBuildMode(ctx, ctx.ModuleName(), file.module, validationFlag == "error")
+		}
+	}
+	aconfigFiles = android.FirstUniquePaths(aconfigFiles)
+
+	var files []apexFile
+	if len(aconfigFiles) > 0 {
+		apexAconfigFile := android.PathForModuleOut(ctx, "aconfig_flags.pb")
+		ctx.Build(pctx, android.BuildParams{
+			Rule:        aconfig.AllDeclarationsRule,
+			Inputs:      aconfigFiles,
+			Output:      apexAconfigFile,
+			Description: "combine_aconfig_declarations",
+			Args: map[string]string{
+				"cache_files": android.JoinPathsWithPrefix(aconfigFiles, "--cache "),
+			},
+		})
+		files = append(files, newApexFile(ctx, apexAconfigFile, "aconfig_flags", "etc", etc, nil))
+
+		for _, info := range createStorageInfo {
+			outputFile := android.PathForModuleOut(ctx, info.Output_file)
+			ctx.Build(pctx, android.BuildParams{
+				Rule:        aconfig.CreateStorageRule,
+				Inputs:      aconfigFiles,
+				Output:      outputFile,
+				Description: info.Desc,
+				Args: map[string]string{
+					"container":   ctx.ModuleName(),
+					"file_type":   info.File_type,
+					"cache_files": android.JoinPathsWithPrefix(aconfigFiles, "--cache "),
+				},
+			})
+			files = append(files, newApexFile(ctx, outputFile, info.File_type, "etc", etc, nil))
+		}
+	}
+	return files
+}
 
 // buildManifest creates buile rules to modify the input apex_manifest.json to add information
 // gathered by the build system such as provided/required native libraries. Two output files having
@@ -299,14 +360,14 @@ func (a *apexBundle) buildManifest(ctx android.ModuleContext, provideNativeLibs,
 	}
 
 	manifestJsonFullOut := android.PathForModuleOut(ctx, "apex_manifest_full.json")
-	defaultVersion := android.DefaultUpdatableModuleVersion
+	defaultVersion := ctx.Config().ReleaseDefaultUpdatableModuleVersion()
 	if a.properties.Variant_version != nil {
 		defaultVersionInt, err := strconv.Atoi(defaultVersion)
 		if err != nil {
-			ctx.ModuleErrorf("expected DefaultUpdatableModuleVersion to be an int, but got %s", defaultVersion)
+			ctx.ModuleErrorf("expected RELEASE_DEFAULT_UPDATABLE_MODULE_VERSION to be an int, but got %s", defaultVersion)
 		}
 		if defaultVersionInt%10 != 0 {
-			ctx.ModuleErrorf("expected DefaultUpdatableModuleVersion to end in a zero, but got %s", defaultVersion)
+			ctx.ModuleErrorf("expected RELEASE_DEFAULT_UPDATABLE_MODULE_VERSION to end in a zero, but got %s", defaultVersion)
 		}
 		variantVersion := []rune(*a.properties.Variant_version)
 		if len(variantVersion) != 1 || variantVersion[0] < '0' || variantVersion[0] > '9' {
@@ -560,7 +621,8 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 				}
 			} else {
 				if installSymbolFiles {
-					installedPath = ctx.InstallFile(apexDir.Join(ctx, fi.installDir), fi.stem(), fi.builtFile)
+					// store installedPath. symlinks might be created if required.
+					installedPath = apexDir.Join(ctx, fi.installDir, fi.stem())
 				}
 			}
 
@@ -595,7 +657,7 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 	if len(installMapSet) > 0 {
 		var installs []string
 		installs = append(installs, android.SortedKeys(installMapSet)...)
-		a.SetLicenseInstallMap(installs)
+		ctx.SetLicenseInstallMap(installs)
 	}
 
 	////////////////////////////////////////////////////////////////////////////////////////////
@@ -644,48 +706,10 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 	outHostBinDir := ctx.Config().HostToolPath(ctx, "").String()
 	prebuiltSdkToolsBinDir := filepath.Join("prebuilts", "sdk", "tools", runtime.GOOS, "bin")
 
-	defaultReadOnlyFiles := []string{"apex_manifest.json", "apex_manifest.pb"}
-	aconfigDest := imageDir.Join(ctx, "etc").String()
-	if len(a.aconfigFiles) > 0 {
-		apexAconfigFile := android.PathForModuleOut(ctx, "aconfig_flags.pb")
-		ctx.Build(pctx, android.BuildParams{
-			Rule:        aconfig.AllDeclarationsRule,
-			Inputs:      a.aconfigFiles,
-			Output:      apexAconfigFile,
-			Description: "combine_aconfig_declarations",
-			Args: map[string]string{
-				"cache_files": android.JoinPathsWithPrefix(a.aconfigFiles, "--cache "),
-			},
-		})
-
-		copyCommands = append(copyCommands, "cp -f "+apexAconfigFile.String()+" "+aconfigDest)
-		implicitInputs = append(implicitInputs, apexAconfigFile)
-		defaultReadOnlyFiles = append(defaultReadOnlyFiles, "etc/"+apexAconfigFile.Base())
-
-		for _, info := range createStorageInfo {
-			outputFile := android.PathForModuleOut(ctx, info.Output_file)
-			ctx.Build(pctx, android.BuildParams{
-				Rule:        aconfig.CreateStorageRule,
-				Inputs:      a.aconfigFiles,
-				Output:      outputFile,
-				Description: info.Desc,
-				Args: map[string]string{
-					"container":   ctx.ModuleName(),
-					"file_type":   info.File_type,
-					"cache_files": android.JoinPathsWithPrefix(a.aconfigFiles, "--cache "),
-				},
-			})
-
-			copyCommands = append(copyCommands, "cp -f "+outputFile.String()+" "+aconfigDest)
-			implicitInputs = append(implicitInputs, outputFile)
-			defaultReadOnlyFiles = append(defaultReadOnlyFiles, "etc/"+outputFile.Base())
-		}
-	}
-
 	////////////////////////////////////////////////////////////////////////////////////
 	// Step 2: create canned_fs_config which encodes filemode,uid,gid of each files
 	// in this APEX. The file will be used by apexer in later steps.
-	cannedFsConfig := a.buildCannedFsConfig(ctx, defaultReadOnlyFiles)
+	cannedFsConfig := a.buildCannedFsConfig(ctx)
 	implicitInputs = append(implicitInputs, cannedFsConfig)
 
 	////////////////////////////////////////////////////////////////////////////////////
@@ -704,8 +728,9 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 		optFlags = append(optFlags, "--override_apk_package_name "+manifestPackageName)
 	}
 
-	if a.properties.AndroidManifest != nil {
-		androidManifestFile := android.PathForModuleSrc(ctx, proptools.String(a.properties.AndroidManifest))
+	androidManifest := a.properties.AndroidManifest.GetOrDefault(ctx, "")
+	if androidManifest != "" {
+		androidManifestFile := android.PathForModuleSrc(ctx, androidManifest)
 
 		if a.testApex {
 			androidManifestFile = markManifestTestOnly(ctx, androidManifestFile)
@@ -765,18 +790,6 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 	builder.Build("notice_dir", "Building notice dir")
 	implicitInputs = append(implicitInputs, noticeAssetPath)
 	optFlags = append(optFlags, "--assets_dir "+filepath.Dir(noticeAssetPath.String()))
-
-	// Apexes which are supposed to be installed in builtin dirs(/system, etc)
-	// don't need hashtree for activation. Therefore, by removing hashtree from
-	// apex bundle (filesystem image in it, to be specific), we can save storage.
-	needHashTree := moduleMinSdkVersion.LessThanOrEqualTo(android.SdkVersion_Android10) ||
-		a.shouldGenerateHashtree()
-	if ctx.Config().ApexCompressionEnabled() && a.isCompressable() {
-		needHashTree = true
-	}
-	if !needHashTree {
-		optFlags = append(optFlags, "--no_hashtree")
-	}
 
 	if a.testOnlyShouldSkipPayloadSign() {
 		optFlags = append(optFlags, "--unsigned_payload")
@@ -951,6 +964,9 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 		validations = append(validations,
 			runApexElfCheckerUnwanted(ctx, unsignedOutputFile.OutputPath, a.properties.Unwanted_transitive_deps))
 	}
+	if !a.testApex && android.InList(a.payloadFsType, []fsType{ext4, erofs}) {
+		validations = append(validations, runApexHostVerifier(ctx, a, unsignedOutputFile.OutputPath))
+	}
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        rule,
 		Description: "signapk",
@@ -1047,8 +1063,9 @@ func (a *apexBundle) getOverrideManifestPackageName(ctx android.ModuleContext) s
 		}
 		return ""
 	}
-	if a.overridableProperties.Package_name != "" {
-		return a.overridableProperties.Package_name
+	packageNameFromProp := a.overridableProperties.Package_name.GetOrDefault(ctx, "")
+	if packageNameFromProp != "" {
+		return packageNameFromProp
 	}
 	manifestPackageName, overridden := ctx.DeviceConfig().OverrideManifestPackageNameFor(ctx.ModuleName())
 	if overridden {
@@ -1065,7 +1082,7 @@ func (a *apexBundle) buildApexDependencyInfo(ctx android.ModuleContext) {
 	}
 
 	depInfos := android.DepNameToDepInfoMap{}
-	a.WalkPayloadDeps(ctx, func(ctx android.ModuleContext, from blueprint.Module, to android.ApexModule, externalDep bool) bool {
+	a.WalkPayloadDeps(ctx, func(ctx android.BaseModuleContext, from blueprint.Module, to android.ApexModule, externalDep bool) bool {
 		if from.Name() == to.Name() {
 			// This can happen for cc.reuseObjTag. We are not interested in tracking this.
 			// As soon as the dependency graph crosses the APEX boundary, don't go further.
@@ -1132,14 +1149,27 @@ func (a *apexBundle) buildApexDependencyInfo(ctx android.ModuleContext) {
 func (a *apexBundle) buildLintReports(ctx android.ModuleContext) {
 	depSetsBuilder := java.NewLintDepSetBuilder()
 	for _, fi := range a.filesInfo {
-		depSetsBuilder.Transitive(fi.lintDepSets)
+		if fi.lintInfo != nil {
+			depSetsBuilder.Transitive(fi.lintInfo)
+		}
 	}
 
-	a.lintReports = java.BuildModuleLintReportZips(ctx, depSetsBuilder.Build())
+	depSets := depSetsBuilder.Build()
+	var validations android.Paths
+
+	if a.checkStrictUpdatabilityLinting(ctx) {
+		baselines := depSets.Baseline.ToList()
+		if len(baselines) > 0 {
+			outputFile := java.VerifyStrictUpdatabilityChecks(ctx, baselines)
+			validations = append(validations, outputFile)
+		}
+	}
+
+	a.lintReports = java.BuildModuleLintReportZips(ctx, depSets, validations)
 }
 
-func (a *apexBundle) buildCannedFsConfig(ctx android.ModuleContext, defaultReadOnlyFiles []string) android.OutputPath {
-	var readOnlyPaths = defaultReadOnlyFiles
+func (a *apexBundle) buildCannedFsConfig(ctx android.ModuleContext) android.OutputPath {
+	var readOnlyPaths = []string{"apex_manifest.json", "apex_manifest.pb"}
 	var executablePaths []string // this also includes dirs
 	var appSetDirs []string
 	appSetFiles := make(map[string]android.Path)
@@ -1195,8 +1225,9 @@ func (a *apexBundle) buildCannedFsConfig(ctx android.ModuleContext, defaultReadO
 	}
 	// Custom fs_config is "appended" to the last so that entries from the file are preferred
 	// over default ones set above.
-	if a.properties.Canned_fs_config != nil {
-		cmd.Text("cat").Input(android.PathForModuleSrc(ctx, *a.properties.Canned_fs_config))
+	customFsConfig := a.properties.Canned_fs_config.GetOrDefault(ctx, "")
+	if customFsConfig != "" {
+		cmd.Text("cat").Input(android.PathForModuleSrc(ctx, customFsConfig))
 	}
 	cmd.Text(")").FlagWithOutput("> ", cannedFsConfig)
 	builder.Build("generateFsConfig", fmt.Sprintf("Generating canned fs config for %s", a.BaseModuleName()))
@@ -1240,6 +1271,19 @@ func runApexElfCheckerUnwanted(ctx android.ModuleContext, apexFile android.Outpu
 		Args: map[string]string{
 			"unwanted":  android.JoinWithSuffixAndSeparator(unwanted, ".so", ":"),
 			"tool_path": ctx.Config().HostToolPath(ctx, "").String() + ":${config.ClangBin}",
+		},
+	})
+	return timestamp
+}
+
+func runApexHostVerifier(ctx android.ModuleContext, a *apexBundle, apexFile android.OutputPath) android.Path {
+	timestamp := android.PathForModuleOut(ctx, "host_apex_verifier.timestamp")
+	ctx.Build(pctx, android.BuildParams{
+		Rule:   apexHostVerifierRule,
+		Input:  apexFile,
+		Output: timestamp,
+		Args: map[string]string{
+			"partition_tag": a.PartitionTag(ctx.DeviceConfig()),
 		},
 	})
 	return timestamp
