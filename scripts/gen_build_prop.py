@@ -103,6 +103,7 @@ def parse_args():
   append_additional_system_props(args)
   append_additional_vendor_props(args)
   append_additional_product_props(args)
+  append_additional_odm_props(args)
 
   return args
 
@@ -365,6 +366,14 @@ def append_additional_system_props(args):
     props.append("xmpp.auto-presence=true")
     props.append("ro.config.nocheckin=yes")
 
+  # if TARGET_FWK_SUPPORTS_FULL_VALUEADDS is true then set va support.
+  if "TargetFwkSupportsFullValueadds" in config and config["TargetFwkSupportsFullValueadds"]:
+    print("Compile using modified AOSP tree supporting full vendor value-adds.")
+    props.append("ro.vendor.qti.va_aosp.support=1")
+  else:
+    print("Compile using pure AOSP tree.")
+    props.append("ro.vendor.qti.va_aosp.support=0")
+
   props.append("net.bt.name=Android")
 
   # This property is set by flashing debug boot image, so default to false.
@@ -492,6 +501,19 @@ def append_additional_product_props(args):
   props.append(f"ro.dalvik.vm.enable_uffd_gc={config['EnableUffdGc']}")
 
   config["ADDITIONAL_PRODUCT_PROPERTIES"] = props
+
+def append_additional_odm_props(args):
+  props = []
+
+  config = args.config
+
+  # if TARGET_FWK_SUPPORTS_FULL_VALUEADDS is true then set va support.
+  if "TargetFwkSupportsFullValueadds" in config and config["TargetFwkSupportsFullValueadds"]:
+    props.append("ro.vendor.qti.va_odm.support=1")
+  else:
+    props.append("ro.vendor.qti.va_odm.support=0")
+
+  config["ADDITIONAL_ODM_PROPERTIES"] = props
 
 def build_system_prop(args):
   config = args.config
