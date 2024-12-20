@@ -367,6 +367,7 @@ def append_additional_system_props(args):
     props.append("ro.config.nocheckin=yes")
 
   props.append("net.bt.name=Android")
+  props.append("ro.vendor.qti.va_aosp.support=1")
 
   # This property is set by flashing debug boot image, so default to false.
   props.append("ro.force.debuggable=0")
