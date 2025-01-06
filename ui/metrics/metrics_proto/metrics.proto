@@ -185,6 +185,37 @@ message SystemResourceInfo {
 
   // The total of available cores for building
   optional int32 available_cpus = 2;
+
+  // Information about the machine's CPU(s).
+  optional SystemCpuInfo cpu_info = 3;
+
+  // Information about the machine's memory.
+  optional SystemMemInfo mem_info = 4;
+}
+
+message SystemCpuInfo {
+  // The vendor id
+  optional string vendor_id = 1;
+
+  // The model name
+  optional string model_name = 2;
+
+  // The number of CPU cores
+  optional int32 cpu_cores = 3;
+
+  // The CPU flags
+  optional string flags = 4;
+}
+
+message SystemMemInfo {
+  // The total system memory
+  optional uint64 mem_total = 1;
+
+  // The free system memory
+  optional uint64 mem_free = 2;
+
+  // The available system memory
+  optional uint64 mem_available = 3;
 }
 
 message PerfInfo {
@@ -419,4 +450,41 @@ message OptimizedBuildMetrics {
       repeated string included_modules = 3;
     }
   }
+}
+
+// This is created by soong_ui from the various
+// android.find_input_delta_proto.FileList metrics provided to it by
+// find_input_delta.
+message AggregatedFileList {
+  // The arguments provided on the command line.
+  repeated string command_args = 1;
+
+  // The (possibly truncated list of) added files.
+  repeated string additions = 2;
+
+  // The (possibly truncated list of) changed files.
+  repeated string changes = 3;
+
+  // The (possibly truncated list of) deleted files.
+  repeated string deletions = 4;
+
+  // Count of files added/changed/deleted.
+  optional uint32 total_delta = 5;
+
+  // Counts by extension.
+  repeated FileCount counts = 6;
+}
+
+message FileCount {
+  // The file extension
+  optional string extension = 1;
+
+  // Number of added files with this extension.
+  optional uint32 additions = 2;
+
+  // Number of modified files with this extension.
+  optional uint32 modifications = 3;
+
+  // Number of deleted files with this extension.
+  optional uint32 deletions = 4;
 }

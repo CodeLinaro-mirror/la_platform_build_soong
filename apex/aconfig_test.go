@@ -60,6 +60,7 @@ func TestValidationAcrossContainersExportedPass(t *testing.T) {
 					apex_available: [
 						"myapex",
 					],
+					compile_dex: true,
 				}
 				aconfig_declarations {
 					name: "my_aconfig_declarations_foo",
@@ -339,6 +340,7 @@ func TestValidationAcrossContainersNotExportedFail(t *testing.T) {
 					apex_available: [
 						"myapex",
 					],
+					compile_dex: true,
 				}
 				aconfig_declarations {
 					name: "my_aconfig_declarations_foo",
@@ -682,7 +684,7 @@ func TestValidationAcrossContainersNotExportedFail(t *testing.T) {
 				}
 				filegroup {
 						name: "my_filegroup_foo_srcjars",
-						srcs: [
+						device_common_srcs: [
 								":my_aconfig_declarations_group_foo{.srcjars}",
 						],
 				}
@@ -761,6 +763,7 @@ func TestValidationNotPropagateAcrossShared(t *testing.T) {
 					apex_available: [
 						"myapex",
 					],
+					compile_dex: true,
 				}
 				java_library {
 					name: "my_java_library_foo",
