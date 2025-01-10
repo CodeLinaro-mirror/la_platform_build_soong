@@ -161,7 +161,7 @@ func (f *filesystemCreator) createInternalModules(ctx android.LoadHookContext) {
 
 	if buildingSuperImage(partitionVars) {
 		createSuperImage(ctx, finalSoongGeneratedPartitions, partitionVars)
-		f.properties.Super_image = ":" + generatedModuleName(ctx.Config(), "super")
+		f.properties.Super_image = ":" + generatedModuleNameForPartition(ctx.Config(), "super")
 	}
 
 	ctx.Config().Get(fsGenStateOnceKey).(*FsGenState).soongGeneratedPartitions = finalSoongGeneratedPartitions
@@ -178,6 +178,26 @@ func generatedModuleName(cfg android.Config, suffix string) string {
 
 func generatedModuleNameForPartition(cfg android.Config, partitionType string) string {
 	return generatedModuleName(cfg, fmt.Sprintf("%s_image", partitionType))
+}
+
+func (f *filesystemCreator) createBootloaderFilegroup(ctx android.LoadHookContext) (string, bool) {
+	bootloaderPath := ctx.Config().ProductVariables().PartitionVarsForSoongMigrationOnlyDoNotUse.PrebuiltBootloader
+	if len(bootloaderPath) == 0 {
+		return "", false
+	}
+
+	bootloaderFilegroupName := generatedModuleName(ctx.Config(), "bootloader")
+	filegroupProps := &struct {
+		Name       *string
+		Srcs       []string
+		Visibility []string
+	}{
+		Name:       proptools.StringPtr(bootloaderFilegroupName),
+		Srcs:       []string{bootloaderPath},
+		Visibility: []string{"//visibility:public"},
+	}
+	ctx.CreateModuleInDirectory(android.FileGroupFactory, ".", filegroupProps)
+	return bootloaderFilegroupName, true
 }
 
 func (f *filesystemCreator) createDeviceModule(
@@ -234,7 +254,12 @@ func (f *filesystemCreator) createDeviceModule(
 	}
 	partitionProps.Vbmeta_partitions = vbmetaPartitions
 
-	ctx.CreateModule(filesystem.AndroidDeviceFactory, baseProps, partitionProps)
+	deviceProps := &filesystem.DeviceProperties{}
+	if bootloader, ok := f.createBootloaderFilegroup(ctx); ok {
+		deviceProps.Bootloader = proptools.StringPtr(":" + bootloader)
+	}
+
+	ctx.CreateModule(filesystem.AndroidDeviceFactory, baseProps, partitionProps, deviceProps)
 }
 
 func partitionSpecificFsProps(ctx android.EarlyModuleContext, fsProps *filesystem.FilesystemProperties, partitionVars android.PartitionVariables, partitionType string) {
@@ -589,7 +614,7 @@ func (f *filesystemCreator) createVendorBuildProp(ctx android.LoadHookContext) {
 	}{
 		Name:             proptools.StringPtr(generatedModuleName(ctx.Config(), "android_info.prop")),
 		Board_info_files: partitionVars.BoardInfoFiles,
-		Stem:             proptools.StringPtr("android_info.txt"),
+		Stem:             proptools.StringPtr("android-info.txt"),
 	}
 	if len(androidInfoProps.Board_info_files) == 0 {
 		androidInfoProps.Bootloader_board_name = proptools.StringPtr(partitionVars.BootLoaderBoardName)
@@ -858,8 +883,8 @@ func getAvbInfo(config android.Config, partitionType string) avbInfo {
 
 func (f *filesystemCreator) createFileListDiffTest(ctx android.ModuleContext, partitionType string) android.Path {
 	partitionModuleName := generatedModuleNameForPartition(ctx.Config(), partitionType)
-	systemImage := ctx.GetDirectDepWithTag(partitionModuleName, generatedFilesystemDepTag)
-	filesystemInfo, ok := android.OtherModuleProvider(ctx, systemImage, filesystem.FilesystemProvider)
+	partitionImage := ctx.GetDirectDepWithTag(partitionModuleName, generatedFilesystemDepTag)
+	filesystemInfo, ok := android.OtherModuleProvider(ctx, partitionImage, filesystem.FilesystemProvider)
 	if !ok {
 		ctx.ModuleErrorf("Expected module %s to provide FileysystemInfo", partitionModuleName)
 	}
@@ -914,12 +939,12 @@ func createDiffTest(ctx android.ModuleContext, diffTestResultFile android.Writab
 	builder.Build("diff test "+diffTestResultFile.String(), "diff test")
 }
 
-type systemImageDepTagType struct {
+type imageDepTagType struct {
 	blueprint.BaseDependencyTag
 }
 
-var generatedFilesystemDepTag systemImageDepTagType
-var generatedVbmetaPartitionDepTag systemImageDepTagType
+var generatedFilesystemDepTag imageDepTagType
+var generatedVbmetaPartitionDepTag imageDepTagType
 
 func (f *filesystemCreator) DepsMutator(ctx android.BottomUpMutatorContext) {
 	for _, partitionType := range f.properties.Generated_partition_types {
