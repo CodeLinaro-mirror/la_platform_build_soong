@@ -145,7 +145,7 @@ func (a *androidDevice) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	a.buildTargetFilesZip(ctx)
 	var deps []android.Path
 	if proptools.String(a.partitionProps.Super_partition_name) != "" {
-		superImage := ctx.GetDirectDepWithTag(*a.partitionProps.Super_partition_name, superPartitionDepTag)
+		superImage := ctx.GetDirectDepProxyWithTag(*a.partitionProps.Super_partition_name, superPartitionDepTag)
 		if info, ok := android.OtherModuleProvider(ctx, superImage, SuperImageProvider); ok {
 			assertUnset := func(prop *string, propName string) {
 				if prop != nil && *prop != "" {
@@ -182,7 +182,7 @@ func (a *androidDevice) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 			ctx.ModuleErrorf("Expected super image dep to provide SuperImageProvider")
 		}
 	}
-	ctx.VisitDirectDepsWithTag(filesystemDepTag, func(m android.Module) {
+	ctx.VisitDirectDepsProxyWithTag(filesystemDepTag, func(m android.ModuleProxy) {
 		imageOutput, ok := android.OtherModuleProvider(ctx, m, android.OutputFilesProvider)
 		if !ok {
 			ctx.ModuleErrorf("Partition module %s doesn't set OutputfilesProvider", m.Name())
@@ -225,8 +225,14 @@ func (a *androidDevice) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	}
 }
 
+// Helper structs for target_files.zip creation
 type targetFilesZipCopy struct {
 	srcModule  *string
+	destSubdir string
+}
+
+type targetFilesystemZipCopy struct {
+	fsInfo     FilesystemInfo
 	destSubdir string
 }
 
@@ -256,30 +262,50 @@ func (a *androidDevice) buildTargetFilesZip(ctx android.ModuleContext) {
 		toCopy = append(toCopy, targetFilesZipCopy{a.partitionProps.Recovery_partition_name, "VENDOR_BOOT/RAMDISK"})
 	}
 
+	filesystemsToCopy := []targetFilesystemZipCopy{}
 	for _, zipCopy := range toCopy {
 		if zipCopy.srcModule == nil {
 			continue
 		}
-		fsInfo := a.getFilesystemInfo(ctx, *zipCopy.srcModule)
-		subdir := zipCopy.destSubdir
-		rootDirString := fsInfo.RootDir.String()
-		if subdir == "SYSTEM" {
+		filesystemsToCopy = append(
+			filesystemsToCopy,
+			targetFilesystemZipCopy{a.getFilesystemInfo(ctx, *zipCopy.srcModule), zipCopy.destSubdir},
+		)
+	}
+	// Get additional filesystems from super_partition dependency
+	if a.partitionProps.Super_partition_name != nil {
+		superPartition := ctx.GetDirectDepProxyWithTag(*a.partitionProps.Super_partition_name, superPartitionDepTag)
+		if info, ok := android.OtherModuleProvider(ctx, superPartition, SuperImageProvider); ok {
+			for _, partition := range android.SortedStringKeys(info.SubImageInfo) {
+				filesystemsToCopy = append(
+					filesystemsToCopy,
+					targetFilesystemZipCopy{info.SubImageInfo[partition], strings.ToUpper(partition)},
+				)
+			}
+		} else {
+			ctx.ModuleErrorf("Super partition %s does set SuperImageProvider\n", superPartition.Name())
+		}
+	}
+
+	for _, toCopy := range filesystemsToCopy {
+		rootDirString := toCopy.fsInfo.RootDir.String()
+		if toCopy.destSubdir == "SYSTEM" {
 			rootDirString = rootDirString + "/system"
 		}
-		builder.Command().Textf("mkdir -p %s/%s", targetFilesDir.String(), subdir)
+		builder.Command().Textf("mkdir -p %s/%s", targetFilesDir.String(), toCopy.destSubdir)
 		builder.Command().
 			BuiltTool("acp").
-			Textf("-rd %s/. %s/%s", rootDirString, targetFilesDir, subdir).
-			Implicit(fsInfo.Output) // so that the staging dir is built
+			Textf("-rd %s/. %s/%s", rootDirString, targetFilesDir, toCopy.destSubdir).
+			Implicit(toCopy.fsInfo.Output) // so that the staging dir is built
 
-		if subdir == "SYSTEM" {
+		if toCopy.destSubdir == "SYSTEM" {
 			// Create the ROOT partition in target_files.zip
-			builder.Command().Textf("rsync --links --exclude=system/* %s/ -r %s/ROOT", fsInfo.RootDir, targetFilesDir.String())
+			builder.Command().Textf("rsync --links --exclude=system/* %s/ -r %s/ROOT", toCopy.fsInfo.RootDir, targetFilesDir.String())
 		}
 	}
 	// Copy cmdline, kernel etc. files of boot images
 	if a.partitionProps.Vendor_boot_partition_name != nil {
-		bootImg := ctx.GetDirectDepWithTag(proptools.String(a.partitionProps.Vendor_boot_partition_name), filesystemDepTag)
+		bootImg := ctx.GetDirectDepProxyWithTag(proptools.String(a.partitionProps.Vendor_boot_partition_name), filesystemDepTag)
 		bootImgInfo, _ := android.OtherModuleProvider(ctx, bootImg, BootimgInfoProvider)
 		builder.Command().Textf("echo %s > %s/VENDOR_BOOT/cmdline", proptools.ShellEscape(strings.Join(bootImgInfo.Cmdline, " ")), targetFilesDir)
 		builder.Command().Textf("echo %s > %s/VENDOR_BOOT/vendor_cmdline", proptools.ShellEscape(strings.Join(bootImgInfo.Cmdline, " ")), targetFilesDir)
@@ -291,7 +317,7 @@ func (a *androidDevice) buildTargetFilesZip(ctx android.ModuleContext) {
 		}
 	}
 	if a.partitionProps.Boot_partition_name != nil {
-		bootImg := ctx.GetDirectDepWithTag(proptools.String(a.partitionProps.Boot_partition_name), filesystemDepTag)
+		bootImg := ctx.GetDirectDepProxyWithTag(proptools.String(a.partitionProps.Boot_partition_name), filesystemDepTag)
 		bootImgInfo, _ := android.OtherModuleProvider(ctx, bootImg, BootimgInfoProvider)
 		builder.Command().Textf("echo %s > %s/BOOT/cmdline", proptools.ShellEscape(strings.Join(bootImgInfo.Cmdline, " ")), targetFilesDir)
 		if bootImgInfo.Dtb != nil {
@@ -332,9 +358,13 @@ func (a *androidDevice) copyImagesToTargetZip(ctx android.ModuleContext, builder
 	}
 	// Copy the filesystem ,boot and vbmeta img files to IMAGES/
 	ctx.VisitDirectDepsProxyWithTag(filesystemDepTag, func(child android.ModuleProxy) {
-		if info, ok := android.OtherModuleProvider(ctx, child, FilesystemProvider); ok {
+		if strings.Contains(child.Name(), "recovery") {
+			return // skip recovery.img to match the make packaging behavior
+		}
+		if info, ok := android.OtherModuleProvider(ctx, child, BootimgInfoProvider); ok {
+			// Check Boot img first so that the boot.img is copied and not its dep ramdisk.img
 			builder.Command().Textf("cp ").Input(info.Output).Textf(" %s/IMAGES/", targetFilesDir.String())
-		} else if info, ok := android.OtherModuleProvider(ctx, child, BootimgInfoProvider); ok {
+		} else if info, ok := android.OtherModuleProvider(ctx, child, FilesystemProvider); ok {
 			builder.Command().Textf("cp ").Input(info.Output).Textf(" %s/IMAGES/", targetFilesDir.String())
 		} else if info, ok := android.OtherModuleProvider(ctx, child, vbmetaPartitionProvider); ok {
 			builder.Command().Textf("cp ").Input(info.Output).Textf(" %s/IMAGES/", targetFilesDir.String())
@@ -342,10 +372,22 @@ func (a *androidDevice) copyImagesToTargetZip(ctx android.ModuleContext, builder
 			ctx.ModuleErrorf("Module %s does not provide an .img file output for target_files.zip", child.Name())
 		}
 	})
+
+	if a.partitionProps.Super_partition_name != nil {
+		superPartition := ctx.GetDirectDepProxyWithTag(*a.partitionProps.Super_partition_name, superPartitionDepTag)
+		if info, ok := android.OtherModuleProvider(ctx, superPartition, SuperImageProvider); ok {
+			for _, partition := range android.SortedKeys(info.SubImageInfo) {
+				builder.Command().Textf("cp ").Input(info.SubImageInfo[partition].OutputHermetic).Textf(" %s/IMAGES/", targetFilesDir.String())
+				builder.Command().Textf("cp ").Input(info.SubImageInfo[partition].MapFile).Textf(" %s/IMAGES/", targetFilesDir.String())
+			}
+		} else {
+			ctx.ModuleErrorf("Super partition %s does set SuperImageProvider\n", superPartition.Name())
+		}
+	}
 }
 
 func (a *androidDevice) getFilesystemInfo(ctx android.ModuleContext, depName string) FilesystemInfo {
-	fsMod := ctx.GetDirectDepWithTag(depName, filesystemDepTag)
+	fsMod := ctx.GetDirectDepProxyWithTag(depName, filesystemDepTag)
 	fsInfo, ok := android.OtherModuleProvider(ctx, fsMod, FilesystemProvider)
 	if !ok {
 		ctx.ModuleErrorf("Expected dependency %s to be a filesystem", depName)

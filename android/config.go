@@ -2175,6 +2175,10 @@ func (c *config) UseTransitiveJarsInClasspath() bool {
 	return c.productVariables.GetBuildFlagBool("RELEASE_USE_TRANSITIVE_JARS_IN_CLASSPATH")
 }
 
+func (c *config) UseR8OnlyRuntimeVisibleAnnotations() bool {
+	return c.productVariables.GetBuildFlagBool("RELEASE_R8_ONLY_RUNTIME_VISIBLE_ANNOTATIONS")
+}
+
 func (c *config) UseR8StoreStoreFenceConstructorInlining() bool {
 	return c.productVariables.GetBuildFlagBool("RELEASE_R8_STORE_STORE_FENCE_CONSTRUCTOR_INLINING")
 }
@@ -2284,10 +2288,6 @@ func (c *config) OdmPropFiles(ctx PathContext) Paths {
 
 func (c *config) VendorPropFiles(ctx PathContext) Paths {
 	return PathsForSource(ctx, c.productVariables.VendorPropFiles)
-}
-
-func (c *config) ExtraAllowedDepsTxt() string {
-	return String(c.productVariables.ExtraAllowedDepsTxt)
 }
 
 func (c *config) EnableUffdGc() string {
