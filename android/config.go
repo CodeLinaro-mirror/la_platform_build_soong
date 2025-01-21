@@ -173,6 +173,13 @@ func (c Config) DisableVerifyOverlaps() bool {
 	return c.IsEnvTrue("DISABLE_VERIFY_OVERLAPS") || c.ReleaseDisableVerifyOverlaps() || !c.ReleaseDefaultModuleBuildFromSource()
 }
 
+func (c Config) CoverageSuffix() string {
+	if v := c.IsEnvTrue("EMMA_INSTRUMENT"); v {
+		return "coverage."
+	}
+	return ""
+}
+
 // MaxPageSizeSupported returns the max page size supported by the device. This
 // value will define the ELF segment alignment for binaries (executables and
 // shared libraries).
@@ -198,10 +205,42 @@ func (c Config) ReleaseAconfigValueSets() []string {
 	return c.config.productVariables.ReleaseAconfigValueSets
 }
 
+func (c Config) ReleaseAconfigExtraReleaseConfigs() []string {
+	result := []string{}
+	if val, ok := c.config.productVariables.BuildFlags["RELEASE_ACONFIG_EXTRA_RELEASE_CONFIGS"]; ok {
+		if len(val) > 0 {
+			// Remove any duplicates from the list.
+			found := make(map[string]bool)
+			for _, k := range strings.Split(val, " ") {
+				if !found[k] {
+					found[k] = true
+					result = append(result, k)
+				}
+			}
+		}
+	}
+	return result
+}
+
+func (c Config) ReleaseAconfigExtraReleaseConfigsValueSets() map[string][]string {
+	result := make(map[string][]string)
+	for _, rcName := range c.ReleaseAconfigExtraReleaseConfigs() {
+		if value, ok := c.config.productVariables.BuildFlags["RELEASE_ACONFIG_VALUE_SETS_"+rcName]; ok {
+			result[rcName] = strings.Split(value, " ")
+		}
+	}
+	return result
+}
+
 // The flag default permission value passed to aconfig
 // derived from RELEASE_ACONFIG_FLAG_DEFAULT_PERMISSION
 func (c Config) ReleaseAconfigFlagDefaultPermission() string {
 	return c.config.productVariables.ReleaseAconfigFlagDefaultPermission
+}
+
+// Enable object size sanitizer
+func (c Config) ReleaseBuildObjectSizeSanitizer() bool {
+	return c.config.productVariables.GetBuildFlagBool("RELEASE_BUILD_OBJECT_SIZE_SANITIZER")
 }
 
 // The flag indicating behavior for the tree wrt building modules or using prebuilts
@@ -321,9 +360,6 @@ type config struct {
 	// modules that aren't mixed-built for at least one variant will cause a build
 	// failure
 	ensureAllowlistIntegrity bool
-
-	// List of Api libraries that contribute to Api surfaces.
-	apiLibraries map[string]struct{}
 }
 
 type deviceConfig struct {
@@ -573,40 +609,6 @@ func NewConfig(cmdArgs CmdArgs, availableEnv map[string]string) (Config, error) 
 	setBuildMode(cmdArgs.ModuleGraphFile, GenerateModuleGraph)
 	setBuildMode(cmdArgs.DocFile, GenerateDocFile)
 
-	// TODO(b/276958307): Replace the hardcoded list to a sdk_library local prop.
-	config.apiLibraries = map[string]struct{}{
-		"android.net.ipsec.ike":             {},
-		"art.module.public.api":             {},
-		"conscrypt.module.public.api":       {},
-		"framework-adservices":              {},
-		"framework-appsearch":               {},
-		"framework-bluetooth":               {},
-		"framework-configinfrastructure":    {},
-		"framework-connectivity":            {},
-		"framework-connectivity-t":          {},
-		"framework-devicelock":              {},
-		"framework-graphics":                {},
-		"framework-healthfitness":           {},
-		"framework-location":                {},
-		"framework-media":                   {},
-		"framework-mediaprovider":           {},
-		"framework-nfc":                     {},
-		"framework-ondevicepersonalization": {},
-		"framework-pdf":                     {},
-		"framework-pdf-v":                   {},
-		"framework-permission":              {},
-		"framework-permission-s":            {},
-		"framework-scheduling":              {},
-		"framework-sdkextensions":           {},
-		"framework-statsd":                  {},
-		"framework-sdksandbox":              {},
-		"framework-tethering":               {},
-		"framework-uwb":                     {},
-		"framework-virtualization":          {},
-		"framework-wifi":                    {},
-		"i18n.module.public.api":            {},
-	}
-
 	config.productVariables.Build_from_text_stub = boolPtr(config.BuildFromTextStub())
 
 	return Config{config}, err
@@ -782,6 +784,17 @@ func (c *config) BuildId() string {
 
 func (c *config) DisplayBuildNumber() bool {
 	return Bool(c.productVariables.DisplayBuildNumber)
+}
+
+// BuildFingerprintFile returns the path to a text file containing metadata
+// representing the current build's fingerprint.
+//
+// Rules that want to reference the build fingerprint should read from this file
+// without depending on it. They will run whenever their other dependencies
+// require them to run and get the current build fingerprint. This ensures they
+// don't rebuild on every incremental build when the build number changes.
+func (c *config) BuildFingerprintFile(ctx PathContext) Path {
+	return PathForArbitraryOutput(ctx, "target", "product", c.DeviceName(), String(c.productVariables.BuildFingerprintFile))
 }
 
 // BuildNumberFile returns the path to a text file containing metadata
@@ -1022,6 +1035,22 @@ func (c *config) DefaultAppCertificate(ctx PathContext) (pem, key SourcePath) {
 	return defaultDir.Join(ctx, "testkey.x509.pem"), defaultDir.Join(ctx, "testkey.pk8")
 }
 
+func (c *config) ExtraOtaKeys(ctx PathContext, recovery bool) []SourcePath {
+	var otaKeys []string
+	if recovery {
+		otaKeys = c.productVariables.ExtraOtaRecoveryKeys
+	} else {
+		otaKeys = c.productVariables.ExtraOtaKeys
+	}
+
+	otaPaths := make([]SourcePath, len(otaKeys))
+	for i, key := range otaKeys {
+		otaPaths[i] = PathForSource(ctx, key+".x509.pem")
+	}
+
+	return otaPaths
+}
+
 func (c *config) BuildKeys() string {
 	defaultCert := String(c.productVariables.DefaultAppCertificate)
 	if defaultCert == "" || defaultCert == filepath.Join(testKeyDir, "testkey") {
@@ -1144,6 +1173,10 @@ func (c *config) Android64() bool {
 
 func (c *config) UseGoma() bool {
 	return Bool(c.productVariables.UseGoma)
+}
+
+func (c *config) UseABFS() bool {
+	return Bool(c.productVariables.UseABFS)
 }
 
 func (c *config) UseRBE() bool {
@@ -1307,10 +1340,6 @@ func (c *config) FrameworksBaseDirExists(ctx PathGlobContext) bool {
 	return ExistentPathForSource(ctx, "frameworks", "base", "Android.bp").Valid()
 }
 
-func (c *config) VndkSnapshotBuildArtifacts() bool {
-	return Bool(c.productVariables.VndkSnapshotBuildArtifacts)
-}
-
 func (c *config) HasMultilibConflict(arch ArchType) bool {
 	return c.multilibConflicts[arch]
 }
@@ -1372,10 +1401,6 @@ func (c *deviceConfig) VendorPath() string {
 		return *c.config.productVariables.VendorPath
 	}
 	return "vendor"
-}
-
-func (c *deviceConfig) RecoverySnapshotVersion() string {
-	return String(c.config.productVariables.RecoverySnapshotVersion)
 }
 
 func (c *deviceConfig) CurrentApiLevelForVendorModules() string {
@@ -1475,11 +1500,6 @@ func (c *deviceConfig) NativeCoverageEnabledForPath(path string) bool {
 		}
 	}
 	if coverage && len(c.config.productVariables.NativeCoverageExcludePaths) > 0 {
-		// Workaround coverage boot failure.
-		// http://b/269981180
-		if strings.HasPrefix(path, "external/protobuf") {
-			coverage = false
-		}
 		if HasAnyPrefix(path, c.config.productVariables.NativeCoverageExcludePaths) {
 			coverage = false
 		}
@@ -1648,6 +1668,17 @@ func (c *config) ApexTrimEnabled() bool {
 	return Bool(c.productVariables.TrimmedApex)
 }
 
+func (c *config) UseSoongSystemImage() bool {
+	return Bool(c.productVariables.UseSoongSystemImage)
+}
+
+func (c *config) SoongDefinedSystemImage() string {
+	if c.UseSoongSystemImage() {
+		return String(c.productVariables.ProductSoongDefinedSystemImage)
+	}
+	return ""
+}
+
 func (c *config) EnforceSystemCertificate() bool {
 	return Bool(c.productVariables.EnforceSystemCertificate)
 }
@@ -1755,22 +1786,6 @@ func (c *deviceConfig) IsPartnerTrebleSepolicyTestEnabled() bool {
 	return c.SystemExtSepolicyPrebuiltApiDir() != "" || c.ProductSepolicyPrebuiltApiDir() != ""
 }
 
-func (c *deviceConfig) DirectedVendorSnapshot() bool {
-	return c.config.productVariables.DirectedVendorSnapshot
-}
-
-func (c *deviceConfig) VendorSnapshotModules() map[string]bool {
-	return c.config.productVariables.VendorSnapshotModules
-}
-
-func (c *deviceConfig) DirectedRecoverySnapshot() bool {
-	return c.config.productVariables.DirectedRecoverySnapshot
-}
-
-func (c *deviceConfig) RecoverySnapshotModules() map[string]bool {
-	return c.config.productVariables.RecoverySnapshotModules
-}
-
 func createDirsMap(previous map[string]bool, dirs []string) (map[string]bool, error) {
 	var ret = make(map[string]bool)
 	for _, dir := range dirs {
@@ -1795,40 +1810,6 @@ func (c *deviceConfig) createDirsMapOnce(onceKey OnceKey, previous map[string]bo
 		return nil
 	}
 	return dirMap.(map[string]bool)
-}
-
-var vendorSnapshotDirsExcludedKey = NewOnceKey("VendorSnapshotDirsExcludedMap")
-
-func (c *deviceConfig) VendorSnapshotDirsExcludedMap() map[string]bool {
-	return c.createDirsMapOnce(vendorSnapshotDirsExcludedKey, nil,
-		c.config.productVariables.VendorSnapshotDirsExcluded)
-}
-
-var vendorSnapshotDirsIncludedKey = NewOnceKey("VendorSnapshotDirsIncludedMap")
-
-func (c *deviceConfig) VendorSnapshotDirsIncludedMap() map[string]bool {
-	excludedMap := c.VendorSnapshotDirsExcludedMap()
-	return c.createDirsMapOnce(vendorSnapshotDirsIncludedKey, excludedMap,
-		c.config.productVariables.VendorSnapshotDirsIncluded)
-}
-
-var recoverySnapshotDirsExcludedKey = NewOnceKey("RecoverySnapshotDirsExcludedMap")
-
-func (c *deviceConfig) RecoverySnapshotDirsExcludedMap() map[string]bool {
-	return c.createDirsMapOnce(recoverySnapshotDirsExcludedKey, nil,
-		c.config.productVariables.RecoverySnapshotDirsExcluded)
-}
-
-var recoverySnapshotDirsIncludedKey = NewOnceKey("RecoverySnapshotDirsIncludedMap")
-
-func (c *deviceConfig) RecoverySnapshotDirsIncludedMap() map[string]bool {
-	excludedMap := c.RecoverySnapshotDirsExcludedMap()
-	return c.createDirsMapOnce(recoverySnapshotDirsIncludedKey, excludedMap,
-		c.config.productVariables.RecoverySnapshotDirsIncluded)
-}
-
-func (c *deviceConfig) HostFakeSnapshotEnabled() bool {
-	return c.config.productVariables.HostFakeSnapshotEnabled
 }
 
 func (c *deviceConfig) ShippingApiLevel() ApiLevel {
@@ -1863,10 +1844,6 @@ func (c *deviceConfig) BuildBrokenTrebleSyspropNeverallow() bool {
 	return c.config.productVariables.BuildBrokenTrebleSyspropNeverallow
 }
 
-func (c *deviceConfig) BuildBrokenUsesSoongPython2Modules() bool {
-	return c.config.productVariables.BuildBrokenUsesSoongPython2Modules
-}
-
 func (c *deviceConfig) BuildDebugfsRestrictionsEnabled() bool {
 	return c.config.productVariables.BuildDebugfsRestrictionsEnabled
 }
@@ -1881,6 +1858,10 @@ func (c *deviceConfig) BuildBrokenInputDir(name string) bool {
 
 func (c *deviceConfig) BuildBrokenDontCheckSystemSdk() bool {
 	return c.config.productVariables.BuildBrokenDontCheckSystemSdk
+}
+
+func (c *deviceConfig) BuildBrokenDupSysprop() bool {
+	return c.config.productVariables.BuildBrokenDupSysprop
 }
 
 func (c *config) BuildWarningBadOptionalUsesLibsAllowlist() []string {
@@ -1980,17 +1961,6 @@ func (c *config) SetBuildFromTextStub(b bool) {
 	c.productVariables.Build_from_text_stub = boolPtr(b)
 }
 
-func (c *config) SetApiLibraries(libs []string) {
-	c.apiLibraries = make(map[string]struct{})
-	for _, lib := range libs {
-		c.apiLibraries[lib] = struct{}{}
-	}
-}
-
-func (c *config) GetApiLibraries() map[string]struct{} {
-	return c.apiLibraries
-}
-
 func (c *deviceConfig) CheckVendorSeappViolations() bool {
 	return Bool(c.config.productVariables.CheckVendorSeappViolations)
 }
@@ -2000,8 +1970,16 @@ func (c *config) GetBuildFlag(name string) (string, bool) {
 	return val, ok
 }
 
+func (c *config) UseOptimizedResourceShrinkingByDefault() bool {
+	return c.productVariables.GetBuildFlagBool("RELEASE_USE_OPTIMIZED_RESOURCE_SHRINKING_BY_DEFAULT")
+}
+
 func (c *config) UseResourceProcessorByDefault() bool {
 	return c.productVariables.GetBuildFlagBool("RELEASE_USE_RESOURCE_PROCESSOR_BY_DEFAULT")
+}
+
+func (c *config) UseTransitiveJarsInClasspath() bool {
+	return c.productVariables.GetBuildFlagBool("RELEASE_USE_TRANSITIVE_JARS_IN_CLASSPATH")
 }
 
 var (
@@ -2077,4 +2055,48 @@ func (c *config) BoardUseVbmetaDigestInFingerprint() bool {
 
 func (c *config) OemProperties() []string {
 	return c.productVariables.OemProperties
+}
+
+func (c *config) UseDebugArt() bool {
+	if c.productVariables.ArtTargetIncludeDebugBuild != nil {
+		return Bool(c.productVariables.ArtTargetIncludeDebugBuild)
+	}
+
+	return Bool(c.productVariables.Eng)
+}
+
+func (c *config) SystemPropFiles(ctx PathContext) Paths {
+	return PathsForSource(ctx, c.productVariables.SystemPropFiles)
+}
+
+func (c *config) SystemExtPropFiles(ctx PathContext) Paths {
+	return PathsForSource(ctx, c.productVariables.SystemExtPropFiles)
+}
+
+func (c *config) ProductPropFiles(ctx PathContext) Paths {
+	return PathsForSource(ctx, c.productVariables.ProductPropFiles)
+}
+
+func (c *config) OdmPropFiles(ctx PathContext) Paths {
+	return PathsForSource(ctx, c.productVariables.OdmPropFiles)
+}
+
+func (c *config) EnableUffdGc() string {
+	return String(c.productVariables.EnableUffdGc)
+}
+
+func (c *config) DeviceFrameworkCompatibilityMatrixFile() []string {
+	return c.productVariables.DeviceFrameworkCompatibilityMatrixFile
+}
+
+func (c *config) DeviceProductCompatibilityMatrixFile() []string {
+	return c.productVariables.DeviceProductCompatibilityMatrixFile
+}
+
+func (c *config) BoardAvbEnable() bool {
+	return Bool(c.productVariables.BoardAvbEnable)
+}
+
+func (c *config) BoardAvbSystemAddHashtreeFooterArgs() []string {
+	return c.productVariables.BoardAvbSystemAddHashtreeFooterArgs
 }
