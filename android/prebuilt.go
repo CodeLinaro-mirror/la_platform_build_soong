@@ -381,10 +381,10 @@ func GetEmbeddedPrebuilt(module Module) *Prebuilt {
 // the right module. This function is only safe to call after all TransitionMutators
 // have run, e.g. in GenerateAndroidBuildActions.
 func PrebuiltGetPreferred(ctx BaseModuleContext, module Module) Module {
-	if !OtherModuleProviderOrDefault(ctx, module, CommonPropertiesProviderKey).ReplacedByPrebuilt {
+	if !OtherModuleProviderOrDefault(ctx, module, CommonModuleInfoKey).ReplacedByPrebuilt {
 		return module
 	}
-	if _, ok := OtherModuleProvider(ctx, module, PrebuiltModuleProviderKey); ok {
+	if _, ok := OtherModuleProvider(ctx, module, PrebuiltModuleInfoProvider); ok {
 		// If we're given a prebuilt then assume there's no source module around.
 		return module
 	}
@@ -569,6 +569,7 @@ func hideUnflaggedModules(ctx BottomUpMutatorContext, psi PrebuiltSelectionInfoM
 		for _, moduleInFamily := range allModulesInFamily {
 			if moduleInFamily.Name() != selectedModuleInFamily.Name() {
 				moduleInFamily.HideFromMake()
+				moduleInFamily.SkipInstall()
 				// If this is a prebuilt module, unset properties.UsePrebuilt
 				// properties.UsePrebuilt might evaluate to true via soong config var fallback mechanism
 				// Set it to false explicitly so that the following mutator does not replace rdeps to this unselected prebuilt
@@ -639,6 +640,7 @@ func PrebuiltPostDepsMutator(ctx BottomUpMutatorContext) {
 			}
 		} else {
 			m.HideFromMake()
+			m.SkipInstall()
 		}
 	}
 }

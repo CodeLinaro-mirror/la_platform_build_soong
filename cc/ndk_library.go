@@ -133,22 +133,20 @@ type stubDecorator struct {
 	unversionedUntil android.ApiLevel
 }
 
-var _ versionedInterface = (*stubDecorator)(nil)
+var _ VersionedInterface = (*stubDecorator)(nil)
 
 func shouldUseVersionScript(ctx BaseModuleContext, stub *stubDecorator) bool {
 	return stub.apiLevel.GreaterThanOrEqualTo(stub.unversionedUntil)
 }
 
-func (stub *stubDecorator) implementationModuleName(name string) string {
+func (stub *stubDecorator) ImplementationModuleName(name string) string {
 	return strings.TrimSuffix(name, ndkLibrarySuffix)
 }
 
 func ndkLibraryVersions(ctx android.BaseModuleContext, from android.ApiLevel) []string {
-	var versions []android.ApiLevel
 	versionStrs := []string{}
-	for _, version := range ctx.Config().AllSupportedApiLevels() {
+	for _, version := range ctx.Config().FinalApiLevels() {
 		if version.GreaterThanOrEqualTo(from) {
-			versions = append(versions, version)
 			versionStrs = append(versionStrs, version.String())
 		}
 	}
@@ -157,7 +155,7 @@ func ndkLibraryVersions(ctx android.BaseModuleContext, from android.ApiLevel) []
 	return versionStrs
 }
 
-func (this *stubDecorator) stubsVersions(ctx android.BaseModuleContext) []string {
+func (this *stubDecorator) StubsVersions(ctx android.BaseModuleContext) []string {
 	if !ctx.Module().Enabled(ctx) {
 		return nil
 	}
@@ -165,7 +163,7 @@ func (this *stubDecorator) stubsVersions(ctx android.BaseModuleContext) []string
 		ctx.Module().Disable()
 		return nil
 	}
-	firstVersion, err := nativeApiLevelFromUser(ctx,
+	firstVersion, err := NativeApiLevelFromUser(ctx,
 		String(this.properties.First_version))
 	if err != nil {
 		ctx.PropertyErrorf("first_version", err.Error())
@@ -175,10 +173,10 @@ func (this *stubDecorator) stubsVersions(ctx android.BaseModuleContext) []string
 }
 
 func (this *stubDecorator) initializeProperties(ctx BaseModuleContext) bool {
-	this.apiLevel = nativeApiLevelOrPanic(ctx, this.stubsVersion())
+	this.apiLevel = nativeApiLevelOrPanic(ctx, this.StubsVersion())
 
 	var err error
-	this.firstVersion, err = nativeApiLevelFromUser(ctx,
+	this.firstVersion, err = NativeApiLevelFromUser(ctx,
 		String(this.properties.First_version))
 	if err != nil {
 		ctx.PropertyErrorf("first_version", err.Error())
@@ -186,7 +184,7 @@ func (this *stubDecorator) initializeProperties(ctx BaseModuleContext) bool {
 	}
 
 	str := proptools.StringDefault(this.properties.Unversioned_until, "minimum")
-	this.unversionedUntil, err = nativeApiLevelFromUser(ctx, str)
+	this.unversionedUntil, err = NativeApiLevelFromUser(ctx, str)
 	if err != nil {
 		ctx.PropertyErrorf("unversioned_until", err.Error())
 		return false
@@ -238,7 +236,7 @@ func init() {
 	pctx.StaticVariable("StubLibraryCompilerFlags", strings.Join(stubLibraryCompilerFlags, " "))
 }
 
-func addStubLibraryCompilerFlags(flags Flags) Flags {
+func AddStubLibraryCompilerFlags(flags Flags) Flags {
 	flags.Global.CFlags = append(flags.Global.CFlags, stubLibraryCompilerFlags...)
 	// All symbols in the stubs library should be visible.
 	if inList("-fvisibility=hidden", flags.Local.CFlags) {
@@ -249,17 +247,17 @@ func addStubLibraryCompilerFlags(flags Flags) Flags {
 
 func (stub *stubDecorator) compilerFlags(ctx ModuleContext, flags Flags, deps PathDeps) Flags {
 	flags = stub.baseCompiler.compilerFlags(ctx, flags, deps)
-	return addStubLibraryCompilerFlags(flags)
+	return AddStubLibraryCompilerFlags(flags)
 }
 
-type ndkApiOutputs struct {
-	stubSrc       android.ModuleGenPath
-	versionScript android.ModuleGenPath
+type NdkApiOutputs struct {
+	StubSrc       android.ModuleGenPath
+	VersionScript android.ModuleGenPath
 	symbolList    android.ModuleGenPath
 }
 
-func parseNativeAbiDefinition(ctx ModuleContext, symbolFile string,
-	apiLevel android.ApiLevel, genstubFlags string) ndkApiOutputs {
+func ParseNativeAbiDefinition(ctx android.ModuleContext, symbolFile string,
+	apiLevel android.ApiLevel, genstubFlags string) NdkApiOutputs {
 
 	stubSrcPath := android.PathForModuleGen(ctx, "stub.c")
 	versionScriptPath := android.PathForModuleGen(ctx, "stub.map")
@@ -281,37 +279,36 @@ func parseNativeAbiDefinition(ctx ModuleContext, symbolFile string,
 		},
 	})
 
-	return ndkApiOutputs{
-		stubSrc:       stubSrcPath,
-		versionScript: versionScriptPath,
+	return NdkApiOutputs{
+		StubSrc:       stubSrcPath,
+		VersionScript: versionScriptPath,
 		symbolList:    symbolListPath,
 	}
 }
 
-func compileStubLibrary(ctx ModuleContext, flags Flags, src android.Path) Objects {
+func CompileStubLibrary(ctx android.ModuleContext, flags Flags, src android.Path, sharedFlags *SharedFlags) Objects {
 	// libc/libm stubs libraries end up mismatching with clang's internal definition of these
 	// functions (which have noreturn attributes and other things). Because we just want to create a
 	// stub with symbol definitions, and types aren't important in C, ignore the mismatch.
 	flags.Local.ConlyFlags = append(flags.Local.ConlyFlags, "-fno-builtin")
 	return compileObjs(ctx, flagsToBuilderFlags(flags), "",
-		android.Paths{src}, nil, nil, nil, nil)
+		android.Paths{src}, nil, nil, nil, nil, sharedFlags)
 }
 
 func (this *stubDecorator) findImplementationLibrary(ctx ModuleContext) android.Path {
-	dep := ctx.GetDirectDepWithTag(strings.TrimSuffix(ctx.ModuleName(), ndkLibrarySuffix),
+	dep := ctx.GetDirectDepProxyWithTag(strings.TrimSuffix(ctx.ModuleName(), ndkLibrarySuffix),
 		stubImplementation)
 	if dep == nil {
-		ctx.ModuleErrorf("Could not find implementation for stub")
+		ctx.ModuleErrorf("Could not find implementation for stub: ")
 		return nil
 	}
-	impl, ok := dep.(*Module)
-	if !ok {
+	if _, ok := android.OtherModuleProvider(ctx, *dep, CcInfoProvider); !ok {
 		ctx.ModuleErrorf("Implementation for stub is not correct module type")
 		return nil
 	}
-	output := impl.UnstrippedOutputFile()
+	output := android.OtherModuleProviderOrDefault(ctx, *dep, LinkableInfoProvider).UnstrippedOutputFile
 	if output == nil {
-		ctx.ModuleErrorf("implementation module (%s) has no output", impl)
+		ctx.ModuleErrorf("implementation module (%s) has no output", *dep)
 		return nil
 	}
 
@@ -330,6 +327,12 @@ func (this *stubDecorator) findPrebuiltAbiDump(ctx ModuleContext,
 	return android.ExistentPathForSource(ctx, subpath)
 }
 
+func (this *stubDecorator) builtAbiDumpLocation(ctx ModuleContext, apiLevel android.ApiLevel) android.OutputPath {
+	return getNdkAbiDumpInstallBase(ctx).Join(ctx,
+		apiLevel.String(), ctx.Arch().ArchType.String(),
+		this.libraryName(ctx), "abi.stg")
+}
+
 // Feature flag.
 func (this *stubDecorator) canDumpAbi(ctx ModuleContext) bool {
 	if runtime.GOOS == "darwin" {
@@ -345,25 +348,24 @@ func (this *stubDecorator) canDumpAbi(ctx ModuleContext) bool {
 		return false
 	}
 
-	if this.apiLevel.IsCurrent() {
-		// "current" (AKA 10000) is not tracked.
-		return false
-	}
-
 	// http://b/156513478
 	return ctx.Config().ReleaseNdkAbiMonitored()
 }
 
 // Feature flag to disable diffing against prebuilts.
-func canDiffAbi(config android.Config) bool {
+func (this *stubDecorator) canDiffAbi(config android.Config) bool {
+	if this.apiLevel.IsCurrent() {
+		// Diffs are performed from this to next, and there's nothing after
+		// current.
+		return false
+	}
+
 	return config.ReleaseNdkAbiMonitored()
 }
 
 func (this *stubDecorator) dumpAbi(ctx ModuleContext, symbolList android.Path) {
 	implementationLibrary := this.findImplementationLibrary(ctx)
-	this.abiDumpPath = getNdkAbiDumpInstallBase(ctx).Join(ctx,
-		this.apiLevel.String(), ctx.Arch().ArchType.String(),
-		this.libraryName(ctx), "abi.stg")
+	this.abiDumpPath = this.builtAbiDumpLocation(ctx, this.apiLevel)
 	this.hasAbiDump = true
 	headersList := getNdkABIHeadersFile(ctx)
 	ctx.Build(pctx, android.BuildParams{
@@ -383,7 +385,7 @@ func (this *stubDecorator) dumpAbi(ctx ModuleContext, symbolList android.Path) {
 }
 
 func findNextApiLevel(ctx ModuleContext, apiLevel android.ApiLevel) *android.ApiLevel {
-	apiLevels := append(ctx.Config().AllSupportedApiLevels(),
+	apiLevels := append(ctx.Config().FinalApiLevels(),
 		android.FutureApiLevel)
 	for _, api := range apiLevels {
 		if api.GreaterThan(apiLevel) {
@@ -436,38 +438,49 @@ func (this *stubDecorator) diffAbi(ctx ModuleContext) {
 				"non-current API level %s", this.apiLevel))
 		}
 
-		// "current" ABI is not tracked.
-		if !nextApiLevel.IsCurrent() {
-			nextAbiDiffPath := android.PathForModuleOut(ctx,
-				"abidiff_next.timestamp")
-			nextAbiDump := this.findPrebuiltAbiDump(ctx, *nextApiLevel)
+		// Preview ABI levels are not recorded in prebuilts. ABI compatibility
+		// for preview APIs is still monitored via "current" so we have early
+		// warning rather than learning about an ABI break during finalization,
+		// but is only checked against the "current" API dumps in the out
+		// directory.
+		nextAbiDiffPath := android.PathForModuleOut(ctx,
+			"abidiff_next.timestamp")
+
+		var nextAbiDump android.OptionalPath
+		if nextApiLevel.IsCurrent() {
+			nextAbiDump = android.OptionalPathForPath(
+				this.builtAbiDumpLocation(ctx, *nextApiLevel),
+			)
+		} else {
+			nextAbiDump = this.findPrebuiltAbiDump(ctx, *nextApiLevel)
+		}
+
+		if !nextAbiDump.Valid() {
 			missingNextPrebuiltError := fmt.Sprintf(
 				missingPrebuiltErrorTemplate, this.libraryName(ctx),
 				nextAbiDump.InvalidReason())
-			if !nextAbiDump.Valid() {
-				ctx.Build(pctx, android.BuildParams{
-					Rule:   android.ErrorRule,
-					Output: nextAbiDiffPath,
-					Args: map[string]string{
-						"error": missingNextPrebuiltError,
-					},
-				})
-			} else {
-				ctx.Build(pctx, android.BuildParams{
-					Rule: stgdiff,
-					Description: fmt.Sprintf(
-						"Comparing ABI to the next API level %s %s",
-						prebuiltAbiDump, nextAbiDump),
-					Output: nextAbiDiffPath,
-					Inputs: android.Paths{
-						prebuiltAbiDump.Path(), nextAbiDump.Path()},
-					Args: map[string]string{
-						"args": "--format=small --ignore=interface_addition",
-					},
-				})
-			}
-			this.abiDiffPaths = append(this.abiDiffPaths, nextAbiDiffPath)
+			ctx.Build(pctx, android.BuildParams{
+				Rule:   android.ErrorRule,
+				Output: nextAbiDiffPath,
+				Args: map[string]string{
+					"error": missingNextPrebuiltError,
+				},
+			})
+		} else {
+			ctx.Build(pctx, android.BuildParams{
+				Rule: stgdiff,
+				Description: fmt.Sprintf(
+					"Comparing ABI to the next API level %s %s",
+					prebuiltAbiDump, nextAbiDump),
+				Output: nextAbiDiffPath,
+				Inputs: android.Paths{
+					prebuiltAbiDump.Path(), nextAbiDump.Path()},
+				Args: map[string]string{
+					"args": "--format=small --ignore=interface_addition",
+				},
+			})
 		}
+		this.abiDiffPaths = append(this.abiDiffPaths, nextAbiDiffPath)
 	}
 }
 
@@ -476,7 +489,7 @@ func (c *stubDecorator) compile(ctx ModuleContext, flags Flags, deps PathDeps) O
 		ctx.PropertyErrorf("symbol_file", "must end with .map.txt")
 	}
 
-	if !c.buildStubs() {
+	if !c.BuildStubs() {
 		// NDK libraries have no implementation variant, nothing to do
 		return Objects{}
 	}
@@ -487,17 +500,17 @@ func (c *stubDecorator) compile(ctx ModuleContext, flags Flags, deps PathDeps) O
 	}
 
 	symbolFile := String(c.properties.Symbol_file)
-	nativeAbiResult := parseNativeAbiDefinition(ctx, symbolFile, c.apiLevel, "")
-	objs := compileStubLibrary(ctx, flags, nativeAbiResult.stubSrc)
-	c.versionScriptPath = nativeAbiResult.versionScript
+	nativeAbiResult := ParseNativeAbiDefinition(ctx, symbolFile, c.apiLevel, "")
+	objs := CompileStubLibrary(ctx, flags, nativeAbiResult.StubSrc, ctx.getSharedFlags())
+	c.versionScriptPath = nativeAbiResult.VersionScript
 	if c.canDumpAbi(ctx) {
 		c.dumpAbi(ctx, nativeAbiResult.symbolList)
-		if canDiffAbi(ctx.Config()) {
+		if c.canDiffAbi(ctx.Config()) {
 			c.diffAbi(ctx)
 		}
 	}
 	if c.apiLevel.IsCurrent() && ctx.PrimaryArch() {
-		c.parsedCoverageXmlPath = parseSymbolFileForAPICoverage(ctx, symbolFile)
+		c.parsedCoverageXmlPath = ParseSymbolFileForAPICoverage(ctx, symbolFile)
 	}
 	return objs
 }
@@ -528,7 +541,7 @@ func (stub *stubDecorator) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 func (stub *stubDecorator) link(ctx ModuleContext, flags Flags, deps PathDeps,
 	objs Objects) android.Path {
 
-	if !stub.buildStubs() {
+	if !stub.BuildStubs() {
 		// NDK libraries have no implementation variant, nothing to do
 		return nil
 	}

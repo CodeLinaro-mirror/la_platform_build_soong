@@ -88,9 +88,7 @@ func init() {
 }
 
 type SourceFileGenerator interface {
-	GeneratedSourceFiles() android.Paths
-	GeneratedHeaderDirs() android.Paths
-	GeneratedDeps() android.Paths
+	android.SourceFileGenerator
 }
 
 // Alias for android.HostToolProvider
@@ -115,7 +113,7 @@ func (t hostToolDependencyTag) AllowDisabledModuleDependency(target android.Modu
 func (t hostToolDependencyTag) AllowDisabledModuleDependencyProxy(
 	ctx android.OtherModuleProviderContext, target android.ModuleProxy) bool {
 	return android.OtherModuleProviderOrDefault(
-		ctx, target, android.CommonPropertiesProviderKey).ReplacedByPrebuilt
+		ctx, target, android.CommonModuleInfoKey).ReplacedByPrebuilt
 }
 
 var _ android.AllowDisabledModuleDependency = (*hostToolDependencyTag)(nil)
@@ -230,8 +228,9 @@ type generateTask struct {
 	shards int
 
 	// For nsjail tasks
-	useNsjail bool
-	dirSrcs   android.Paths
+	useNsjail  bool
+	dirSrcs    android.DirectoryPaths
+	keepGendir bool
 }
 
 func (g *Module) GeneratedSourceFiles() android.Paths {
@@ -353,7 +352,7 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 				if h, ok := android.OtherModuleProvider(ctx, module, android.HostToolProviderKey); ok {
 					// A HostToolProvider provides the path to a tool, which will be copied
 					// into the sandbox.
-					if !android.OtherModuleProviderOrDefault(ctx, module, android.CommonPropertiesProviderKey).Enabled {
+					if !android.OtherModuleProviderOrDefault(ctx, module, android.CommonModuleInfoKey).Enabled {
 						if ctx.Config().AllowMissingDependencies() {
 							ctx.AddMissingDependencies([]string{tool})
 						} else {
@@ -454,7 +453,6 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 	srcFiles = append(srcFiles, addLabelsForInputs("device_first_srcs", g.properties.Device_first_srcs.GetOrDefault(ctx, nil), nil)...)
 	srcFiles = append(srcFiles, addLabelsForInputs("device_common_srcs", g.properties.Device_common_srcs.GetOrDefault(ctx, nil), nil)...)
 	srcFiles = append(srcFiles, addLabelsForInputs("common_os_srcs", g.properties.Common_os_srcs.GetOrDefault(ctx, nil), nil)...)
-	android.SetProvider(ctx, blueprint.SrcsFileProviderKey, blueprint.SrcsFileProviderData{SrcPaths: srcFiles.Strings()})
 
 	var copyFrom android.Paths
 	var outputFiles android.WritablePaths
@@ -487,6 +485,9 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 		name := "generator"
 		if task.useNsjail {
 			rule = android.NewRuleBuilder(pctx, ctx).Nsjail(task.genDir, android.PathForModuleOut(ctx, "nsjail_build_sandbox"))
+			if task.keepGendir {
+				rule.NsjailKeepGendir()
+			}
 		} else {
 			manifestName := "genrule.sbox.textproto"
 			if task.shards > 0 {
@@ -604,7 +605,8 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 
 		if task.useNsjail {
 			for _, input := range task.dirSrcs {
-				cmd.Implicit(input)
+				cmd.ImplicitDirectory(input)
+				// TODO(b/375551969): remove glob
 				if paths, err := ctx.GlobWithDeps(filepath.Join(input.String(), "**/*"), nil); err == nil {
 					rule.NsjailImplicits(android.PathsForSource(ctx, paths))
 				} else {
@@ -896,17 +898,24 @@ func NewGenRule() *Module {
 			return nil
 		}
 
+		keepGendir := Bool(properties.Keep_gendir)
+		if keepGendir && !useNsjail {
+			ctx.PropertyErrorf("keep_gendir", "can't use keep_gendir if use_nsjail is false")
+			return nil
+		}
+
 		outs := make(android.WritablePaths, len(properties.Out))
 		for i, out := range properties.Out {
 			outs[i] = android.PathForModuleGen(ctx, out)
 		}
 		return []generateTask{{
-			in:        srcFiles,
-			out:       outs,
-			genDir:    android.PathForModuleGen(ctx),
-			cmd:       rawCommand,
-			useNsjail: useNsjail,
-			dirSrcs:   dirSrcs,
+			in:         srcFiles,
+			out:        outs,
+			genDir:     android.PathForModuleGen(ctx),
+			cmd:        rawCommand,
+			useNsjail:  useNsjail,
+			dirSrcs:    dirSrcs,
+			keepGendir: keepGendir,
 		}}
 	}
 
@@ -926,6 +935,10 @@ type genRuleProperties struct {
 	// List of input directories. Can be set only when use_nsjail is true. Currently, usage of
 	// dir_srcs is limited only to Trusty build.
 	Dir_srcs []string `android:"path"`
+
+	// If set to true, $(genDir) is not truncated. Useful when this genrule can be incrementally
+	// built. Can be set only when use_nsjail is true.
+	Keep_gendir *bool
 
 	// names of the output files that will be generated
 	Out []string `android:"arch_variant"`

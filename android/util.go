@@ -308,6 +308,20 @@ func FilterList(list []string, filter []string) (remainder []string, filtered []
 	return
 }
 
+// FilterListByPrefixes performs the same splitting as FilterList does, but treats the passed
+// filters as prefixes
+func FilterListByPrefix(list []string, filter []string) (remainder []string, filtered []string) {
+	for _, l := range list {
+		if HasAnyPrefix(l, filter) {
+			filtered = append(filtered, l)
+		} else {
+			remainder = append(remainder, l)
+		}
+	}
+
+	return
+}
+
 // FilterListPred returns the elements of the given list for which the predicate
 // returns true. Order is kept.
 func FilterListPred(list []string, pred func(s string) bool) (filtered []string) {
@@ -659,4 +673,14 @@ func (m *SyncMap[K, V]) Store(key K, value V) {
 func (m *SyncMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	v, loaded := m.Map.LoadOrStore(key, value)
 	return v.(V), loaded
+}
+
+// AppendIfNotZero append the given value to the slice if it is not the zero value
+// for its type.
+func AppendIfNotZero[T comparable](slice []T, value T) []T {
+	var zeroValue T // Get the zero value of the type T
+	if value != zeroValue {
+		return append(slice, value)
+	}
+	return slice
 }

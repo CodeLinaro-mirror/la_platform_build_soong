@@ -16,12 +16,13 @@ package android
 
 import (
 	"fmt"
-	"github.com/google/blueprint/depset"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/google/blueprint"
+	"github.com/google/blueprint/depset"
 	"github.com/google/blueprint/proptools"
 )
 
@@ -74,7 +75,7 @@ type BuildParams struct {
 	// Validations is a slice of output path for a validation action. Validation outputs imply lower
 	// non-blocking priority to building non-validation outputs.
 	Validations Paths
-	// Whether to skip outputting a default target statement which will be built by Ninja when no
+	// Whether to output a default target statement which will be built by Ninja when no
 	// targets are specified on Ninja's command line.
 	Default bool
 	// Args is a key value mapping for replacements of variables within the Rule
@@ -195,6 +196,9 @@ type ModuleContext interface {
 	InstallInOdm() bool
 	InstallInProduct() bool
 	InstallInVendor() bool
+	InstallInSystemDlkm() bool
+	InstallInVendorDlkm() bool
+	InstallInOdmDlkm() bool
 	InstallForceOS() (*OsType, *ArchType)
 
 	RequiredModuleNames(ctx ConfigurableEvaluatorContext) []string
@@ -339,7 +343,7 @@ func convertBuildParams(params BuildParams) blueprint.BuildParams {
 		OrderOnly:       params.OrderOnly.Strings(),
 		Validations:     params.Validations.Strings(),
 		Args:            params.Args,
-		Optional:        !params.Default,
+		Default:         params.Default,
 	}
 
 	if params.Depfile != nil {
@@ -435,9 +439,28 @@ func (m *moduleContext) GetMissingDependencies() []string {
 	return missingDeps
 }
 
-func (m *moduleContext) GetDirectDepWithTag(name string, tag blueprint.DependencyTag) blueprint.Module {
-	module, _ := m.getDirectDepInternal(name, tag)
-	return module
+func (m *moduleContext) GetDirectDepWithTag(name string, tag blueprint.DependencyTag) Module {
+	deps := m.getDirectDepsInternal(name, tag)
+	if len(deps) == 1 {
+		return deps[0]
+	} else if len(deps) >= 2 {
+		panic(fmt.Errorf("Multiple dependencies having same BaseModuleName() %q found from %q",
+			name, m.ModuleName()))
+	} else {
+		return nil
+	}
+}
+
+func (m *moduleContext) GetDirectDepProxyWithTag(name string, tag blueprint.DependencyTag) *ModuleProxy {
+	deps := m.getDirectDepsProxyInternal(name, tag)
+	if len(deps) == 1 {
+		return &deps[0]
+	} else if len(deps) >= 2 {
+		panic(fmt.Errorf("Multiple dependencies having same BaseModuleName() %q found from %q",
+			name, m.ModuleName()))
+	} else {
+		return nil
+	}
 }
 
 func (m *moduleContext) ModuleSubDir() string {
@@ -492,12 +515,20 @@ func (m *moduleContext) InstallInVendor() bool {
 	return m.module.InstallInVendor()
 }
 
+func (m *moduleContext) InstallInSystemDlkm() bool {
+	return m.module.InstallInSystemDlkm()
+}
+
+func (m *moduleContext) InstallInVendorDlkm() bool {
+	return m.module.InstallInVendorDlkm()
+}
+
+func (m *moduleContext) InstallInOdmDlkm() bool {
+	return m.module.InstallInOdmDlkm()
+}
+
 func (m *moduleContext) skipInstall() bool {
 	if m.module.base().commonProperties.SkipInstall {
-		return true
-	}
-
-	if m.module.base().commonProperties.HideFromMake {
 		return true
 	}
 
@@ -516,6 +547,10 @@ func (m *moduleContext) skipInstall() bool {
 // not created and this module can only be installed to packaging modules like android_filesystem.
 func (m *moduleContext) requiresFullInstall() bool {
 	if m.skipInstall() {
+		return false
+	}
+
+	if m.module.base().commonProperties.HideFromMake {
 		return false
 	}
 
@@ -562,9 +597,22 @@ func (m *moduleContext) setAconfigPaths(paths Paths) {
 	m.aconfigFilePaths = paths
 }
 
+func (m *moduleContext) getOwnerAndOverrides() (string, []string) {
+	owner := m.ModuleName()
+	overrides := slices.Clone(m.Module().base().commonProperties.Overrides)
+	if b, ok := m.Module().(OverridableModule); ok {
+		if b.GetOverriddenBy() != "" {
+			// overriding variant of base module
+			overrides = append(overrides, m.ModuleName()) // com.android.foo
+			owner = m.Module().Name()                     // com.company.android.foo
+		}
+	}
+	return owner, overrides
+}
+
 func (m *moduleContext) packageFile(fullInstallPath InstallPath, srcPath Path, executable bool) PackagingSpec {
 	licenseFiles := m.Module().EffectiveLicenseFiles()
-	overrides := CopyOf(m.Module().base().commonProperties.Overrides)
+	owner, overrides := m.getOwnerAndOverrides()
 	spec := PackagingSpec{
 		relPathInPackage:      Rel(m, fullInstallPath.PartitionDir(), fullInstallPath.String()),
 		srcPath:               srcPath,
@@ -576,7 +624,7 @@ func (m *moduleContext) packageFile(fullInstallPath InstallPath, srcPath Path, e
 		aconfigPaths:          m.getAconfigPaths(),
 		archType:              m.target.Arch.ArchType,
 		overrides:             &overrides,
-		owner:                 m.ModuleName(),
+		owner:                 owner,
 	}
 	m.packagingSpecs = append(m.packagingSpecs, spec)
 	return spec
@@ -592,8 +640,10 @@ func (m *moduleContext) installFile(installPath InstallPath, name string, srcPat
 
 	if m.requiresFullInstall() {
 		deps = append(deps, InstallPaths(m.TransitiveInstallFiles.ToList())...)
-		deps = append(deps, m.installedInitRcPaths...)
-		deps = append(deps, m.installedVintfFragmentsPaths...)
+		if m.config.KatiEnabled() {
+			deps = append(deps, m.installedInitRcPaths...)
+			deps = append(deps, m.installedVintfFragmentsPaths...)
+		}
 
 		var implicitDeps, orderOnlyDeps Paths
 
@@ -638,7 +688,6 @@ func (m *moduleContext) installFile(installPath InstallPath, name string, srcPat
 				Input:       srcPath,
 				Implicits:   implicitDeps,
 				OrderOnly:   orderOnlyDeps,
-				Default:     !m.Config().KatiEnabled(),
 				Args: map[string]string{
 					"extraCmds": extraCmds,
 				},
@@ -685,7 +734,6 @@ func (m *moduleContext) InstallSymlink(installPath InstallPath, name string, src
 				Description: "install symlink " + fullInstallPath.Base(),
 				Output:      fullInstallPath,
 				Input:       srcPath,
-				Default:     !m.Config().KatiEnabled(),
 				Args: map[string]string{
 					"fromPath": relPath,
 				},
@@ -695,7 +743,7 @@ func (m *moduleContext) InstallSymlink(installPath InstallPath, name string, src
 		m.installFiles = append(m.installFiles, fullInstallPath)
 	}
 
-	overrides := CopyOf(m.Module().base().commonProperties.Overrides)
+	owner, overrides := m.getOwnerAndOverrides()
 	m.packagingSpecs = append(m.packagingSpecs, PackagingSpec{
 		relPathInPackage: Rel(m, fullInstallPath.PartitionDir(), fullInstallPath.String()),
 		srcPath:          nil,
@@ -706,7 +754,7 @@ func (m *moduleContext) InstallSymlink(installPath InstallPath, name string, src
 		aconfigPaths:     m.getAconfigPaths(),
 		archType:         m.target.Arch.ArchType,
 		overrides:        &overrides,
-		owner:            m.ModuleName(),
+		owner:            owner,
 	})
 
 	return fullInstallPath
@@ -732,7 +780,6 @@ func (m *moduleContext) InstallAbsoluteSymlink(installPath InstallPath, name str
 				Rule:        Symlink,
 				Description: "install symlink " + fullInstallPath.Base() + " -> " + absPath,
 				Output:      fullInstallPath,
-				Default:     !m.Config().KatiEnabled(),
 				Args: map[string]string{
 					"fromPath": absPath,
 				},
@@ -742,7 +789,7 @@ func (m *moduleContext) InstallAbsoluteSymlink(installPath InstallPath, name str
 		m.installFiles = append(m.installFiles, fullInstallPath)
 	}
 
-	overrides := CopyOf(m.Module().base().commonProperties.Overrides)
+	owner, overrides := m.getOwnerAndOverrides()
 	m.packagingSpecs = append(m.packagingSpecs, PackagingSpec{
 		relPathInPackage: Rel(m, fullInstallPath.PartitionDir(), fullInstallPath.String()),
 		srcPath:          nil,
@@ -753,7 +800,7 @@ func (m *moduleContext) InstallAbsoluteSymlink(installPath InstallPath, name str
 		aconfigPaths:     m.getAconfigPaths(),
 		archType:         m.target.Arch.ArchType,
 		overrides:        &overrides,
-		owner:            m.ModuleName(),
+		owner:            owner,
 	})
 
 	return fullInstallPath
@@ -800,6 +847,11 @@ func (m *moduleContext) ModuleInfoJSON() *ModuleInfoJSON {
 }
 
 func (m *moduleContext) SetOutputFiles(outputFiles Paths, tag string) {
+	for _, outputFile := range outputFiles {
+		if outputFile == nil {
+			panic("outputfiles cannot be nil")
+		}
+	}
 	if tag == "" {
 		if len(m.outputFiles.DefaultOutputFiles) > 0 {
 			m.ModuleErrorf("Module %s default OutputFiles cannot be overwritten", m.ModuleName())

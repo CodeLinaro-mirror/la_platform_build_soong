@@ -463,18 +463,18 @@ func (a *AndroidMkEntries) getDistContributions(mod blueprint.Module) *distContr
 func generateDistContributionsForMake(distContributions *distContributions) []string {
 	var ret []string
 	for _, d := range distContributions.copiesForGoals {
-		ret = append(ret, fmt.Sprintf(".PHONY: %s\n", d.goals))
+		ret = append(ret, fmt.Sprintf(".PHONY: %s", d.goals))
 		// Create dist-for-goals calls for each of the copy instructions.
 		for _, c := range d.copies {
 			if distContributions.licenseMetadataFile != nil {
 				ret = append(
 					ret,
-					fmt.Sprintf("$(if $(strip $(ALL_TARGETS.%s.META_LIC)),,$(eval ALL_TARGETS.%s.META_LIC := %s))\n",
+					fmt.Sprintf("$(if $(strip $(ALL_TARGETS.%s.META_LIC)),,$(eval ALL_TARGETS.%s.META_LIC := %s))",
 						c.from.String(), c.from.String(), distContributions.licenseMetadataFile.String()))
 			}
 			ret = append(
 				ret,
-				fmt.Sprintf("$(call dist-for-goals,%s,%s:%s)\n", d.goals, c.from.String(), c.dest))
+				fmt.Sprintf("$(call dist-for-goals,%s,%s:%s)", d.goals, c.from.String(), c.dest))
 		}
 	}
 
@@ -523,7 +523,7 @@ func (a *AndroidMkEntries) fillInEntries(ctx fillInEntriesContext, mod blueprint
 	a.Target_required = append(a.Target_required, amod.TargetRequiredModuleNames()...)
 
 	for _, distString := range a.GetDistForGoals(mod) {
-		fmt.Fprintf(&a.header, distString)
+		fmt.Fprintln(&a.header, distString)
 	}
 
 	fmt.Fprintf(&a.header, "\ninclude $(CLEAR_VARS)  # type: %s, name: %s, variant: %s\n", ctx.ModuleType(mod), base.BaseModuleName(), ctx.ModuleSubDir(mod))
@@ -701,11 +701,6 @@ func AndroidMkSingleton() Singleton {
 type androidMkSingleton struct{}
 
 func (c *androidMkSingleton) GenerateBuildActions(ctx SingletonContext) {
-	// Skip if Soong wasn't invoked from Make.
-	if !ctx.Config().KatiEnabled() {
-		return
-	}
-
 	var androidMkModulesList []blueprint.Module
 
 	ctx.VisitAllModulesBlueprint(func(module blueprint.Module) {
@@ -717,6 +712,12 @@ func (c *androidMkSingleton) GenerateBuildActions(ctx SingletonContext) {
 	sort.SliceStable(androidMkModulesList, func(i, j int) bool {
 		return ctx.ModuleName(androidMkModulesList[i]) < ctx.ModuleName(androidMkModulesList[j])
 	})
+
+	// If running in soong-only mode, do a different, more limited version of this singleton
+	if !ctx.Config().KatiEnabled() {
+		c.soongOnlyBuildActions(ctx, androidMkModulesList)
+		return
+	}
 
 	transMk := PathForOutput(ctx, "Android"+String(ctx.Config().productVariables.Make_suffix)+".mk")
 	if ctx.Failed() {
@@ -734,6 +735,122 @@ func (c *androidMkSingleton) GenerateBuildActions(ctx SingletonContext) {
 		Rule:   blueprint.Phony,
 		Output: transMk,
 	})
+}
+
+// In soong-only mode, we don't do most of the androidmk stuff. But disted files are still largely
+// defined through the androidmk mechanisms, so this function is an alternate implementation of
+// the androidmk singleton that just focuses on getting the dist contributions
+func (c *androidMkSingleton) soongOnlyBuildActions(ctx SingletonContext, mods []blueprint.Module) {
+	allDistContributions := getDistContributionsFromMods(ctx, mods)
+
+	distMkFile := absolutePath(filepath.Join(ctx.Config().katiPackageMkDir(), "dist.mk"))
+
+	var goalOutputPairs []string
+	var srcDstPairs []string
+	for _, contributions := range allDistContributions {
+		for _, copiesForGoal := range contributions.copiesForGoals {
+			goals := strings.Fields(copiesForGoal.goals)
+			for _, copy := range copiesForGoal.copies {
+				for _, goal := range goals {
+					goalOutputPairs = append(goalOutputPairs, fmt.Sprintf(" %s:%s", goal, copy.dest))
+				}
+				srcDstPairs = append(srcDstPairs, fmt.Sprintf(" %s:%s", copy.from.String(), copy.dest))
+			}
+		}
+	}
+	// There are duplicates in the lists that we need to remove
+	goalOutputPairs = SortedUniqueStrings(goalOutputPairs)
+	srcDstPairs = SortedUniqueStrings(srcDstPairs)
+	var buf strings.Builder
+	buf.WriteString("DIST_SRC_DST_PAIRS :=")
+	for _, srcDstPair := range srcDstPairs {
+		buf.WriteString(srcDstPair)
+	}
+	buf.WriteString("\nDIST_GOAL_OUTPUT_PAIRS :=")
+	for _, goalOutputPair := range goalOutputPairs {
+		buf.WriteString(goalOutputPair)
+	}
+	buf.WriteString("\n")
+
+	writeValueIfChanged(ctx, distMkFile, buf.String())
+}
+
+func writeValueIfChanged(ctx SingletonContext, path string, value string) {
+	if err := os.MkdirAll(filepath.Dir(path), 0777); err != nil {
+		ctx.Errorf("%s\n", err)
+		return
+	}
+	previousValue := ""
+	rawPreviousValue, err := os.ReadFile(path)
+	if err == nil {
+		previousValue = string(rawPreviousValue)
+	}
+
+	if previousValue != value {
+		if err = os.WriteFile(path, []byte(value), 0666); err != nil {
+			ctx.Errorf("Failed to write: %v", err)
+		}
+	}
+}
+
+func getDistContributionsFromMods(ctx fillInEntriesContext, mods []blueprint.Module) []distContributions {
+	var allDistContributions []distContributions
+	for _, mod := range mods {
+		if amod, ok := mod.(Module); ok && shouldSkipAndroidMkProcessing(ctx, amod.base()) {
+			continue
+		}
+		if info, ok := OtherModuleProvider(ctx, mod, AndroidMkInfoProvider); ok {
+			// Deep copy the provider info since we need to modify the info later
+			info := deepCopyAndroidMkProviderInfo(info)
+			info.PrimaryInfo.fillInEntries(ctx, mod)
+			if info.PrimaryInfo.disabled() {
+				continue
+			}
+			if contribution := info.PrimaryInfo.getDistContributions(ctx, mod); contribution != nil {
+				allDistContributions = append(allDistContributions, *contribution)
+			}
+			for _, ei := range info.ExtraInfo {
+				ei.fillInEntries(ctx, mod)
+				if ei.disabled() {
+					continue
+				}
+				if contribution := ei.getDistContributions(ctx, mod); contribution != nil {
+					allDistContributions = append(allDistContributions, *contribution)
+				}
+			}
+		} else {
+			switch x := mod.(type) {
+			case AndroidMkDataProvider:
+				data := x.AndroidMk()
+
+				if data.Include == "" {
+					data.Include = "$(BUILD_PREBUILT)"
+				}
+
+				data.fillInData(ctx, mod)
+				if data.Entries.disabled() {
+					continue
+				}
+				if contribution := data.Entries.getDistContributions(mod); contribution != nil {
+					allDistContributions = append(allDistContributions, *contribution)
+				}
+			case AndroidMkEntriesProvider:
+				entriesList := x.AndroidMkEntries()
+				for _, entries := range entriesList {
+					entries.fillInEntries(ctx, mod)
+					if entries.disabled() {
+						continue
+					}
+					if contribution := entries.getDistContributions(mod); contribution != nil {
+						allDistContributions = append(allDistContributions, *contribution)
+					}
+				}
+			default:
+				// Not exported to make so no make variables to set.
+			}
+		}
+	}
+	return allDistContributions
 }
 
 func translateAndroidMk(ctx SingletonContext, absMkFile string, moduleInfoJSONPath WritablePath, mods []blueprint.Module) error {
@@ -807,9 +924,8 @@ func translateAndroidMkModule(ctx SingletonContext, w io.Writer, moduleInfoJSONs
 	// Additional cases here require review for correct license propagation to make.
 	var err error
 
-	if info, ok := ctx.otherModuleProvider(mod, AndroidMkInfoProvider); ok {
-		androidMkEntriesInfos := info.(*AndroidMkProviderInfo)
-		err = translateAndroidMkEntriesInfoModule(ctx, w, moduleInfoJSONs, mod, androidMkEntriesInfos)
+	if info, ok := OtherModuleProvider(ctx, mod, AndroidMkInfoProvider); ok {
+		err = translateAndroidMkEntriesInfoModule(ctx, w, moduleInfoJSONs, mod, info)
 	} else {
 		switch x := mod.(type) {
 		case AndroidMkDataProvider:
@@ -1100,6 +1216,10 @@ type AndroidMkInfo struct {
 	EntryOrder []string
 }
 
+type AndroidMkProviderInfoProducer interface {
+	PrepareAndroidMKProviderInfo(config Config) *AndroidMkProviderInfo
+}
+
 // TODO: rename it to AndroidMkEntriesProvider after AndroidMkEntriesProvider interface is gone.
 var AndroidMkInfoProvider = blueprint.NewProvider[*AndroidMkProviderInfo]()
 
@@ -1272,7 +1392,7 @@ func (a *AndroidMkInfo) fillInEntries(ctx fillInEntriesContext, mod blueprint.Mo
 		a.HeaderStrings = append(a.HeaderStrings, distString)
 	}
 
-	a.HeaderStrings = append(a.HeaderStrings, fmt.Sprintf("\ninclude $(CLEAR_VARS)  # type: %s, name: %s, variant: %s\n", ctx.ModuleType(mod), base.BaseModuleName(), ctx.ModuleSubDir(mod)))
+	a.HeaderStrings = append(a.HeaderStrings, fmt.Sprintf("\ninclude $(CLEAR_VARS)  # type: %s, name: %s, variant: %s", ctx.ModuleType(mod), base.BaseModuleName(), ctx.ModuleSubDir(mod)))
 
 	// Collect make variable assignment entries.
 	helperInfo.SetString("LOCAL_PATH", ctx.ModuleDir(mod))
@@ -1298,6 +1418,14 @@ func (a *AndroidMkInfo) fillInEntries(ctx fillInEntriesContext, mod blueprint.Mo
 		// Mark this module as uninstallable in order to prevent Make from creating an
 		// install rule there.
 		helperInfo.SetBoolIfTrue("LOCAL_UNINSTALLABLE_MODULE", proptools.Bool(base.commonProperties.No_full_install))
+	}
+
+	if info.UncheckedModule {
+		helperInfo.SetBool("LOCAL_DONT_CHECK_MODULE", true)
+	} else if info.CheckbuildTarget != nil {
+		helperInfo.SetPath("LOCAL_CHECKED_MODULE", info.CheckbuildTarget)
+	} else {
+		helperInfo.SetOptionalPath("LOCAL_CHECKED_MODULE", a.OutputFile)
 	}
 
 	if len(info.TestData) > 0 {
@@ -1364,25 +1492,6 @@ func (a *AndroidMkInfo) fillInEntries(ctx fillInEntriesContext, mod blueprint.Mo
 		helperInfo.SetString("LOCAL_IS_HOST_MODULE", "true")
 	}
 
-	prefix := ""
-	if base.ArchSpecific() {
-		switch base.Os().Class {
-		case Host:
-			if base.Target().HostCross {
-				prefix = "HOST_CROSS_"
-			} else {
-				prefix = "HOST_"
-			}
-		case Device:
-			prefix = "TARGET_"
-
-		}
-
-		if base.Arch().ArchType != ctx.Config().Targets[base.Os()][0].Arch.ArchType {
-			prefix = "2ND_" + prefix
-		}
-	}
-
 	if licenseMetadata, ok := OtherModuleProvider(ctx, mod, LicenseMetadataProvider); ok {
 		helperInfo.SetPath("LOCAL_SOONG_LICENSE_METADATA", licenseMetadata.LicenseMetadataPath)
 	}
@@ -1423,8 +1532,8 @@ func (a *AndroidMkInfo) write(w io.Writer) {
 		return
 	}
 
-	combinedHeaderString := strings.Join(a.HeaderStrings, "\n")
-	combinedFooterString := strings.Join(a.FooterStrings, "\n")
+	combinedHeaderString := strings.Join(a.HeaderStrings, "\n") + "\n"
+	combinedFooterString := strings.Join(a.FooterStrings, "\n") + "\n"
 	w.Write([]byte(combinedHeaderString))
 	for _, name := range a.EntryOrder {
 		AndroidMkEmitAssignList(w, name, a.EntryMap[name])

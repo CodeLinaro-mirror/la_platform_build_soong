@@ -137,6 +137,12 @@ func dumpMakeVars(ctx Context, config Config, goals, vars []string, write_soong_
 		}
 	}
 	if ctx.Metrics != nil {
+		// Also include TARGET_RELEASE in the metrics.  Do this first
+		// so that it gets overwritten if dumpvars ever spits it out.
+		if release, found := os.LookupEnv("TARGET_RELEASE"); found {
+			ctx.Metrics.SetMetadataMetrics(
+				map[string]string{"TARGET_RELEASE": release})
+		}
 		ctx.Metrics.SetMetadataMetrics(ret)
 	}
 
@@ -273,6 +279,7 @@ func runMakeProductConfig(ctx Context, config Config) {
 		"BUILD_BROKEN_USES_BUILD_SHARED_LIBRARY",
 		"BUILD_BROKEN_USES_BUILD_STATIC_JAVA_LIBRARY",
 		"BUILD_BROKEN_USES_BUILD_STATIC_LIBRARY",
+		"RELEASE_BUILD_EXECUTION_METRICS",
 	}, exportEnvVars...), BannerVars...)
 
 	makeVars, err := dumpMakeVars(ctx, config, config.Arguments(), allVars, true, "")
