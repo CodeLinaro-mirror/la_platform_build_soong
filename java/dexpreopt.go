@@ -211,20 +211,19 @@ func disableSourceApexVariant(ctx android.BaseModuleContext) bool {
 	})
 
 	// Find the apex variant for this module
-	apexVariantsWithoutTestApexes := []string{}
+	apexVariants := []string{}
 	if apexInfo.BaseApexName != "" {
 		// This is a transitive dependency of an override_apex
-		apexVariantsWithoutTestApexes = append(apexVariantsWithoutTestApexes, apexInfo.BaseApexName)
+		apexVariants = append(apexVariants, apexInfo.BaseApexName)
 	} else {
-		_, variants, _ := android.ListSetDifference(apexInfo.InApexVariants, apexInfo.TestApexes)
-		apexVariantsWithoutTestApexes = append(apexVariantsWithoutTestApexes, variants...)
+		apexVariants = append(apexVariants, apexInfo.InApexVariants...)
 	}
 	if apexInfo.ApexAvailableName != "" {
-		apexVariantsWithoutTestApexes = append(apexVariantsWithoutTestApexes, apexInfo.ApexAvailableName)
+		apexVariants = append(apexVariants, apexInfo.ApexAvailableName)
 	}
 	disableSource := false
 	// find the selected apexes
-	for _, apexVariant := range apexVariantsWithoutTestApexes {
+	for _, apexVariant := range apexVariants {
 		if len(psi.GetSelectedModulesForApiDomain(apexVariant)) > 0 {
 			// If the apex_contribution for this api domain is non-empty, disable the source variant
 			disableSource = true
@@ -347,7 +346,11 @@ func (d *Dexpreopter) DexpreoptPrebuiltApexSystemServerJars(ctx android.ModuleCo
 	d.installPath = android.PathForModuleInPartitionInstall(ctx, "", strings.TrimPrefix(dexpreopt.GetSystemServerDexLocation(ctx, dc, libraryName), "/"))
 	// generate the rules for creating the .odex and .vdex files for this system server jar
 	dexJarFile := di.PrebuiltExportPath(ApexRootRelativePathToJavaLib(libraryName))
-
+	if dexJarFile == nil {
+		ctx.ModuleErrorf(
+			`Could not find library %s in prebuilt apex %s.
+Please make sure that the value of PRODUCT_APEX_(SYSTEM_SERVER|STANDALONE_SYSTEM_SERVER)_JARS is correct`, libraryName, ctx.ModuleName())
+	}
 	d.inputProfilePathOnHost = nil // reset: TODO(spandandas): Make dexpreopter stateless
 	if android.InList(libraryName, di.GetDexpreoptProfileGuidedExportedModuleNames()) {
 		// Set the profile path to guide optimization

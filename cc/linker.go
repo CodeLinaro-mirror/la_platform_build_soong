@@ -85,7 +85,7 @@ type BaseLinkerProperties struct {
 
 	// list of header libraries to re-export include directories from. Entries must be
 	// present in header_libs.
-	Export_header_lib_headers []string `android:"arch_variant"`
+	Export_header_lib_headers proptools.Configurable[[]string] `android:"arch_variant,variant_prepend"`
 
 	// list of generated headers to re-export include directories from. Entries must be
 	// present in generated_headers.
@@ -235,13 +235,16 @@ type BaseLinkerProperties struct {
 	// Generate compact dynamic relocation table, default true.
 	Pack_relocations *bool `android:"arch_variant"`
 
-	// local file name to pass to the linker as --version-script
+	// local file name to pass to the linker as --version-script.  Not supported on darwin, and will fail to build
+	// if provided to the darwin variant of a module.
 	Version_script *string `android:"path,arch_variant"`
 
-	// local file name to pass to the linker as --dynamic-list
+	// local file name to pass to the linker as --dynamic-list.  Not supported on darwin, and will fail to build
+	// if provided to the darwin variant of a module.
 	Dynamic_list *string `android:"path,arch_variant"`
 
-	// local files to pass to the linker as --script
+	// local files to pass to the linker as --script.  Not supported on darwin or windows, and will fail to build
+	// if provided to the darwin or windows variant of a module.
 	Linker_scripts []string `android:"path,arch_variant"`
 
 	// list of static libs that should not be used to build this module
@@ -302,7 +305,7 @@ func (linker *baseLinker) linkerDeps(ctx DepsContext, deps Deps) Deps {
 	deps.SharedLibs = append(deps.SharedLibs, linker.Properties.Shared_libs.GetOrDefault(ctx, nil)...)
 	deps.RuntimeLibs = append(deps.RuntimeLibs, linker.Properties.Runtime_libs...)
 
-	deps.ReexportHeaderLibHeaders = append(deps.ReexportHeaderLibHeaders, linker.Properties.Export_header_lib_headers...)
+	deps.ReexportHeaderLibHeaders = append(deps.ReexportHeaderLibHeaders, linker.Properties.Export_header_lib_headers.GetOrDefault(ctx, nil)...)
 	deps.ReexportStaticLibHeaders = append(deps.ReexportStaticLibHeaders, linker.Properties.Export_static_lib_headers...)
 	deps.ReexportSharedLibHeaders = append(deps.ReexportSharedLibHeaders, linker.Properties.Export_shared_lib_headers...)
 	deps.ReexportGeneratedHeaders = append(deps.ReexportGeneratedHeaders, linker.Properties.Export_generated_headers...)
@@ -454,7 +457,7 @@ func CheckSdkVersionAtLeast(ctx ModuleContext, SdkVersion android.ApiLevel) bool
 	if ctx.minSdkVersion() == "current" {
 		return true
 	}
-	parsedSdkVersion, err := nativeApiLevelFromUser(ctx, ctx.minSdkVersion())
+	parsedSdkVersion, err := NativeApiLevelFromUser(ctx, ctx.minSdkVersion())
 	if err != nil {
 		ctx.PropertyErrorf("min_sdk_version",
 			"Invalid min_sdk_version value (must be int or current): %q",
@@ -468,16 +471,77 @@ func CheckSdkVersionAtLeast(ctx ModuleContext, SdkVersion android.ApiLevel) bool
 
 // ModuleContext extends BaseModuleContext
 // BaseModuleContext should know if LLD is used?
-func (linker *baseLinker) linkerFlags(ctx ModuleContext, flags Flags) Flags {
-	toolchain := ctx.toolchain()
-
+func CommonLinkerFlags(ctx android.ModuleContext, flags Flags, useClangLld bool,
+	toolchain config.Toolchain, allow_undefined_symbols bool) Flags {
 	hod := "Host"
 	if ctx.Os().Class == android.Device {
 		hod = "Device"
 	}
 
-	if linker.useClangLld(ctx) {
+	mod, ok := ctx.Module().(LinkableInterface)
+	if !ok {
+		ctx.ModuleErrorf("trying to add CommonLinkerFlags to non-LinkableInterface module.")
+		return flags
+	}
+	if useClangLld {
 		flags.Global.LdFlags = append(flags.Global.LdFlags, fmt.Sprintf("${config.%sGlobalLldflags}", hod))
+	} else {
+		flags.Global.LdFlags = append(flags.Global.LdFlags, fmt.Sprintf("${config.%sGlobalLdflags}", hod))
+	}
+
+	if allow_undefined_symbols {
+		if ctx.Darwin() {
+			// darwin defaults to treating undefined symbols as errors
+			flags.Global.LdFlags = append(flags.Global.LdFlags, "-Wl,-undefined,dynamic_lookup")
+		}
+	} else if !ctx.Darwin() && !ctx.Windows() {
+		flags.Global.LdFlags = append(flags.Global.LdFlags, "-Wl,--no-undefined")
+	}
+
+	if useClangLld {
+		flags.Global.LdFlags = append(flags.Global.LdFlags, toolchain.Lldflags())
+	} else {
+		flags.Global.LdFlags = append(flags.Global.LdFlags, toolchain.Ldflags())
+	}
+
+	if !toolchain.Bionic() && ctx.Os() != android.LinuxMusl {
+		if !ctx.Windows() {
+			// Add -ldl, -lpthread, -lm and -lrt to host builds to match the default behavior of device
+			// builds
+			flags.Global.LdFlags = append(flags.Global.LdFlags,
+				"-ldl",
+				"-lpthread",
+				"-lm",
+			)
+			if !ctx.Darwin() {
+				flags.Global.LdFlags = append(flags.Global.LdFlags, "-lrt")
+			}
+		}
+	}
+	staticLib := mod.CcLibraryInterface() && mod.Static()
+	if ctx.Host() && !ctx.Windows() && !staticLib {
+		flags.Global.LdFlags = append(flags.Global.LdFlags, RpathFlags(ctx)...)
+	}
+
+	flags.Global.LdFlags = append(flags.Global.LdFlags, toolchain.ToolchainLdflags())
+	return flags
+}
+
+func (linker *baseLinker) linkerFlags(ctx ModuleContext, flags Flags) Flags {
+	toolchain := ctx.toolchain()
+	allow_undefined_symbols := Bool(linker.Properties.Allow_undefined_symbols)
+
+	flags = CommonLinkerFlags(ctx, flags, linker.useClangLld(ctx), toolchain,
+		allow_undefined_symbols)
+
+	if !toolchain.Bionic() && ctx.Os() != android.LinuxMusl {
+		CheckBadHostLdlibs(ctx, "host_ldlibs", linker.Properties.Host_ldlibs)
+		flags.Local.LdFlags = append(flags.Local.LdFlags, linker.Properties.Host_ldlibs...)
+	}
+
+	CheckBadLinkerFlags(ctx, "ldflags", linker.Properties.Ldflags)
+
+	if linker.useClangLld(ctx) {
 		if !BoolDefault(linker.Properties.Pack_relocations, packRelocationsDefault) {
 			flags.Global.LdFlags = append(flags.Global.LdFlags, "-Wl,--pack-dyn-relocs=none")
 		} else if ctx.Device() {
@@ -495,52 +559,9 @@ func (linker *baseLinker) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 				flags.Global.LdFlags = append(flags.Global.LdFlags, "-Wl,--pack-dyn-relocs=android")
 			}
 		}
-	} else {
-		flags.Global.LdFlags = append(flags.Global.LdFlags, fmt.Sprintf("${config.%sGlobalLdflags}", hod))
 	}
-	if Bool(linker.Properties.Allow_undefined_symbols) {
-		if ctx.Darwin() {
-			// darwin defaults to treating undefined symbols as errors
-			flags.Global.LdFlags = append(flags.Global.LdFlags, "-Wl,-undefined,dynamic_lookup")
-		}
-	} else if !ctx.Darwin() && !ctx.Windows() {
-		flags.Global.LdFlags = append(flags.Global.LdFlags, "-Wl,--no-undefined")
-	}
-
-	if linker.useClangLld(ctx) {
-		flags.Global.LdFlags = append(flags.Global.LdFlags, toolchain.Lldflags())
-	} else {
-		flags.Global.LdFlags = append(flags.Global.LdFlags, toolchain.Ldflags())
-	}
-
-	if !ctx.toolchain().Bionic() && ctx.Os() != android.LinuxMusl {
-		CheckBadHostLdlibs(ctx, "host_ldlibs", linker.Properties.Host_ldlibs)
-
-		flags.Local.LdFlags = append(flags.Local.LdFlags, linker.Properties.Host_ldlibs...)
-
-		if !ctx.Windows() {
-			// Add -ldl, -lpthread, -lm and -lrt to host builds to match the default behavior of device
-			// builds
-			flags.Global.LdFlags = append(flags.Global.LdFlags,
-				"-ldl",
-				"-lpthread",
-				"-lm",
-			)
-			if !ctx.Darwin() {
-				flags.Global.LdFlags = append(flags.Global.LdFlags, "-lrt")
-			}
-		}
-	}
-
-	CheckBadLinkerFlags(ctx, "ldflags", linker.Properties.Ldflags)
 
 	flags.Local.LdFlags = append(flags.Local.LdFlags, proptools.NinjaAndShellEscapeList(linker.Properties.Ldflags)...)
-
-	if ctx.Host() && !ctx.Windows() && !ctx.static() {
-		flags.Global.LdFlags = append(flags.Global.LdFlags, RpathFlags(ctx)...)
-	}
-
-	flags.Global.LdFlags = append(flags.Global.LdFlags, toolchain.ToolchainLdflags())
 
 	// Version_script is not needed when linking stubs lib where the version
 	// script is created from the symbol map file.
@@ -560,7 +581,7 @@ func (linker *baseLinker) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 
 		if versionScript.Valid() {
 			if ctx.Darwin() {
-				ctx.PropertyErrorf("version_script", "Not supported on Darwin")
+				ctx.AddMissingDependencies([]string{"version_script_not_supported_on_darwin"})
 			} else {
 				flags.Local.LdFlags = append(flags.Local.LdFlags,
 					config.VersionScriptFlagPrefix+versionScript.String())
@@ -578,7 +599,7 @@ func (linker *baseLinker) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 		dynamicList := android.OptionalPathForModuleSrc(ctx, linker.Properties.Dynamic_list)
 		if dynamicList.Valid() {
 			if ctx.Darwin() {
-				ctx.PropertyErrorf("dynamic_list", "Not supported on Darwin")
+				ctx.AddMissingDependencies([]string{"dynamic_list_not_supported_on_darwin"})
 			} else {
 				flags.Local.LdFlags = append(flags.Local.LdFlags,
 					"-Wl,--dynamic-list,"+dynamicList.String())
@@ -587,13 +608,17 @@ func (linker *baseLinker) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 		}
 
 		linkerScriptPaths := android.PathsForModuleSrc(ctx, linker.Properties.Linker_scripts)
-		if len(linkerScriptPaths) > 0 && (ctx.Darwin() || ctx.Windows()) {
-			ctx.PropertyErrorf("linker_scripts", "Only supported for ELF files")
-		} else {
-			for _, linkerScriptPath := range linkerScriptPaths {
-				flags.Local.LdFlags = append(flags.Local.LdFlags,
-					"-Wl,--script,"+linkerScriptPath.String())
-				flags.LdFlagsDeps = append(flags.LdFlagsDeps, linkerScriptPath)
+		if len(linkerScriptPaths) > 0 {
+			if ctx.Darwin() {
+				ctx.AddMissingDependencies([]string{"linker_scripts_not_supported_on_darwin"})
+			} else if ctx.Windows() {
+				ctx.PropertyErrorf("linker_scripts", "Only supported for ELF files")
+			} else {
+				for _, linkerScriptPath := range linkerScriptPaths {
+					flags.Local.LdFlags = append(flags.Local.LdFlags,
+						"-Wl,--script,"+linkerScriptPath.String())
+					flags.LdFlagsDeps = append(flags.LdFlagsDeps, linkerScriptPath)
+				}
 			}
 		}
 	}

@@ -63,7 +63,7 @@ func JavaFuzzFactory() android.Module {
 
 	module.Module.properties.Installable = proptools.BoolPtr(true)
 	module.Module.dexpreopter.isTest = true
-	module.Module.linter.properties.Lint.Test = proptools.BoolPtr(true)
+	module.Module.linter.properties.Lint.Test_module_type = proptools.BoolPtr(true)
 	module.Module.sourceProperties.Test_only = proptools.BoolPtr(true)
 	module.Module.sourceProperties.Top_level_test_target = true
 
@@ -107,23 +107,7 @@ func (j *JavaFuzzTest) DepsMutator(ctx android.BottomUpMutatorContext) {
 }
 
 func (j *JavaFuzzTest) GenerateAndroidBuildActions(ctx android.ModuleContext) {
-	if j.fuzzPackagedModule.FuzzProperties.Corpus != nil {
-		j.fuzzPackagedModule.Corpus = android.PathsForModuleSrc(ctx, j.fuzzPackagedModule.FuzzProperties.Corpus)
-	}
-	if j.fuzzPackagedModule.FuzzProperties.Device_common_corpus != nil {
-		j.fuzzPackagedModule.Corpus = append(j.fuzzPackagedModule.Corpus, android.PathsForModuleSrc(ctx, j.fuzzPackagedModule.FuzzProperties.Device_common_corpus)...)
-	}
-	if j.fuzzPackagedModule.FuzzProperties.Data != nil {
-		j.fuzzPackagedModule.Data = android.PathsForModuleSrc(ctx, j.fuzzPackagedModule.FuzzProperties.Data)
-	}
-	if j.fuzzPackagedModule.FuzzProperties.Dictionary != nil {
-		j.fuzzPackagedModule.Dictionary = android.PathForModuleSrc(ctx, *j.fuzzPackagedModule.FuzzProperties.Dictionary)
-	}
-	if j.fuzzPackagedModule.FuzzProperties.Fuzz_config != nil {
-		configPath := android.PathForModuleOut(ctx, "config").Join(ctx, "config.json")
-		android.WriteFileRule(ctx, configPath, j.fuzzPackagedModule.FuzzProperties.Fuzz_config.String())
-		j.fuzzPackagedModule.Config = configPath
-	}
+	j.fuzzPackagedModule = cc.PackageFuzzModule(ctx, j.fuzzPackagedModule)
 
 	_, sharedDeps := cc.CollectAllSharedDependencies(ctx)
 	for _, dep := range sharedDeps {

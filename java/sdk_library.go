@@ -964,6 +964,10 @@ func (c *commonToSdkLibraryAndImport) generateCommonBuildActions(ctx android.Mod
 		removedApiFilePaths[kind] = removedApiFilePath
 	}
 
+	javaInfo := &JavaInfo{}
+	setExtraJavaInfo(ctx, ctx.Module(), javaInfo)
+	android.SetProvider(ctx, JavaInfoProvider, javaInfo)
+
 	return SdkLibraryInfo{
 		EverythingStubDexJarPaths: everythingStubPaths,
 		ExportableStubDexJarPaths: exportableStubPaths,
@@ -1282,7 +1286,7 @@ func (module *SdkLibrary) CheckMinSdkVersion(ctx android.ModuleContext) {
 func CheckMinSdkVersion(ctx android.ModuleContext, module *Library) {
 	android.CheckMinSdkVersion(ctx, module.MinSdkVersion(ctx), func(c android.BaseModuleContext, do android.PayloadDepsCallback) {
 		ctx.WalkDeps(func(child android.Module, parent android.Module) bool {
-			isExternal := !module.depIsInSameApex(ctx, child)
+			isExternal := !android.IsDepInSameApex(ctx, module, child)
 			if am, ok := child.(android.ApexModule); ok {
 				if !do(ctx, parent, am, isExternal) {
 					return false
@@ -1313,12 +1317,6 @@ func IsXmlPermissionsFileDepTag(depTag blueprint.DependencyTag) bool {
 var implLibraryTag = sdkLibraryComponentTag{name: "impl-library"}
 
 var _ android.InstallNeededDependencyTag = sdkLibraryComponentTag{}
-
-// To satisfy the CopyDirectlyInAnyApexTag interface. Implementation library of the sdk library
-// in an apex is considered to be directly in the apex, as if it was listed in java_libs.
-func (t sdkLibraryComponentTag) CopyDirectlyInAnyApex() {}
-
-var _ android.CopyDirectlyInAnyApexTag = implLibraryTag
 
 func (t sdkLibraryComponentTag) InstallDepNeeded() bool {
 	return t.name == "xml-permissions-file" || t.name == "impl-library"
@@ -1403,6 +1401,7 @@ func (module *SdkLibrary) GenerateAndroidBuildActions(ctx android.ModuleContext)
 		// Even though the source javalib is not used, we need to hide it to prevent duplicate installation rules.
 		// TODO (b/331665856): Implement a principled solution for this.
 		module.HideFromMake()
+		module.SkipInstall()
 	}
 
 	module.stem = proptools.StringDefault(module.overridableProperties.Stem, ctx.ModuleName())
@@ -1484,7 +1483,6 @@ func (module *SdkLibrary) GenerateAndroidBuildActions(ctx android.ModuleContext)
 				ctx.CheckbuildFile(installFilesInfo.CheckbuildTarget)
 			}
 		}
-		android.SetProvider(ctx, blueprint.SrcsFileProviderKey, blueprint.SrcsFileProviderData{SrcPaths: module.implLibraryModule.uniqueSrcFiles.Strings()})
 	}
 
 	// Make the set of components exported by this module available for use elsewhere.
@@ -1641,15 +1639,14 @@ func (module *SdkLibrary) compareAgainstLatestApi(apiScope *apiScope) bool {
 }
 
 // Implements android.ApexModule
-func (module *SdkLibrary) DepIsInSameApex(mctx android.BaseModuleContext, dep android.Module) bool {
-	depTag := mctx.OtherModuleDependencyTag(dep)
+func (module *SdkLibrary) OutgoingDepIsInSameApex(depTag blueprint.DependencyTag) bool {
 	if depTag == xmlPermissionsFileTag {
 		return true
 	}
-	if dep.Name() == module.implLibraryModuleName() {
+	if depTag == implLibraryTag {
 		return true
 	}
-	return module.Library.DepIsInSameApex(mctx, dep)
+	return module.Library.OutgoingDepIsInSameApex(depTag)
 }
 
 // Implements android.ApexModule
@@ -2064,8 +2061,7 @@ func (module *SdkLibraryImport) DepsMutator(ctx android.BottomUpMutatorContext) 
 var _ android.ApexModule = (*SdkLibraryImport)(nil)
 
 // Implements android.ApexModule
-func (module *SdkLibraryImport) DepIsInSameApex(mctx android.BaseModuleContext, dep android.Module) bool {
-	depTag := mctx.OtherModuleDependencyTag(dep)
+func (module *SdkLibraryImport) OutgoingDepIsInSameApex(depTag blueprint.DependencyTag) bool {
 	if depTag == xmlPermissionsFileTag {
 		return true
 	}

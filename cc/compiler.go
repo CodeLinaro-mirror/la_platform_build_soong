@@ -78,11 +78,11 @@ type BaseCompilerProperties struct {
 	// If possible, don't use this.  If adding paths from the current directory use
 	// local_include_dirs, if adding paths from other modules use export_include_dirs in
 	// that module.
-	Include_dirs []string `android:"arch_variant,variant_prepend"`
+	Include_dirs proptools.Configurable[[]string] `android:"arch_variant,variant_prepend"`
 
 	// list of directories relative to the Blueprints file that will
 	// be added to the include path using -I
-	Local_include_dirs []string `android:"arch_variant,variant_prepend"`
+	Local_include_dirs proptools.Configurable[[]string] `android:"arch_variant,variant_prepend"`
 
 	// Add the directory containing the Android.bp file to the list of include
 	// directories. Defaults to true.
@@ -360,6 +360,29 @@ func parseCStd(cStdPtr *string) string {
 	}
 }
 
+func AddTargetFlags(ctx android.ModuleContext, flags Flags, tc config.Toolchain, version string, bpf bool) Flags {
+	target := "-target " + tc.ClangTriple()
+	if ctx.Os().Class == android.Device {
+		if version == "" || version == "current" {
+			target += strconv.Itoa(android.FutureApiLevelInt)
+		} else {
+			apiLevel := nativeApiLevelOrPanic(ctx, version)
+			target += strconv.Itoa(apiLevel.FinalOrFutureInt())
+		}
+	}
+
+	// bpf targets don't need the default target triple. b/308826679
+	if bpf {
+		target = "--target=bpf"
+	}
+
+	flags.Global.CFlags = append(flags.Global.CFlags, target)
+	flags.Global.AsFlags = append(flags.Global.AsFlags, target)
+	flags.Global.LdFlags = append(flags.Global.LdFlags, target)
+
+	return flags
+}
+
 // Create a Flags struct that collects the compile flags from global values,
 // per-target values, module type values, and per-module Blueprints properties
 func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps PathDeps) Flags {
@@ -367,7 +390,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 	modulePath := ctx.ModuleDir()
 
 	reuseObjs := false
-	if len(ctx.GetDirectDepsWithTag(reuseObjTag)) > 0 {
+	if len(ctx.GetDirectDepsProxyWithTag(reuseObjTag)) > 0 {
 		reuseObjs = true
 	}
 
@@ -411,13 +434,13 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 	}
 
 	// Include dir cflags
-	localIncludeDirs := android.PathsForModuleSrc(ctx, compiler.Properties.Local_include_dirs)
+	localIncludeDirs := android.PathsForModuleSrc(ctx, compiler.Properties.Local_include_dirs.GetOrDefault(ctx, nil))
 	if len(localIncludeDirs) > 0 {
 		f := includeDirsToFlags(localIncludeDirs)
 		flags.Local.CommonFlags = append(flags.Local.CommonFlags, f)
 		flags.Local.YasmFlags = append(flags.Local.YasmFlags, f)
 	}
-	rootIncludeDirs := android.PathsForSource(ctx, compiler.Properties.Include_dirs)
+	rootIncludeDirs := android.PathsForSource(ctx, compiler.Properties.Include_dirs.GetOrDefault(ctx, nil))
 	if len(rootIncludeDirs) > 0 {
 		f := includeDirsToFlags(rootIncludeDirs)
 		flags.Local.CommonFlags = append(flags.Local.CommonFlags, f)
@@ -513,25 +536,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 	flags.Local.ConlyFlags = config.ClangFilterUnknownCflags(flags.Local.ConlyFlags)
 	flags.Local.LdFlags = config.ClangFilterUnknownCflags(flags.Local.LdFlags)
 
-	target := "-target " + tc.ClangTriple()
-	if ctx.Os().Class == android.Device {
-		version := ctx.minSdkVersion()
-		if version == "" || version == "current" {
-			target += strconv.Itoa(android.FutureApiLevelInt)
-		} else {
-			apiLevel := nativeApiLevelOrPanic(ctx, version)
-			target += strconv.Itoa(apiLevel.FinalOrFutureInt())
-		}
-	}
-
-	// bpf targets don't need the default target triple. b/308826679
-	if proptools.Bool(compiler.Properties.Bpf_target) {
-		target = "--target=bpf"
-	}
-
-	flags.Global.CFlags = append(flags.Global.CFlags, target)
-	flags.Global.AsFlags = append(flags.Global.AsFlags, target)
-	flags.Global.LdFlags = append(flags.Global.LdFlags, target)
+	flags = AddTargetFlags(ctx, flags, tc, ctx.minSdkVersion(), Bool(compiler.Properties.Bpf_target))
 
 	hod := "Host"
 	if ctx.Os().Class == android.Device {
@@ -685,10 +690,10 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 	if len(srcs) > 0 {
 		module := ctx.ModuleDir() + "/Android.bp:" + ctx.ModuleName()
 		if inList("-Wno-error", flags.Local.CFlags) || inList("-Wno-error", flags.Local.CppFlags) {
-			addToModuleList(ctx, modulesUsingWnoErrorKey, module)
+			ctx.getOrCreateMakeVarsInfo().UsingWnoError = module
 		} else if !inList("-Werror", flags.Local.CFlags) && !inList("-Werror", flags.Local.CppFlags) {
 			if warningsAreAllowed(ctx.ModuleDir()) {
-				addToModuleList(ctx, modulesWarningsAllowedKey, module)
+				ctx.getOrCreateMakeVarsInfo().WarningsAllowed = module
 			} else {
 				flags.Local.CFlags = append([]string{"-Werror"}, flags.Local.CFlags...)
 			}
@@ -785,7 +790,7 @@ func (compiler *baseCompiler) compile(ctx ModuleContext, flags Flags, deps PathD
 	objs := compileObjs(ctx, buildFlags, "", srcs,
 		append(android.PathsForModuleSrc(ctx, compiler.Properties.Tidy_disabled_srcs), compiler.generatedSources...),
 		android.PathsForModuleSrc(ctx, compiler.Properties.Tidy_timeout_srcs),
-		pathDeps, compiler.cFlagsDeps)
+		pathDeps, compiler.cFlagsDeps, ctx.getSharedFlags())
 
 	if ctx.Failed() {
 		return Objects{}
@@ -795,10 +800,12 @@ func (compiler *baseCompiler) compile(ctx ModuleContext, flags Flags, deps PathD
 }
 
 // Compile a list of source files into objects a specified subdirectory
-func compileObjs(ctx ModuleContext, flags builderFlags, subdir string,
-	srcFiles, noTidySrcs, timeoutTidySrcs, pathDeps android.Paths, cFlagsDeps android.Paths) Objects {
+func compileObjs(ctx android.ModuleContext, flags builderFlags, subdir string,
+	srcFiles, noTidySrcs, timeoutTidySrcs, pathDeps android.Paths, cFlagsDeps android.Paths,
+	sharedFlags *SharedFlags) Objects {
 
-	return transformSourceToObj(ctx, subdir, srcFiles, noTidySrcs, timeoutTidySrcs, flags, pathDeps, cFlagsDeps)
+	return transformSourceToObj(ctx, subdir, srcFiles, noTidySrcs, timeoutTidySrcs, flags, pathDeps, cFlagsDeps,
+		sharedFlags)
 }
 
 // Properties for rust_bindgen related to generating rust bindings.
@@ -807,7 +814,7 @@ func compileObjs(ctx ModuleContext, flags builderFlags, subdir string,
 type RustBindgenClangProperties struct {
 	// list of directories relative to the Blueprints file that will
 	// be added to the include path using -I
-	Local_include_dirs []string `android:"arch_variant,variant_prepend"`
+	Local_include_dirs proptools.Configurable[[]string] `android:"arch_variant,variant_prepend"`
 
 	// list of static libraries that provide headers for this binding.
 	Static_libs proptools.Configurable[[]string] `android:"arch_variant,variant_prepend"`

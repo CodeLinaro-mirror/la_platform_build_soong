@@ -21,12 +21,24 @@ import (
 	"android/soong/java/config"
 	"android/soong/tradefed"
 
+	"github.com/google/blueprint"
 	"github.com/google/blueprint/proptools"
 )
 
 func init() {
 	RegisterRobolectricBuildComponents(android.InitRegistrationContext)
 }
+
+type roboRuntimeOnlyDependencyTag struct {
+	blueprint.BaseDependencyTag
+}
+
+var roboRuntimeOnlyDepTag roboRuntimeOnlyDependencyTag
+
+// Mark this tag so dependencies that use it are excluded from visibility enforcement.
+func (t roboRuntimeOnlyDependencyTag) ExcludeFromVisibilityEnforcement() {}
+
+var _ android.ExcludeFromVisibilityEnforcementTag = roboRuntimeOnlyDepTag
 
 func RegisterRobolectricBuildComponents(ctx android.RegistrationContext) {
 	ctx.RegisterModuleType("android_robolectric_test", RobolectricTestFactory)
@@ -41,12 +53,12 @@ var robolectricDefaultLibs = []string{
 }
 
 const robolectricCurrentLib = "Robolectric_all-target"
+const clearcutJunitLib = "ClearcutJunitListenerAar"
 const robolectricPrebuiltLibPattern = "platform-robolectric-%s-prebuilt"
 
 var (
 	roboCoverageLibsTag = dependencyTag{name: "roboCoverageLibs"}
 	roboRuntimesTag     = dependencyTag{name: "roboRuntimes"}
-	roboRuntimeOnlyTag  = dependencyTag{name: "roboRuntimeOnlyTag"}
 )
 
 type robolectricProperties struct {
@@ -63,10 +75,6 @@ type robolectricProperties struct {
 		// Number of shards to use when running the tests.
 		Shards *int64
 	}
-
-	// The version number of a robolectric prebuilt to use from prebuilts/misc/common/robolectric
-	// instead of the one built from source in external/robolectric-shadows.
-	Robolectric_prebuilt_version *string
 
 	// Use /external/robolectric rather than /external/robolectric-shadows as the version of robolectric
 	// to use.  /external/robolectric closely tracks github's master, and will fully replace /external/robolectric-shadows
@@ -106,21 +114,12 @@ func (r *robolectricTest) DepsMutator(ctx android.BottomUpMutatorContext) {
 		ctx.PropertyErrorf("instrumentation_for", "missing required instrumented module")
 	}
 
-	if v := String(r.robolectricProperties.Robolectric_prebuilt_version); v != "" {
-		ctx.AddVariationDependencies(nil, staticLibTag, fmt.Sprintf(robolectricPrebuiltLibPattern, v))
-	} else if !proptools.BoolDefault(r.robolectricProperties.Strict_mode, true) {
-		if proptools.Bool(r.robolectricProperties.Upstream) {
-			ctx.AddVariationDependencies(nil, staticLibTag, robolectricCurrentLib+"_upstream")
-		} else {
-			ctx.AddVariationDependencies(nil, staticLibTag, robolectricCurrentLib)
-		}
-	}
+	ctx.AddVariationDependencies(nil, roboRuntimeOnlyDepTag, clearcutJunitLib)
 
 	if proptools.BoolDefault(r.robolectricProperties.Strict_mode, true) {
-		ctx.AddVariationDependencies(nil, roboRuntimeOnlyTag, robolectricCurrentLib+"_upstream")
+		ctx.AddVariationDependencies(nil, roboRuntimeOnlyDepTag, robolectricCurrentLib)
 	} else {
-		// opting out from strict mode, robolectric_non_strict_mode_permission lib should be added
-		ctx.AddVariationDependencies(nil, staticLibTag, "robolectric_non_strict_mode_permission")
+		ctx.AddVariationDependencies(nil, staticLibTag, robolectricCurrentLib)
 	}
 
 	ctx.AddVariationDependencies(nil, staticLibTag, robolectricDefaultLibs...)
@@ -139,10 +138,17 @@ func (r *robolectricTest) GenerateAndroidBuildActions(ctx android.ModuleContext)
 	r.forceOSType = ctx.Config().BuildOS
 	r.forceArchType = ctx.Config().BuildArch
 
+	var options []tradefed.Option
+	options = append(options, tradefed.Option{Name: "java-flags", Value: "-Drobolectric=true"})
+	if proptools.BoolDefault(r.robolectricProperties.Strict_mode, true) {
+	    options = append(options, tradefed.Option{Name: "java-flags", Value: "-Drobolectric.strict.mode=true"})
+	}
+
 	r.testConfig = tradefed.AutoGenTestConfig(ctx, tradefed.AutoGenTestConfigOptions{
 		TestConfigProp:         r.testProperties.Test_config,
 		TestConfigTemplateProp: r.testProperties.Test_config_template,
 		TestSuites:             r.testProperties.Test_suites,
+		TestRunnerOptions:      options,
 		AutoGenConfig:          r.testProperties.Auto_gen_config,
 		DeviceTemplate:         "${RobolectricTestConfigTemplate}",
 		HostTemplate:           "${RobolectricTestConfigTemplate}",
@@ -151,8 +157,6 @@ func (r *robolectricTest) GenerateAndroidBuildActions(ctx android.ModuleContext)
 	r.data = append(r.data, android.PathsForModuleSrc(ctx, r.testProperties.Device_common_data)...)
 	r.data = append(r.data, android.PathsForModuleSrc(ctx, r.testProperties.Device_first_data)...)
 	r.data = append(r.data, android.PathsForModuleSrc(ctx, r.testProperties.Device_first_prefer32_data)...)
-	r.data = append(r.data, android.PathsForModuleSrc(ctx, r.testProperties.Device_first_vendor_data)...)
-	r.data = append(r.data, android.PathsForModuleSrc(ctx, r.testProperties.Device_first_vendor_shared_data)...)
 
 	var ok bool
 	var instrumentedApp *AndroidApp
@@ -196,7 +200,7 @@ func (r *robolectricTest) GenerateAndroidBuildActions(ctx android.ModuleContext)
 		handleLibDeps(dep)
 	}
 	// handle the runtimeOnly tag for strict_mode
-	for _, dep := range ctx.GetDirectDepsWithTag(roboRuntimeOnlyTag) {
+	for _, dep := range ctx.GetDirectDepsWithTag(roboRuntimeOnlyDepTag) {
 		handleLibDeps(dep)
 	}
 
@@ -207,7 +211,7 @@ func (r *robolectricTest) GenerateAndroidBuildActions(ctx android.ModuleContext)
 	r.stem = proptools.StringDefault(r.overridableProperties.Stem, ctx.ModuleName())
 	r.classLoaderContexts = r.usesLibrary.classLoaderContextForUsesLibDeps(ctx)
 	r.dexpreopter.disableDexpreopt()
-	r.compile(ctx, nil, nil, nil, extraCombinedJars)
+	javaInfo := r.compile(ctx, nil, nil, nil, extraCombinedJars)
 
 	installPath := android.PathForModuleInstall(ctx, r.BaseModuleName())
 	var installDeps android.InstallPaths
@@ -244,6 +248,11 @@ func (r *robolectricTest) GenerateAndroidBuildActions(ctx android.ModuleContext)
 	}
 
 	r.installFile = ctx.InstallFile(installPath, ctx.ModuleName()+".jar", r.outputFile, installDeps...)
+
+	if javaInfo != nil {
+		setExtraJavaInfo(ctx, r, javaInfo)
+		android.SetProvider(ctx, JavaInfoProvider, javaInfo)
+	}
 }
 
 func generateSameDirRoboTestConfigJar(ctx android.ModuleContext, outputFile android.ModuleOutPath) {
@@ -294,7 +303,7 @@ func RobolectricTestFactory() android.Module {
 		&module.testProperties)
 
 	module.Module.dexpreopter.isTest = true
-	module.Module.linter.properties.Lint.Test = proptools.BoolPtr(true)
+	module.Module.linter.properties.Lint.Test_module_type = proptools.BoolPtr(true)
 
 	module.testProperties.Test_suites = []string{"robolectric-tests"}
 

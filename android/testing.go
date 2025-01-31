@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -188,6 +189,26 @@ func PrepareForTestWithBuildFlag(flag, value string) FixturePreparer {
 		variables.BuildFlags[flag] = value
 	})
 }
+
+// PrepareForNativeBridgeEnabled sets configuration with targets including:
+// - X86_64 (primary)
+// - X86 (secondary)
+// - Arm64 on X86_64 (native bridge)
+// - Arm on X86 (native bridge)
+var PrepareForNativeBridgeEnabled = FixtureModifyConfig(
+	func(config Config) {
+		config.Targets[Android] = []Target{
+			{Os: Android, Arch: Arch{ArchType: X86_64, ArchVariant: "silvermont", Abi: []string{"arm64-v8a"}},
+				NativeBridge: NativeBridgeDisabled, NativeBridgeHostArchName: "", NativeBridgeRelativePath: ""},
+			{Os: Android, Arch: Arch{ArchType: X86, ArchVariant: "silvermont", Abi: []string{"armeabi-v7a"}},
+				NativeBridge: NativeBridgeDisabled, NativeBridgeHostArchName: "", NativeBridgeRelativePath: ""},
+			{Os: Android, Arch: Arch{ArchType: Arm64, ArchVariant: "armv8-a", Abi: []string{"arm64-v8a"}},
+				NativeBridge: NativeBridgeEnabled, NativeBridgeHostArchName: "x86_64", NativeBridgeRelativePath: "arm64"},
+			{Os: Android, Arch: Arch{ArchType: Arm, ArchVariant: "armv7-a-neon", Abi: []string{"armeabi-v7a"}},
+				NativeBridge: NativeBridgeEnabled, NativeBridgeHostArchName: "x86", NativeBridgeRelativePath: "arm"},
+		}
+	},
+)
 
 func NewTestArchContext(config Config) *TestContext {
 	ctx := NewTestContext(config)
@@ -1131,17 +1152,12 @@ func SetKatiEnabledForTests(config Config) {
 	config.katiEnabled = true
 }
 
-func SetTrimmedApexEnabledForTests(config Config) {
-	config.productVariables.TrimmedApex = new(bool)
-	*config.productVariables.TrimmedApex = true
-}
-
 func AndroidMkEntriesForTest(t *testing.T, ctx *TestContext, mod blueprint.Module) []AndroidMkEntries {
 	t.Helper()
 	var p AndroidMkEntriesProvider
 	var ok bool
 	if p, ok = mod.(AndroidMkEntriesProvider); !ok {
-		t.Errorf("module does not implement AndroidMkEntriesProvider: " + mod.Name())
+		t.Error("module does not implement AndroidMkEntriesProvider: " + mod.Name())
 	}
 
 	entriesList := p.AndroidMkEntries()
@@ -1152,12 +1168,36 @@ func AndroidMkEntriesForTest(t *testing.T, ctx *TestContext, mod blueprint.Modul
 	return entriesList
 }
 
+func AndroidMkInfoForTest(t *testing.T, ctx *TestContext, mod blueprint.Module) *AndroidMkProviderInfo {
+	if runtime.GOOS == "darwin" && mod.(Module).base().Os() != Darwin {
+		// The AndroidMkInfo provider is not set in this case.
+		t.Skip("AndroidMkInfo provider is not set on darwin")
+	}
+
+	t.Helper()
+	var ok bool
+	if _, ok = mod.(AndroidMkProviderInfoProducer); !ok {
+		t.Error("module does not implement AndroidMkProviderInfoProducer: " + mod.Name())
+	}
+
+	info := OtherModuleProviderOrDefault(ctx, mod, AndroidMkInfoProvider)
+	aconfigUpdateAndroidMkInfos(ctx, mod.(Module), info)
+	info.PrimaryInfo.fillInEntries(ctx, mod)
+	if len(info.ExtraInfo) > 0 {
+		for _, ei := range info.ExtraInfo {
+			ei.fillInEntries(ctx, mod)
+		}
+	}
+
+	return info
+}
+
 func AndroidMkDataForTest(t *testing.T, ctx *TestContext, mod blueprint.Module) AndroidMkData {
 	t.Helper()
 	var p AndroidMkDataProvider
 	var ok bool
 	if p, ok = mod.(AndroidMkDataProvider); !ok {
-		t.Fatalf("module does not implement AndroidMkDataProvider: " + mod.Name())
+		t.Fatal("module does not implement AndroidMkDataProvider: " + mod.Name())
 	}
 	data := p.AndroidMk()
 	data.fillInData(ctx, mod)
