@@ -320,7 +320,7 @@ func (d *dexer) r8Flags(ctx android.ModuleContext, dexParams *compileDexParams, 
 	// TODO(b/360905238): Remove SdkSystemServer exception after resolving missing class references.
 	if !dexParams.sdkVersion.Stable() || dexParams.sdkVersion.Kind == android.SdkSystemServer {
 		var proguardRaiseDeps classpath
-		ctx.VisitDirectDepsWithTag(proguardRaiseTag, func(m android.Module) {
+		ctx.VisitDirectDepsProxyWithTag(proguardRaiseTag, func(m android.ModuleProxy) {
 			if dep, ok := android.OtherModuleProvider(ctx, m, JavaInfoProvider); ok {
 				proguardRaiseDeps = append(proguardRaiseDeps, dep.RepackagedHeaderJars...)
 			}
@@ -378,7 +378,7 @@ func (d *dexer) r8Flags(ctx android.ModuleContext, dexParams *compileDexParams, 
 		r8Flags = append(r8Flags, "--keep-runtime-invisible-annotations")
 	}
 
-	if BoolDefault(opt.Proguard_compatibility, true) {
+	if BoolDefault(opt.Proguard_compatibility, !ctx.Config().UseR8FullModeByDefault()) {
 		r8Flags = append(r8Flags, "--force-proguard-compatibility")
 	}
 

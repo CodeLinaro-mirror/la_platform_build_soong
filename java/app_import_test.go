@@ -59,6 +59,45 @@ func TestAndroidAppImport(t *testing.T) {
 	android.AssertStringEquals(t, "Invalid args", "/system/app/foo/foo.apk", rule.Args["install_path"])
 }
 
+func TestAndroidAppImportWithDefaults(t *testing.T) {
+	ctx, _ := testJava(t, `
+		android_app_import {
+			name: "foo",
+			defaults: ["foo_defaults"],
+		}
+
+		java_defaults {
+			name: "foo_defaults",
+			apk: "prebuilts/apk/app.apk",
+			certificate: "platform",
+			dex_preopt: {
+				enabled: true,
+			},
+		}
+		`)
+
+	variant := ctx.ModuleForTests("foo", "android_common")
+
+	// Check dexpreopt outputs.
+	if variant.MaybeOutput("dexpreopt/foo/oat/arm64/package.vdex").Rule == nil ||
+		variant.MaybeOutput("dexpreopt/foo/oat/arm64/package.odex").Rule == nil {
+		t.Errorf("can't find dexpreopt outputs")
+	}
+
+	// Check cert signing flag.
+	signedApk := variant.Output("signed/foo.apk")
+	signingFlag := signedApk.Args["certificates"]
+	expected := "build/make/target/product/security/platform.x509.pem build/make/target/product/security/platform.pk8"
+	if expected != signingFlag {
+		t.Errorf("Incorrect signing flags, expected: %q, got: %q", expected, signingFlag)
+	}
+	rule := variant.Rule("genProvenanceMetaData")
+	android.AssertStringEquals(t, "Invalid input", "prebuilts/apk/app.apk", rule.Inputs[0].String())
+	android.AssertStringEquals(t, "Invalid output", "out/soong/.intermediates/provenance_metadata/foo/provenance_metadata.textproto", rule.Output.String())
+	android.AssertStringEquals(t, "Invalid args", "foo", rule.Args["module_name"])
+	android.AssertStringEquals(t, "Invalid args", "/system/app/foo/foo.apk", rule.Args["install_path"])
+}
+
 func TestAndroidAppImport_NoDexPreopt(t *testing.T) {
 	ctx, _ := testJava(t, `
 		android_app_import {
@@ -325,10 +364,25 @@ func TestAndroidAppImport_Filename(t *testing.T) {
 		}
 
 		android_app_import {
+			name: "foo_compressed",
+			apk: "prebuilts/apk/app.apk",
+			presigned: true,
+			compress_apk: true,
+		}
+
+		android_app_import {
 			name: "bar",
 			apk: "prebuilts/apk/app.apk",
 			presigned: true,
-			filename: "bar_sample.apk"
+			filename: "bar_sample.apk",
+		}
+
+		android_app_import {
+			name: "compressed_bar",
+			apk: "prebuilts/apk/app.apk",
+			presigned: true,
+			filename: "bar_sample.apk",
+			compress_apk: true,
 		}
 		`)
 
@@ -347,11 +401,25 @@ func TestAndroidAppImport_Filename(t *testing.T) {
 			expectedMetaDataPath: "out/soong/.intermediates/provenance_metadata/foo/provenance_metadata.textproto",
 		},
 		{
+			name:                 "foo_compressed",
+			expected:             "foo_compressed.apk.gz",
+			onDevice:             "/system/app/foo_compressed/foo_compressed.apk.gz",
+			expectedArtifactPath: "prebuilts/apk/app.apk",
+			expectedMetaDataPath: "out/soong/.intermediates/provenance_metadata/foo_compressed/provenance_metadata.textproto",
+		},
+		{
 			name:                 "bar",
 			expected:             "bar_sample.apk",
 			onDevice:             "/system/app/bar/bar_sample.apk",
 			expectedArtifactPath: "prebuilts/apk/app.apk",
 			expectedMetaDataPath: "out/soong/.intermediates/provenance_metadata/bar/provenance_metadata.textproto",
+		},
+		{
+			name:                 "compressed_bar",
+			expected:             "bar_sample.apk",
+			onDevice:             "/system/app/compressed_bar/bar_sample.apk",
+			expectedArtifactPath: "prebuilts/apk/app.apk",
+			expectedMetaDataPath: "out/soong/.intermediates/provenance_metadata/compressed_bar/provenance_metadata.textproto",
 		},
 	}
 
