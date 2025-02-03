@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"android/soong/finder/fs"
 	"android/soong/shared"
 	"android/soong/ui/metrics"
 
@@ -106,7 +107,9 @@ type configImpl struct {
 	sandboxConfig   *SandboxConfig
 
 	// Autodetected
-	totalRAM uint64
+	totalRAM      uint64
+	systemCpuInfo *metrics.CpuInfo
+	systemMemInfo *metrics.MemInfo
 
 	brokenDupRules       bool
 	brokenUsesNetwork    bool
@@ -237,6 +240,14 @@ func NewConfig(ctx Context, args ...string) Config {
 	ret.keepGoing = 1
 
 	ret.totalRAM = detectTotalRAM(ctx)
+	ret.systemCpuInfo, err = metrics.NewCpuInfo(fs.OsFs)
+	if err != nil {
+		ctx.Fatalln("Failed to get cpuinfo:", err)
+	}
+	ret.systemMemInfo, err = metrics.NewMemInfo(fs.OsFs)
+	if err != nil {
+		ctx.Fatalln("Failed to get meminfo:", err)
+	}
 	ret.parseArgs(ctx, args)
 
 	if ret.ninjaWeightListSource == HINT_FROM_SOONG {
@@ -297,16 +308,13 @@ func NewConfig(ctx Context, args ...string) Config {
 
 	// If SOONG_USE_PARTIAL_COMPILE is set, make it one of "true" or the empty string.
 	// This simplifies the generated Ninja rules, so that they only need to check for the empty string.
-	if value, ok := os.LookupEnv("SOONG_USE_PARTIAL_COMPILE"); ok {
+	if value, ok := ret.environ.Get("SOONG_USE_PARTIAL_COMPILE"); ok {
 		if value == "true" || value == "1" || value == "y" || value == "yes" {
 			value = "true"
 		} else {
 			value = ""
 		}
-		err = os.Setenv("SOONG_USE_PARTIAL_COMPILE", value)
-		if err != nil {
-			ctx.Fatalln("Failed to set SOONG_USE_PARTIAL_COMPILE: %v", err)
-		}
+		ret.environ.Set("SOONG_USE_PARTIAL_COMPILE", value)
 	}
 
 	ret.ninjaCommand = NINJA_NINJA
@@ -550,9 +558,23 @@ func storeConfigMetrics(ctx Context, config Config) {
 
 	ctx.Metrics.BuildConfig(buildConfig(config))
 
+	cpuInfo := &smpb.SystemCpuInfo{
+		VendorId:  proto.String(config.systemCpuInfo.VendorId),
+		ModelName: proto.String(config.systemCpuInfo.ModelName),
+		CpuCores:  proto.Int32(config.systemCpuInfo.CpuCores),
+		Flags:     proto.String(config.systemCpuInfo.Flags),
+	}
+	memInfo := &smpb.SystemMemInfo{
+		MemTotal:     proto.Uint64(config.systemMemInfo.MemTotal),
+		MemFree:      proto.Uint64(config.systemMemInfo.MemFree),
+		MemAvailable: proto.Uint64(config.systemMemInfo.MemAvailable),
+	}
+
 	s := &smpb.SystemResourceInfo{
 		TotalPhysicalMemory: proto.Uint64(config.TotalRAM()),
 		AvailableCpus:       proto.Int32(int32(runtime.NumCPU())),
+		CpuInfo:             cpuInfo,
+		MemInfo:             memInfo,
 	}
 	ctx.Metrics.SystemResourceInfo(s)
 }
@@ -573,11 +595,26 @@ func getNinjaWeightListSourceInMetric(s NinjaWeightListSource) *smpb.BuildConfig
 }
 
 func buildConfig(config Config) *smpb.BuildConfig {
+	var soongEnvVars *smpb.SoongEnvVars
+	ensure := func() *smpb.SoongEnvVars {
+		// Create soongEnvVars if it doesn't already exist.
+		if soongEnvVars == nil {
+			soongEnvVars = &smpb.SoongEnvVars{}
+		}
+		return soongEnvVars
+	}
+	if value, ok := config.environ.Get("SOONG_PARTIAL_COMPILE"); ok {
+		ensure().PartialCompile = proto.String(value)
+	}
+	if value, ok := config.environ.Get("SOONG_USE_PARTIAL_COMPILE"); ok {
+		ensure().UsePartialCompile = proto.String(value)
+	}
 	c := &smpb.BuildConfig{
 		ForceUseGoma:          proto.Bool(config.ForceUseGoma()),
 		UseGoma:               proto.Bool(config.UseGoma()),
 		UseRbe:                proto.Bool(config.UseRBE()),
 		NinjaWeightListSource: getNinjaWeightListSourceInMetric(config.NinjaWeightListSource()),
+		SoongEnvVars:          soongEnvVars,
 	}
 	c.Targets = append(c.Targets, config.arguments...)
 
@@ -1555,6 +1592,10 @@ func (c *configImpl) KatiPackageNinjaFile() string {
 	return filepath.Join(c.OutDir(), "build"+c.KatiSuffix()+katiPackageSuffix+".ninja")
 }
 
+func (c *configImpl) KatiSoongOnlyPackageNinjaFile() string {
+	return filepath.Join(c.OutDir(), "build"+c.KatiSuffix()+katiSoongOnlyPackageSuffix+".ninja")
+}
+
 func (c *configImpl) SoongVarsFile() string {
 	targetProduct, err := c.TargetProductOrErr()
 	if err != nil {
@@ -1610,7 +1651,7 @@ func (c *configImpl) DevicePreviousProductConfig() string {
 }
 
 func (c *configImpl) KatiPackageMkDir() string {
-	return filepath.Join(c.ProductOut(), "obj", "CONFIG", "kati_packaging")
+	return filepath.Join(c.SoongOutDir(), "kati_packaging"+c.KatiSuffix())
 }
 
 func (c *configImpl) hostOutRoot() string {

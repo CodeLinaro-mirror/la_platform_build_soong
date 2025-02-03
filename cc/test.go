@@ -83,14 +83,14 @@ type TestBinaryProperties struct {
 	// the test
 	Data []string `android:"path,arch_variant"`
 
-	// Same as data, but adds depedencies on modules using the device's os variant, and common
+	// Same as data, but adds dependencies on modules using the device's os variant, and common
 	// architecture's variant. Can be useful to add device-built apps to the data of a host
 	// test.
 	Device_common_data []string `android:"path_device_common"`
 
-	// Same as data, but adds depedencies on modules using the device's os variant, and the device's
-	// first architecture's variant. Can be useful to add device-built apps to the data of a host
-	// test.
+	// Same as data, but adds dependencies on modules using the device's os variant, and the
+	// device's first architecture's variant. Can be useful to add device-built apps to the data
+	// of a host test.
 	Device_first_data []string `android:"path_device_first"`
 
 	// list of shared library modules that should be installed alongside the test
@@ -342,28 +342,28 @@ func (test *testBinary) install(ctx ModuleContext, file android.Path) {
 		test.data = append(test.data, android.DataPath{SrcPath: dataSrcPath})
 	}
 
-	ctx.VisitDirectDepsWithTag(dataLibDepTag, func(dep android.Module) {
+	ctx.VisitDirectDepsProxyWithTag(dataLibDepTag, func(dep android.ModuleProxy) {
 		depName := ctx.OtherModuleName(dep)
-		linkableDep, ok := dep.(LinkableInterface)
+		linkableDep, ok := android.OtherModuleProvider(ctx, dep, LinkableInfoProvider)
 		if !ok {
 			ctx.ModuleErrorf("data_lib %q is not a LinkableInterface module", depName)
 		}
-		if linkableDep.OutputFile().Valid() {
+		if linkableDep.OutputFile.Valid() {
 			test.data = append(test.data,
-				android.DataPath{SrcPath: linkableDep.OutputFile().Path(),
-					RelativeInstallPath: linkableDep.RelativeInstallPath()})
+				android.DataPath{SrcPath: linkableDep.OutputFile.Path(),
+					RelativeInstallPath: linkableDep.RelativeInstallPath})
 		}
 	})
-	ctx.VisitDirectDepsWithTag(dataBinDepTag, func(dep android.Module) {
+	ctx.VisitDirectDepsProxyWithTag(dataBinDepTag, func(dep android.ModuleProxy) {
 		depName := ctx.OtherModuleName(dep)
-		linkableDep, ok := dep.(LinkableInterface)
+		linkableDep, ok := android.OtherModuleProvider(ctx, dep, LinkableInfoProvider)
 		if !ok {
 			ctx.ModuleErrorf("data_bin %q is not a LinkableInterface module", depName)
 		}
-		if linkableDep.OutputFile().Valid() {
+		if linkableDep.OutputFile.Valid() {
 			test.data = append(test.data,
-				android.DataPath{SrcPath: linkableDep.OutputFile().Path(),
-					RelativeInstallPath: linkableDep.RelativeInstallPath()})
+				android.DataPath{SrcPath: linkableDep.OutputFile.Path(),
+					RelativeInstallPath: linkableDep.RelativeInstallPath})
 		}
 	})
 

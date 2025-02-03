@@ -30,18 +30,23 @@ func TestPlatformBootclasspath(t *testing.T) {
 	preparer := android.GroupFixturePreparers(
 		prepareForTestWithPlatformBootclasspath,
 		FixtureConfigureBootJars("platform:foo", "system_ext:bar"),
+		android.FixtureMergeMockFs(android.MockFS{
+			"api/current.txt": nil,
+			"api/removed.txt": nil,
+		}),
 		android.FixtureWithRootAndroidBp(`
 			platform_bootclasspath {
 				name: "platform-bootclasspath",
 			}
 
-			java_library {
+			java_sdk_library {
 				name: "bar",
 				srcs: ["a.java"],
 				system_modules: "none",
 				sdk_version: "none",
 				compile_dex: true,
 				system_ext_specific: true,
+				unsafe_ignore_missing_latest_api: true,
 			}
 		`),
 	)
@@ -204,7 +209,7 @@ func TestPlatformBootclasspath_ClasspathFragmentPaths(t *testing.T) {
 
 	p := result.Module("platform-bootclasspath", "android_common").(*platformBootclasspathModule)
 	android.AssertStringEquals(t, "output filepath", "bootclasspath.pb", p.ClasspathFragmentBase.outputFilepath.Base())
-	android.AssertPathRelativeToTopEquals(t, "install filepath", "out/soong/target/product/test_device/system/etc/classpaths", p.ClasspathFragmentBase.installDirPath)
+	android.AssertPathRelativeToTopEquals(t, "install filepath", "out/target/product/test_device/system/etc/classpaths", p.ClasspathFragmentBase.installDirPath)
 }
 
 func TestPlatformBootclasspathModule_AndroidMkEntries(t *testing.T) {
@@ -298,10 +303,10 @@ func TestPlatformBootclasspath_Dist(t *testing.T) {
 	platformBootclasspath := result.Module("platform-bootclasspath", "android_common").(*platformBootclasspathModule)
 	entries := android.AndroidMkEntriesForTest(t, result.TestContext, platformBootclasspath)
 	goals := entries[0].GetDistForGoals(platformBootclasspath)
-	android.AssertStringEquals(t, "platform dist goals phony", ".PHONY: droidcore\n", goals[0])
+	android.AssertStringEquals(t, "platform dist goals phony", ".PHONY: droidcore", goals[0])
 	android.AssertStringDoesContain(t, "platform dist goals meta check", goals[1], "$(if $(strip $(ALL_TARGETS.")
 	android.AssertStringDoesContain(t, "platform dist goals meta assign", goals[1], "),,$(eval ALL_TARGETS.")
-	android.AssertStringEquals(t, "platform dist goals call", "$(call dist-for-goals,droidcore,out/soong/hiddenapi/hiddenapi-flags.csv:hiddenapi-flags.csv)\n", android.StringRelativeToTop(result.Config, goals[2]))
+	android.AssertStringEquals(t, "platform dist goals call", "$(call dist-for-goals,droidcore,out/soong/hiddenapi/hiddenapi-flags.csv:hiddenapi-flags.csv)", android.StringRelativeToTop(result.Config, goals[2]))
 }
 
 func TestPlatformBootclasspath_HiddenAPIMonolithicFiles(t *testing.T) {
