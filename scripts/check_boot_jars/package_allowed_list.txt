@@ -263,3 +263,5 @@ org\.chromium\.arc\..*
 
 # QC adds
 com.qualcomm.qti
+com.quicinc.tcmiface
+
