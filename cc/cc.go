@@ -93,6 +93,9 @@ type BinaryDecoratorInfo struct{}
 type LibraryDecoratorInfo struct {
 	ExportIncludeDirs []string
 	InjectBsslHash    bool
+	// Location of the static library in the sysroot. Empty if the library is
+	// not included in the NDK.
+	NdkSysrootPath android.Path
 }
 
 type SnapshotInfo struct {
@@ -104,12 +107,25 @@ type TestBinaryInfo struct {
 }
 type BenchmarkDecoratorInfo struct{}
 
-type StubDecoratorInfo struct{}
+type StubDecoratorInfo struct {
+	AbiDumpPath  android.OutputPath
+	HasAbiDump   bool
+	AbiDiffPaths android.Paths
+	InstallPath  android.Path
+}
 
-type ObjectLinkerInfo struct{}
+type ObjectLinkerInfo struct {
+	// Location of the object in the sysroot. Empty if the object is not
+	// included in the NDK.
+	NdkSysrootPath android.Path
+}
 
 type LibraryInfo struct {
 	BuildStubs bool
+}
+
+type InstallerInfo struct {
+	StubDecoratorInfo *StubDecoratorInfo
 }
 
 // Common info about the cc module.
@@ -122,6 +138,7 @@ type CcInfo struct {
 	LinkerInfo             *LinkerInfo
 	SnapshotInfo           *SnapshotInfo
 	LibraryInfo            *LibraryInfo
+	InstallerInfo          *InstallerInfo
 }
 
 var CcInfoProvider = blueprint.NewProvider[*CcInfo]()
@@ -753,6 +770,10 @@ type linker interface {
 
 	// Get the deps that have been explicitly specified in the properties.
 	linkerSpecifiedDeps(ctx android.ConfigurableEvaluatorContext, module *Module, specifiedDeps specifiedDeps) specifiedDeps
+
+	// Gets a list of files that will be disted when using the dist property without specifying
+	// an output file tag.
+	defaultDistFiles() []android.Path
 
 	moduleInfoJSON(ctx ModuleContext, moduleInfoJSON *android.ModuleInfoJSON)
 }
@@ -2334,6 +2355,7 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 		case *libraryDecorator:
 			ccInfo.LinkerInfo.LibraryDecoratorInfo = &LibraryDecoratorInfo{
 				InjectBsslHash: Bool(c.linker.(*libraryDecorator).Properties.Inject_bssl_hash),
+				NdkSysrootPath: c.linker.(*libraryDecorator).ndkSysrootPath,
 			}
 		case *testBinary:
 			ccInfo.LinkerInfo.TestBinaryInfo = &TestBinaryInfo{
@@ -2342,7 +2364,9 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 		case *benchmarkDecorator:
 			ccInfo.LinkerInfo.BenchmarkDecoratorInfo = &BenchmarkDecoratorInfo{}
 		case *objectLinker:
-			ccInfo.LinkerInfo.ObjectLinkerInfo = &ObjectLinkerInfo{}
+			ccInfo.LinkerInfo.ObjectLinkerInfo = &ObjectLinkerInfo{
+				NdkSysrootPath: c.linker.(*objectLinker).ndkSysrootPath,
+			}
 		case *stubDecorator:
 			ccInfo.LinkerInfo.StubDecoratorInfo = &StubDecoratorInfo{}
 		}
@@ -2360,6 +2384,17 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 	if c.library != nil {
 		ccInfo.LibraryInfo = &LibraryInfo{
 			BuildStubs: c.library.BuildStubs(),
+		}
+	}
+	if c.installer != nil {
+		ccInfo.InstallerInfo = &InstallerInfo{}
+		if installer, ok := c.installer.(*stubDecorator); ok {
+			ccInfo.InstallerInfo.StubDecoratorInfo = &StubDecoratorInfo{
+				HasAbiDump:   installer.hasAbiDump,
+				AbiDumpPath:  installer.abiDumpPath,
+				AbiDiffPaths: installer.abiDiffPaths,
+				InstallPath:  installer.installPath,
+			}
 		}
 	}
 	android.SetProvider(ctx, CcInfoProvider, &ccInfo)
@@ -2423,6 +2458,10 @@ func (c *Module) setOutputFiles(ctx ModuleContext) {
 	if c.linker != nil {
 		ctx.SetOutputFiles(android.PathsIfNonNil(c.linker.unstrippedOutputFilePath()), "unstripped")
 		ctx.SetOutputFiles(android.PathsIfNonNil(c.linker.strippedAllOutputFilePath()), "stripped_all")
+		defaultDistFiles := c.linker.defaultDistFiles()
+		if len(defaultDistFiles) > 0 {
+			ctx.SetOutputFiles(defaultDistFiles, android.DefaultDistTag)
+		}
 	}
 }
 
