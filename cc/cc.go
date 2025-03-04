@@ -93,9 +93,6 @@ type BinaryDecoratorInfo struct{}
 type LibraryDecoratorInfo struct {
 	ExportIncludeDirs []string
 	InjectBsslHash    bool
-	// Location of the static library in the sysroot. Empty if the library is
-	// not included in the NDK.
-	NdkSysrootPath android.Path
 }
 
 type SnapshotInfo struct {
@@ -107,25 +104,12 @@ type TestBinaryInfo struct {
 }
 type BenchmarkDecoratorInfo struct{}
 
-type StubDecoratorInfo struct {
-	AbiDumpPath  android.OutputPath
-	HasAbiDump   bool
-	AbiDiffPaths android.Paths
-	InstallPath  android.Path
-}
+type StubDecoratorInfo struct{}
 
-type ObjectLinkerInfo struct {
-	// Location of the object in the sysroot. Empty if the object is not
-	// included in the NDK.
-	NdkSysrootPath android.Path
-}
+type ObjectLinkerInfo struct{}
 
 type LibraryInfo struct {
 	BuildStubs bool
-}
-
-type InstallerInfo struct {
-	StubDecoratorInfo *StubDecoratorInfo
 }
 
 // Common info about the cc module.
@@ -138,7 +122,6 @@ type CcInfo struct {
 	LinkerInfo             *LinkerInfo
 	SnapshotInfo           *SnapshotInfo
 	LibraryInfo            *LibraryInfo
-	InstallerInfo          *InstallerInfo
 }
 
 var CcInfoProvider = blueprint.NewProvider[*CcInfo]()
@@ -193,9 +176,6 @@ type LinkableInfo struct {
 	// Symlinks returns a list of symlinks that should be created for this module.
 	Symlinks               []string
 	APIListCoverageXMLPath android.ModuleOutPath
-	// FuzzSharedLibraries returns the shared library dependencies for this module.
-	// Expects that IsFuzzModule returns true.
-	FuzzSharedLibraries android.RuleBuilderInstalls
 }
 
 var LinkableInfoProvider = blueprint.NewProvider[*LinkableInfo]()
@@ -773,10 +753,6 @@ type linker interface {
 
 	// Get the deps that have been explicitly specified in the properties.
 	linkerSpecifiedDeps(ctx android.ConfigurableEvaluatorContext, module *Module, specifiedDeps specifiedDeps) specifiedDeps
-
-	// Gets a list of files that will be disted when using the dist property without specifying
-	// an output file tag.
-	defaultDistFiles() []android.Path
 
 	moduleInfoJSON(ctx ModuleContext, moduleInfoJSON *android.ModuleInfoJSON)
 }
@@ -2358,7 +2334,6 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 		case *libraryDecorator:
 			ccInfo.LinkerInfo.LibraryDecoratorInfo = &LibraryDecoratorInfo{
 				InjectBsslHash: Bool(c.linker.(*libraryDecorator).Properties.Inject_bssl_hash),
-				NdkSysrootPath: c.linker.(*libraryDecorator).ndkSysrootPath,
 			}
 		case *testBinary:
 			ccInfo.LinkerInfo.TestBinaryInfo = &TestBinaryInfo{
@@ -2367,9 +2342,7 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 		case *benchmarkDecorator:
 			ccInfo.LinkerInfo.BenchmarkDecoratorInfo = &BenchmarkDecoratorInfo{}
 		case *objectLinker:
-			ccInfo.LinkerInfo.ObjectLinkerInfo = &ObjectLinkerInfo{
-				NdkSysrootPath: c.linker.(*objectLinker).ndkSysrootPath,
-			}
+			ccInfo.LinkerInfo.ObjectLinkerInfo = &ObjectLinkerInfo{}
 		case *stubDecorator:
 			ccInfo.LinkerInfo.StubDecoratorInfo = &StubDecoratorInfo{}
 		}
@@ -2387,17 +2360,6 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 	if c.library != nil {
 		ccInfo.LibraryInfo = &LibraryInfo{
 			BuildStubs: c.library.BuildStubs(),
-		}
-	}
-	if c.installer != nil {
-		ccInfo.InstallerInfo = &InstallerInfo{}
-		if installer, ok := c.installer.(*stubDecorator); ok {
-			ccInfo.InstallerInfo.StubDecoratorInfo = &StubDecoratorInfo{
-				HasAbiDump:   installer.hasAbiDump,
-				AbiDumpPath:  installer.abiDumpPath,
-				AbiDiffPaths: installer.abiDiffPaths,
-				InstallPath:  installer.installPath,
-			}
 		}
 	}
 	android.SetProvider(ctx, CcInfoProvider, &ccInfo)
@@ -2449,12 +2411,6 @@ func CreateCommonLinkableInfo(ctx android.ModuleContext, mod VersionedLinkableIn
 		info.APIListCoverageXMLPath = vi.GetAPIListCoverageXMLPath()
 	}
 
-	if !mod.PreventInstall() && fuzz.IsValid(ctx, mod.FuzzModuleStruct()) && mod.IsFuzzModule() {
-		info.FuzzSharedLibraries = mod.FuzzSharedLibraries()
-		fm := mod.FuzzPackagedModule()
-		fuzz.SetFuzzPackagedModuleInfo(ctx, &fm)
-	}
-
 	return info
 }
 
@@ -2467,10 +2423,6 @@ func (c *Module) setOutputFiles(ctx ModuleContext) {
 	if c.linker != nil {
 		ctx.SetOutputFiles(android.PathsIfNonNil(c.linker.unstrippedOutputFilePath()), "unstripped")
 		ctx.SetOutputFiles(android.PathsIfNonNil(c.linker.strippedAllOutputFilePath()), "stripped_all")
-		defaultDistFiles := c.linker.defaultDistFiles()
-		if len(defaultDistFiles) > 0 {
-			ctx.SetOutputFiles(defaultDistFiles, android.DefaultDistTag)
-		}
 	}
 }
 
@@ -3713,7 +3665,7 @@ func (c *Module) depsToPaths(ctx android.ModuleContext) PathDeps {
 func ShouldUseStubForApex(ctx android.ModuleContext, parent android.Module, dep android.ModuleProxy) bool {
 	inVendorOrProduct := false
 	bootstrap := false
-	if android.EqualModules(ctx.Module(), parent) {
+	if ctx.EqualModules(ctx.Module(), parent) {
 		if linkable, ok := parent.(LinkableInterface); !ok {
 			ctx.ModuleErrorf("Not a Linkable module: %q", ctx.ModuleName())
 		} else {

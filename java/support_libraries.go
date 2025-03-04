@@ -28,7 +28,7 @@ func init() {
 func supportLibrariesMakeVarsProvider(ctx android.MakeVarsContext) {
 	var supportAars, supportJars []string
 
-	ctx.VisitAllModuleProxies(func(module android.ModuleProxy) {
+	ctx.VisitAllModules(func(module android.Module) {
 		dir := ctx.ModuleDir(module)
 		switch {
 		case strings.HasPrefix(dir, "prebuilts/sdk/current/extras"),
@@ -47,16 +47,11 @@ func supportLibrariesMakeVarsProvider(ctx android.MakeVarsContext) {
 			return
 		}
 
-		_, isAndroidLibrary := android.OtherModuleProvider(ctx, module, AndroidLibraryInfoProvider)
-		_, isAARImport := android.OtherModuleProvider(ctx, module, AARImportInfoProvider)
-		if isAndroidLibrary || isAARImport {
+		switch module.(type) {
+		case *AndroidLibrary, *AARImport:
 			supportAars = append(supportAars, name)
-		} else {
-			_, isJavaLibrary := android.OtherModuleProvider(ctx, module, JavaLibraryInfoProvider)
-			_, isJavaPlugin := android.OtherModuleProvider(ctx, module, JavaPluginInfoProvider)
-			if isJavaLibrary && !isJavaPlugin {
-				supportJars = append(supportJars, name)
-			}
+		case *Library, *Import:
+			supportJars = append(supportJars, name)
 		}
 	})
 

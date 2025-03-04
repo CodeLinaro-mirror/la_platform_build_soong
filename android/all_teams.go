@@ -78,19 +78,19 @@ func (t *allTeamsSingleton) GenerateBuildActions(ctx SingletonContext) {
 	t.teams = make(map[string]teamProperties)
 	t.teams_for_mods = make(map[string]moduleTeamAndTestInfo)
 
-	ctx.VisitAllModuleProxies(func(module ModuleProxy) {
+	ctx.VisitAllModules(func(module Module) {
 		bpFile := ctx.BlueprintFile(module)
 
 		// Package Modules and Team Modules are stored in a map so we can look them up by name for
 		// modules without a team.
-		if pack, ok := OtherModuleProvider(ctx, module, PackageInfoProvider); ok {
+		if pack, ok := module.(*packageModule); ok {
 			// Packages don't have names, use the blueprint file as the key. we can't get qualifiedModuleId in t context.
 			pkgKey := bpFile
-			t.packages[pkgKey] = pack.Properties
+			t.packages[pkgKey] = pack.properties
 			return
 		}
-		if team, ok := OtherModuleProvider(ctx, module, TeamInfoProvider); ok {
-			t.teams[module.Name()] = team.Properties
+		if team, ok := module.(*teamModule); ok {
+			t.teams[team.Name()] = team.properties
 			return
 		}
 
@@ -116,7 +116,7 @@ func (t *allTeamsSingleton) GenerateBuildActions(ctx SingletonContext) {
 			testOnly:           testModInfo.TestOnly,
 			topLevelTestTarget: testModInfo.TopLevelTarget,
 			kind:               ctx.ModuleType(module),
-			teamName:           OtherModuleProviderOrDefault(ctx, module, CommonModuleInfoKey).Team,
+			teamName:           module.base().Team(),
 		}
 		t.teams_for_mods[module.Name()] = entry
 

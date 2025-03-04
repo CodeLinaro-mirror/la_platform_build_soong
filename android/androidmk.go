@@ -78,12 +78,6 @@ type AndroidMkData struct {
 	Entries AndroidMkEntries
 }
 
-type AndroidMkDataInfo struct {
-	Class string
-}
-
-var AndroidMkDataInfoProvider = blueprint.NewProvider[AndroidMkDataInfo]()
-
 type AndroidMkExtraFunc func(w io.Writer, outputFile Path)
 
 // Interface for modules to declare their Android.mk outputs. Note that every module needs to
@@ -113,6 +107,8 @@ type AndroidMkEntries struct {
 	SubName string
 	// If set, this value overrides the base module name. SubName is still appended.
 	OverrideName string
+	// Dist files to output
+	DistFiles TaggedDistFiles
 	// The output file for Kati to process and/or install. If absent, the module is skipped.
 	OutputFile OptionalPath
 	// If true, the module is skipped and does not appear on the final Android-<product name>.mk
@@ -355,15 +351,36 @@ func (d *distCopies) Strings() (ret []string) {
 	return
 }
 
-// This gets the dist contributuions from the given module that were specified in the Android.bp
-// file using the dist: property. It does not include contribututions that the module's
-// implementation may have defined with ctx.DistForGoals(), for that, see DistProvider.
-func getDistContributions(ctx ConfigAndOtherModuleProviderContext, mod Module) *distContributions {
+// Compute the contributions that the module makes to the dist.
+func (a *AndroidMkEntries) getDistContributions(mod Module) *distContributions {
 	amod := mod.base()
 	name := amod.BaseModuleName()
 
-	info := OtherModuleProviderOrDefault(ctx, mod, InstallFilesProvider)
-	availableTaggedDists := info.DistFiles
+	// Collate the set of associated tag/paths available for copying to the dist.
+	// Start with an empty (nil) set.
+	var availableTaggedDists TaggedDistFiles
+
+	// Then merge in any that are provided explicitly by the module.
+	if a.DistFiles != nil {
+		// Merge the DistFiles into the set.
+		availableTaggedDists = availableTaggedDists.merge(a.DistFiles)
+	}
+
+	// If no paths have been provided for the DefaultDistTag and the output file is
+	// valid then add that as the default dist path.
+	if _, ok := availableTaggedDists[DefaultDistTag]; !ok && a.OutputFile.Valid() {
+		availableTaggedDists = availableTaggedDists.addPathsForTag(DefaultDistTag, a.OutputFile.Path())
+	}
+
+	info := OtherModuleProviderOrDefault(a.entryContext, mod, InstallFilesProvider)
+	// If the distFiles created by GenerateTaggedDistFiles contains paths for the
+	// DefaultDistTag then that takes priority so delete any existing paths.
+	if _, ok := info.DistFiles[DefaultDistTag]; ok {
+		delete(availableTaggedDists, DefaultDistTag)
+	}
+
+	// Finally, merge the distFiles created by GenerateTaggedDistFiles.
+	availableTaggedDists = availableTaggedDists.merge(info.DistFiles)
 
 	if len(availableTaggedDists) == 0 {
 		// Nothing dist-able for this module.
@@ -437,7 +454,7 @@ func getDistContributions(ctx ConfigAndOtherModuleProviderContext, mod Module) *
 
 			productString := ""
 			if dist.Append_artifact_with_product != nil && *dist.Append_artifact_with_product {
-				productString = fmt.Sprintf("_%s", ctx.Config().DeviceProduct())
+				productString = fmt.Sprintf("_%s", a.entryContext.Config().DeviceProduct())
 			}
 
 			if suffix != "" || productString != "" {
@@ -485,7 +502,7 @@ func generateDistContributionsForMake(distContributions *distContributions) []st
 // Compute the list of Make strings to declare phony goals and dist-for-goals
 // calls from the module's dist and dists properties.
 func (a *AndroidMkEntries) GetDistForGoals(mod Module) []string {
-	distContributions := getDistContributions(a.entryContext, mod)
+	distContributions := a.getDistContributions(mod)
 	if distContributions == nil {
 		return nil
 	}
@@ -894,8 +911,17 @@ func getSoongOnlyDataFromMods(ctx fillInEntriesContext, mods []Module) ([]distCo
 			if moduleInfoJSON, ok := OtherModuleProvider(ctx, mod, ModuleInfoJSONProvider); ok {
 				moduleInfoJSONs = append(moduleInfoJSONs, moduleInfoJSON...)
 			}
-			if contribution := getDistContributions(ctx, mod); contribution != nil {
+			if contribution := info.PrimaryInfo.getDistContributions(ctx, mod, &commonInfo); contribution != nil {
 				allDistContributions = append(allDistContributions, *contribution)
+			}
+			for _, ei := range info.ExtraInfo {
+				ei.fillInEntries(ctx, mod, &commonInfo)
+				if ei.disabled() {
+					continue
+				}
+				if contribution := ei.getDistContributions(ctx, mod, &commonInfo); contribution != nil {
+					allDistContributions = append(allDistContributions, *contribution)
+				}
 			}
 		} else {
 			if x, ok := mod.(AndroidMkDataProvider); ok {
@@ -912,7 +938,7 @@ func getSoongOnlyDataFromMods(ctx fillInEntriesContext, mods []Module) ([]distCo
 				if moduleInfoJSON, ok := OtherModuleProvider(ctx, mod, ModuleInfoJSONProvider); ok {
 					moduleInfoJSONs = append(moduleInfoJSONs, moduleInfoJSON...)
 				}
-				if contribution := getDistContributions(ctx, mod); contribution != nil {
+				if contribution := data.Entries.getDistContributions(mod); contribution != nil {
 					allDistContributions = append(allDistContributions, *contribution)
 				}
 			}
@@ -926,7 +952,7 @@ func getSoongOnlyDataFromMods(ctx fillInEntriesContext, mods []Module) ([]distCo
 					if moduleInfoJSON, ok := OtherModuleProvider(ctx, mod, ModuleInfoJSONProvider); ok {
 						moduleInfoJSONs = append(moduleInfoJSONs, moduleInfoJSON...)
 					}
-					if contribution := getDistContributions(ctx, mod); contribution != nil {
+					if contribution := entries.getDistContributions(mod); contribution != nil {
 						allDistContributions = append(allDistContributions, *contribution)
 					}
 				}
@@ -1269,6 +1295,8 @@ type AndroidMkInfo struct {
 	SubName string
 	// If set, this value overrides the base module name. SubName is still appended.
 	OverrideName string
+	// Dist files to output
+	DistFiles TaggedDistFiles
 	// The output file for Kati to process and/or install. If absent, the module is skipped.
 	OutputFile OptionalPath
 	// If true, the module is skipped and does not appear on the final Android-<product name>.mk
@@ -1635,12 +1663,139 @@ func (a *AndroidMkInfo) write(w io.Writer) {
 // TODO(b/397766191): Change the signature to take ModuleProxy
 // Please only access the module's internal data through providers.
 func (a *AndroidMkInfo) GetDistForGoals(ctx fillInEntriesContext, mod Module, commonInfo *CommonModuleInfo) []string {
-	distContributions := getDistContributions(ctx, mod)
+	distContributions := a.getDistContributions(ctx, mod, commonInfo)
 	if distContributions == nil {
 		return nil
 	}
 
 	return generateDistContributionsForMake(distContributions)
+}
+
+// Compute the contributions that the module makes to the dist.
+// TODO(b/397766191): Change the signature to take ModuleProxy
+// Please only access the module's internal data through providers.
+func (a *AndroidMkInfo) getDistContributions(ctx fillInEntriesContext, mod Module,
+	commonInfo *CommonModuleInfo) *distContributions {
+	name := commonInfo.BaseModuleName
+
+	// Collate the set of associated tag/paths available for copying to the dist.
+	// Start with an empty (nil) set.
+	var availableTaggedDists TaggedDistFiles
+
+	// Then merge in any that are provided explicitly by the module.
+	if a.DistFiles != nil {
+		// Merge the DistFiles into the set.
+		availableTaggedDists = availableTaggedDists.merge(a.DistFiles)
+	}
+
+	// If no paths have been provided for the DefaultDistTag and the output file is
+	// valid then add that as the default dist path.
+	if _, ok := availableTaggedDists[DefaultDistTag]; !ok && a.OutputFile.Valid() {
+		availableTaggedDists = availableTaggedDists.addPathsForTag(DefaultDistTag, a.OutputFile.Path())
+	}
+
+	info := OtherModuleProviderOrDefault(ctx, mod, InstallFilesProvider)
+	// If the distFiles created by GenerateTaggedDistFiles contains paths for the
+	// DefaultDistTag then that takes priority so delete any existing paths.
+	if _, ok := info.DistFiles[DefaultDistTag]; ok {
+		delete(availableTaggedDists, DefaultDistTag)
+	}
+
+	// Finally, merge the distFiles created by GenerateTaggedDistFiles.
+	availableTaggedDists = availableTaggedDists.merge(info.DistFiles)
+
+	if len(availableTaggedDists) == 0 {
+		// Nothing dist-able for this module.
+		return nil
+	}
+
+	// Collate the contributions this module makes to the dist.
+	distContributions := &distContributions{}
+
+	if !commonInfo.ExemptFromRequiredApplicableLicensesProperty {
+		distContributions.licenseMetadataFile = info.LicenseMetadataFile
+	}
+
+	// Iterate over this module's dist structs, merged from the dist and dists properties.
+	for _, dist := range commonInfo.Dists {
+		// Get the list of goals this dist should be enabled for. e.g. sdk, droidcore
+		goals := strings.Join(dist.Targets, " ")
+
+		// Get the tag representing the output files to be dist'd. e.g. ".jar", ".proguard_map"
+		var tag string
+		if dist.Tag == nil {
+			// If the dist struct does not specify a tag, use the default output files tag.
+			tag = DefaultDistTag
+		} else {
+			tag = *dist.Tag
+		}
+
+		// Get the paths of the output files to be dist'd, represented by the tag.
+		// Can be an empty list.
+		tagPaths := availableTaggedDists[tag]
+		if len(tagPaths) == 0 {
+			// Nothing to dist for this tag, continue to the next dist.
+			continue
+		}
+
+		if len(tagPaths) > 1 && (dist.Dest != nil || dist.Suffix != nil) {
+			errorMessage := "%s: Cannot apply dest/suffix for more than one dist " +
+				"file for %q goals tag %q in module %s. The list of dist files, " +
+				"which should have a single element, is:\n%s"
+			panic(fmt.Errorf(errorMessage, mod, goals, tag, name, tagPaths))
+		}
+
+		copiesForGoals := distContributions.getCopiesForGoals(goals)
+
+		// Iterate over each path adding a copy instruction to copiesForGoals
+		for _, path := range tagPaths {
+			// It's possible that the Path is nil from errant modules. Be defensive here.
+			if path == nil {
+				tagName := "default" // for error message readability
+				if dist.Tag != nil {
+					tagName = *dist.Tag
+				}
+				panic(fmt.Errorf("Dist file should not be nil for the %s tag in %s", tagName, name))
+			}
+
+			dest := filepath.Base(path.String())
+
+			if dist.Dest != nil {
+				var err error
+				if dest, err = validateSafePath(*dist.Dest); err != nil {
+					// This was checked in ModuleBase.GenerateBuildActions
+					panic(err)
+				}
+			}
+
+			ext := filepath.Ext(dest)
+			suffix := ""
+			if dist.Suffix != nil {
+				suffix = *dist.Suffix
+			}
+
+			productString := ""
+			if dist.Append_artifact_with_product != nil && *dist.Append_artifact_with_product {
+				productString = fmt.Sprintf("_%s", ctx.Config().DeviceProduct())
+			}
+
+			if suffix != "" || productString != "" {
+				dest = strings.TrimSuffix(dest, ext) + suffix + productString + ext
+			}
+
+			if dist.Dir != nil {
+				var err error
+				if dest, err = validateSafePath(*dist.Dir, dest); err != nil {
+					// This was checked in ModuleBase.GenerateBuildActions
+					panic(err)
+				}
+			}
+
+			copiesForGoals.addCopyInstruction(path, dest)
+		}
+	}
+
+	return distContributions
 }
 
 func deepCopyAndroidMkProviderInfo(providerInfo *AndroidMkProviderInfo) AndroidMkProviderInfo {
@@ -1660,8 +1815,9 @@ func deepCopyAndroidMkInfo(mkinfo *AndroidMkInfo) AndroidMkInfo {
 		Class:        mkinfo.Class,
 		SubName:      mkinfo.SubName,
 		OverrideName: mkinfo.OverrideName,
-		// There is no modification on OutputFile, so no need to
+		// There is no modification on DistFiles or OutputFile, so no need to
 		// make their deep copy.
+		DistFiles:       mkinfo.DistFiles,
 		OutputFile:      mkinfo.OutputFile,
 		Disabled:        mkinfo.Disabled,
 		Include:         mkinfo.Include,

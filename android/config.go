@@ -814,18 +814,11 @@ func (c *config) HostCcSharedLibPath(ctx PathContext, lib string) Path {
 func (c *config) PrebuiltOS() string {
 	switch runtime.GOOS {
 	case "linux":
-		switch runtime.GOARCH {
-		case "amd64":
-			return "linux-x86"
-		case "arm64":
-			return "linux-arm64"
-		default:
-			panic(fmt.Errorf("Unknown GOARCH %s", runtime.GOARCH))
-		}
+		return "linux-x86"
 	case "darwin":
 		return "darwin-x86"
 	default:
-		panic(fmt.Errorf("Unknown GOOS %s", runtime.GOOS))
+		panic("Unknown GOOS")
 	}
 }
 
@@ -2233,6 +2226,7 @@ var (
 		"RELEASE_APEX_CONTRIBUTIONS_NFC":                     "com.android.nfcservices",
 		"RELEASE_APEX_CONTRIBUTIONS_ONDEVICEPERSONALIZATION": "com.android.ondevicepersonalization",
 		"RELEASE_APEX_CONTRIBUTIONS_PERMISSION":              "com.android.permission",
+		"RELEASE_APEX_CONTRIBUTIONS_PRIMARY_LIBS":            "",
 		"RELEASE_APEX_CONTRIBUTIONS_PROFILING":               "com.android.profiling",
 		"RELEASE_APEX_CONTRIBUTIONS_REMOTEKEYPROVISIONING":   "com.android.rkpd",
 		"RELEASE_APEX_CONTRIBUTIONS_RESOLV":                  "com.android.resolv",
@@ -2285,18 +2279,10 @@ func (c *config) OemProperties() []string {
 }
 
 func (c *config) UseDebugArt() bool {
-	// If the ArtTargetIncludeDebugBuild product variable is set then return its value.
 	if c.productVariables.ArtTargetIncludeDebugBuild != nil {
 		return Bool(c.productVariables.ArtTargetIncludeDebugBuild)
 	}
 
-	// If the RELEASE_APEX_CONTRIBUTIONS_ART build flag is set to use a prebuilt ART apex
-	// then don't use the debug apex.
-	if val, ok := c.GetBuildFlag("RELEASE_APEX_CONTRIBUTIONS_ART"); ok && val != "" {
-		return false
-	}
-
-	// Default to the debug apex for eng builds.
 	return Bool(c.productVariables.Eng)
 }
 

@@ -356,8 +356,6 @@ func (s *ShBinary) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	for _, symlink := range s.Symlinks() {
 		ctx.InstallSymlink(installDir, symlink, s.installedFile)
 	}
-	moduleInfoJSON := ctx.ModuleInfoJSON()
-	moduleInfoJSON.Class = []string{"EXECUTABLES"}
 }
 
 func (s *ShBinary) AndroidMkEntries() []android.AndroidMkEntries {

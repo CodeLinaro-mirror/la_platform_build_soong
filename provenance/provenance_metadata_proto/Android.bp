@@ -20,6 +20,11 @@ package {
 
 python_library_host {
     name: "provenance_metadata_proto",
+    version: {
+        py3: {
+            enabled: true,
+        },
+    },
     srcs: [
         "provenance_metadata.proto",
     ],

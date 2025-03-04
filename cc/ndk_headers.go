@@ -80,20 +80,6 @@ type headerModule struct {
 	licensePath  android.Path
 }
 
-type NdkHeaderInfo struct {
-	SrcPaths     android.Paths
-	InstallPaths android.Paths
-	LicensePath  android.Path
-	// Set to true if the headers installed by this module should skip
-	// verification. This step ensures that each header is self-contained (can
-	// be #included alone) and is valid C. This should not be disabled except in
-	// rare cases. Outside bionic and external, if you're using this option
-	// you've probably made a mistake.
-	SkipVerification bool
-}
-
-var NdkHeaderInfoProvider = blueprint.NewProvider[NdkHeaderInfo]()
-
 func getHeaderInstallDir(ctx android.ModuleContext, header android.Path, from string,
 	to string) android.OutputPath {
 	// Output path is the sysroot base + "usr/include" + to directory + directory component
@@ -149,13 +135,6 @@ func (m *headerModule) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	if len(m.installPaths) == 0 {
 		ctx.ModuleErrorf("srcs %q matched zero files", m.properties.Srcs)
 	}
-
-	android.SetProvider(ctx, NdkHeaderInfoProvider, NdkHeaderInfo{
-		SrcPaths:         m.srcPaths,
-		InstallPaths:     m.installPaths,
-		LicensePath:      m.licensePath,
-		SkipVerification: Bool(m.properties.Skip_verification),
-	})
 }
 
 // ndk_headers installs the sets of ndk headers defined in the srcs property
@@ -224,8 +203,6 @@ type preprocessedHeadersModule struct {
 	licensePath  android.Path
 }
 
-var NdkPreprocessedHeaderInfoProvider = blueprint.NewProvider[NdkHeaderInfo]()
-
 func (m *preprocessedHeadersModule) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	if String(m.properties.License) == "" {
 		ctx.PropertyErrorf("license", "field is required")
@@ -254,13 +231,6 @@ func (m *preprocessedHeadersModule) GenerateAndroidBuildActions(ctx android.Modu
 	if len(m.installPaths) == 0 {
 		ctx.ModuleErrorf("srcs %q matched zero files", m.properties.Srcs)
 	}
-
-	android.SetProvider(ctx, NdkPreprocessedHeaderInfoProvider, NdkHeaderInfo{
-		SrcPaths:         m.srcPaths,
-		InstallPaths:     m.installPaths,
-		LicensePath:      m.licensePath,
-		SkipVerification: Bool(m.properties.Skip_verification),
-	})
 }
 
 // preprocessed_ndk_headers preprocesses all the ndk headers listed in the srcs

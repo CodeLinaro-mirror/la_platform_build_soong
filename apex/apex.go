@@ -82,6 +82,10 @@ type apexBundleProperties struct {
 	// /system/sepolicy/apex/<module_name>_file_contexts.
 	File_contexts *string `android:"path"`
 
+	// By default, file_contexts is amended by force-labelling / and /apex_manifest.pb as system_file
+	// to avoid mistakes. When set as true, no force-labelling.
+	Use_file_contexts_as_is *bool
+
 	// Path to the canned fs config file for customizing file's
 	// uid/gid/mod/capabilities. The content of this file is appended to the
 	// default config, so that the custom entries are preferred. The format is
@@ -1849,7 +1853,7 @@ func (a *apexBundle) depVisitor(vctx *visitorContext, ctx android.ModuleContext,
 		return false
 	}
 	depName := ctx.OtherModuleName(child)
-	if android.EqualModules(parent, ctx.Module()) {
+	if ctx.EqualModules(parent, ctx.Module()) {
 		switch depTag {
 		case sharedLibTag, jniLibTag:
 			isJniLib := depTag == jniLibTag
@@ -2258,13 +2262,6 @@ func (a *apexBundle) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	a.enforcePartitionTagOnApexSystemServerJar(ctx)
 
 	a.verifyNativeImplementationLibs(ctx)
-
-	android.SetProvider(ctx, android.ApexBundleDepsDataProvider, android.ApexBundleDepsData{
-		FlatListPath: a.FlatListPath(),
-		Updatable:    a.Updatable(),
-	})
-
-	android.SetProvider(ctx, filesystem.ApexKeyPathInfoProvider, filesystem.ApexKeyPathInfo{a.apexKeysPath})
 }
 
 // Set prebuiltInfoProvider. This will be used by `apex_prebuiltinfo_singleton` to print out a metadata file
@@ -2893,7 +2890,7 @@ func (a *apexBundle) verifyNativeImplementationLibs(ctx android.ModuleContext) {
 
 				tag := ctx.OtherModuleDependencyTag(child)
 
-				if android.EqualModules(parent, ctx.Module()) {
+				if ctx.EqualModules(parent, ctx.Module()) {
 					if !checkApexTag(tag) {
 						return false
 					}

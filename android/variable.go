@@ -668,7 +668,6 @@ type PartitionVariables struct {
 	AbOtaPartitions                   []string                                 `json:",omitempty"`
 	AbOtaKeys                         []string                                 `json:",omitempty"`
 	AbOtaPostInstallConfig            []string                                 `json:",omitempty"`
-	BoardSuperImageInUpdatePackage    bool                                     `json:",omitempty"`
 
 	// Avb (android verified boot) stuff
 	BoardAvbEnable          bool                                `json:",omitempty"`
@@ -717,8 +716,6 @@ type PartitionVariables struct {
 	ProductFsCompression string `json:",omitempty"`
 
 	ReleaseToolsExtensionDir string `json:",omitempty"`
-
-	BoardFastbootInfoFile string `json:",omitempty"`
 }
 
 func boolPtr(v bool) *bool {

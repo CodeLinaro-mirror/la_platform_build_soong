@@ -15,7 +15,6 @@
 package android
 
 import (
-	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -612,6 +611,17 @@ func (t TaggedDistFiles) merge(other TaggedDistFiles) TaggedDistFiles {
 	}
 
 	return t
+}
+
+func MakeDefaultDistFiles(paths ...Path) TaggedDistFiles {
+	for _, p := range paths {
+		if p == nil {
+			panic("The path to a dist file cannot be nil.")
+		}
+	}
+
+	// The default OutputFile tag is the empty "" string.
+	return TaggedDistFiles{DefaultDistTag: paths}
 }
 
 type hostAndDeviceProperties struct {
@@ -1220,13 +1230,6 @@ func (m *ModuleBase) GenerateTaggedDistFiles(ctx BaseModuleContext) TaggedDistFi
 		tag := proptools.StringDefault(dist.Tag, DefaultDistTag)
 
 		distFileForTagFromProvider, err := outputFilesForModuleFromProvider(ctx, m.module, tag)
-
-		// If the module doesn't define output files for the DefaultDistTag, try the files under
-		// the "" tag.
-		if tag == DefaultDistTag && errors.Is(err, ErrUnsupportedOutputTag) {
-			distFileForTagFromProvider, err = outputFilesForModuleFromProvider(ctx, m.module, "")
-		}
-
 		if err != OutputFilesProviderNotSet {
 			if err != nil && tag != DefaultDistTag {
 				ctx.PropertyErrorf("dist.tag", "%s", err.Error())
@@ -1662,7 +1665,7 @@ func (m *ModuleBase) generateModuleTarget(ctx *moduleContext) {
 		var checkbuildTarget Path
 		var uncheckedModule bool
 		var skipAndroidMkProcessing bool
-		if EqualModules(m.module, module) {
+		if ctx.EqualModules(m.module, module) {
 			allInstalledFiles = append(allInstalledFiles, ctx.installFiles...)
 			checkbuildTarget = ctx.checkbuildTarget
 			uncheckedModule = ctx.uncheckedModule
@@ -1936,8 +1939,6 @@ type CommonModuleInfo struct {
 	TargetRequiredModuleNames                    []string
 	VintfFragmentModuleNames                     []string
 	Dists                                        []Dist
-	ExportedToMake                               bool
-	Team                                         string
 }
 
 type ApiLevelOrPlatform struct {
@@ -2297,8 +2298,6 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 		TargetRequiredModuleNames:                    m.module.TargetRequiredModuleNames(),
 		VintfFragmentModuleNames:                     m.module.VintfFragmentModuleNames(ctx),
 		Dists:                                        m.Dists(),
-		ExportedToMake:                               m.ExportedToMake(),
-		Team:                                         m.Team(),
 	}
 	if mm, ok := m.module.(interface {
 		MinSdkVersion(ctx EarlyModuleContext) ApiLevel
@@ -2368,18 +2367,6 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 			GeneratedHeaderDirs:  s.GeneratedHeaderDirs(),
 			GeneratedDeps:        s.GeneratedDeps(),
 		})
-	}
-
-	if m.Enabled(ctx) {
-		if v, ok := m.module.(ModuleMakeVarsProvider); ok {
-			SetProvider(ctx, ModuleMakeVarsInfoProvider, v.MakeVars(ctx))
-		}
-
-		if am, ok := m.module.(AndroidMkDataProvider); ok {
-			SetProvider(ctx, AndroidMkDataInfoProvider, AndroidMkDataInfo{
-				Class: am.AndroidMk().Class,
-			})
-		}
 	}
 }
 
@@ -2897,8 +2884,6 @@ func OutputFilesForModule(ctx PathContext, module Module, tag string) Paths {
 
 // OutputFileForModule returns the output file paths with the given tag.  On error, including if the
 // module produced zero or multiple paths, it reports errors to the ctx and returns nil.
-// TODO(b/397766191): Change the signature to take ModuleProxy
-// Please only access the module's internal data through providers.
 func OutputFileForModule(ctx PathContext, module Module, tag string) Path {
 	paths, err := outputFilesForModule(ctx, module, tag)
 	if err != nil {
@@ -2936,10 +2921,9 @@ type OutputFilesProviderModuleContext interface {
 	OtherModuleProviderContext
 	Module() Module
 	GetOutputFiles() OutputFilesInfo
+	EqualModules(m1, m2 Module) bool
 }
 
-// TODO(b/397766191): Change the signature to take ModuleProxy
-// Please only access the module's internal data through providers.
 func outputFilesForModule(ctx PathContext, module Module, tag string) (Paths, error) {
 	outputFilesFromProvider, err := outputFilesForModuleFromProvider(ctx, module, tag)
 	if outputFilesFromProvider != nil || err != OutputFilesProviderNotSet {
@@ -2947,7 +2931,7 @@ func outputFilesForModule(ctx PathContext, module Module, tag string) (Paths, er
 	}
 
 	if octx, ok := ctx.(OutputFilesProviderModuleContext); ok {
-		if EqualModules(octx.Module(), module) {
+		if octx.EqualModules(octx.Module(), module) {
 			// It is the current module, we can access the srcs through interface
 			if sourceFileProducer, ok := module.(SourceFileProducer); ok {
 				return sourceFileProducer.Srcs(), nil
@@ -2972,12 +2956,14 @@ func outputFilesForModule(ctx PathContext, module Module, tag string) (Paths, er
 // If a module doesn't have the OutputFilesProvider, nil is returned.
 func outputFilesForModuleFromProvider(ctx PathContext, module Module, tag string) (Paths, error) {
 	var outputFiles OutputFilesInfo
+	fromProperty := false
 
 	if mctx, isMctx := ctx.(OutputFilesProviderModuleContext); isMctx {
-		if !EqualModules(mctx.Module(), module) {
+		if !mctx.EqualModules(mctx.Module(), module) {
 			outputFiles, _ = OtherModuleProvider(mctx, module, OutputFilesProvider)
 		} else {
 			outputFiles = mctx.GetOutputFiles()
+			fromProperty = true
 		}
 	} else if cta, isCta := ctx.(*singletonContextAdaptor); isCta {
 		outputFiles, _ = OtherModuleProvider(cta, module, OutputFilesProvider)
@@ -2994,8 +2980,10 @@ func outputFilesForModuleFromProvider(ctx PathContext, module Module, tag string
 	} else if taggedOutputFiles, hasTag := outputFiles.TaggedOutputFiles[tag]; hasTag {
 		return taggedOutputFiles, nil
 	} else {
-		return nil, UnsupportedOutputTagError{
-			tag: tag,
+		if fromProperty {
+			return nil, fmt.Errorf("unsupported tag %q for module getting its own output files", tag)
+		} else {
+			return nil, fmt.Errorf("unsupported module reference tag %q", tag)
 		}
 	}
 }
@@ -3014,24 +3002,8 @@ type OutputFilesInfo struct {
 
 var OutputFilesProvider = blueprint.NewProvider[OutputFilesInfo]()
 
-type UnsupportedOutputTagError struct {
-	tag string
-}
-
-func (u UnsupportedOutputTagError) Error() string {
-	return fmt.Sprintf("unsupported output tag %q", u.tag)
-}
-
-func (u UnsupportedOutputTagError) Is(e error) bool {
-	_, ok := e.(UnsupportedOutputTagError)
-	return ok
-}
-
-var _ error = UnsupportedOutputTagError{}
-
 // This is used to mark the case where OutputFilesProvider is not set on some modules.
 var OutputFilesProviderNotSet = fmt.Errorf("No output files from provider")
-var ErrUnsupportedOutputTag = UnsupportedOutputTagError{}
 
 // Modules can implement HostToolProvider and return a valid OptionalPath from HostToolPath() to
 // specify that they can be used as a tool by a genrule module.
@@ -3097,7 +3069,7 @@ func (c *buildTargetSingleton) GenerateBuildActions(ctx SingletonContext) {
 
 	modulesInDir := make(map[string]Paths)
 
-	ctx.VisitAllModuleProxies(func(module ModuleProxy) {
+	ctx.VisitAllModules(func(module Module) {
 		info := OtherModuleProviderOrDefault(ctx, module, FinalModuleBuildTargetsProvider)
 
 		if info.CheckbuildTarget != nil {
@@ -3178,6 +3150,14 @@ func (c *buildTargetSingleton) GenerateBuildActions(ctx SingletonContext) {
 type IDEInfo interface {
 	IDEInfo(ctx BaseModuleContext, ideInfo *IdeInfo)
 	BaseModuleName() string
+}
+
+// Extract the base module name from the Import name.
+// Often the Import name has a prefix "prebuilt_".
+// Remove the prefix explicitly if needed
+// until we find a better solution to get the Import name.
+type IDECustomizedModuleName interface {
+	IDECustomizedModuleName() string
 }
 
 // Collect information for opening IDE project files in java/jdeps.go.

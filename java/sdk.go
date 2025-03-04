@@ -274,7 +274,7 @@ func createNonUpdatableFrameworkAidl(ctx android.SingletonContext) {
 func createFrameworkAidl(stubsModules []string, path android.WritablePath, ctx android.SingletonContext) *android.RuleBuilder {
 	stubsJars := make([]android.Paths, len(stubsModules))
 
-	ctx.VisitAllModuleProxies(func(module android.ModuleProxy) {
+	ctx.VisitAllModules(func(module android.Module) {
 		// Collect dex jar paths for the modules listed above.
 		if j, ok := android.OtherModuleProvider(ctx, module, JavaInfoProvider); ok {
 			name := ctx.ModuleName(module)

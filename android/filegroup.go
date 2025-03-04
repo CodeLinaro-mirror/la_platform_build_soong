@@ -131,11 +131,10 @@ func (fg *fileGroup) Srcs() Paths {
 	return append(Paths{}, fg.srcs...)
 }
 
-func (fg *fileGroup) MakeVars(_ MakeVarsModuleContext) []ModuleMakeVarsValue {
+func (fg *fileGroup) MakeVars(ctx MakeVarsModuleContext) {
 	if makeVar := String(fg.properties.Export_to_make_var); makeVar != "" {
-		return []ModuleMakeVarsValue{{makeVar, strings.Join(fg.srcs.Strings(), " ")}}
+		ctx.StrictRaw(makeVar, strings.Join(fg.srcs.Strings(), " "))
 	}
-	return nil
 }
 
 // Defaults

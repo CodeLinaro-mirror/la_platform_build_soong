@@ -15,9 +15,8 @@
 package aconfig
 
 import (
-	"strconv"
-
 	"android/soong/android"
+	"strconv"
 )
 
 func ExportedJavaDeclarationsLibraryFactory() android.Singleton {
@@ -31,7 +30,7 @@ type exportedJavaDeclarationsLibrarySingleton struct {
 func (this *exportedJavaDeclarationsLibrarySingleton) GenerateBuildActions(ctx android.SingletonContext) {
 	// Find all of the aconfig_declarations modules
 	var cacheFiles android.Paths
-	ctx.VisitAllModuleProxies(func(module android.ModuleProxy) {
+	ctx.VisitAllModules(func(module android.Module) {
 		decl, ok := android.OtherModuleProvider(ctx, module, android.AconfigDeclarationsProviderKey)
 		if !ok {
 			return

@@ -53,11 +53,10 @@ package cc
 // TODO(danalbert): Write `ndk_static_library` rule.
 
 import (
+	"android/soong/android"
 	"fmt"
 	"path/filepath"
 	"strings"
-
-	"android/soong/android"
 
 	"github.com/google/blueprint"
 )
@@ -210,61 +209,57 @@ func (n *ndkSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 	var headerCCompatVerificationTimestampPaths android.Paths
 	var installPaths android.Paths
 	var licensePaths android.Paths
-	ctx.VisitAllModuleProxies(func(module android.ModuleProxy) {
-
-		if !android.OtherModuleProviderOrDefault(ctx, module, android.CommonModuleInfoKey).Enabled {
+	ctx.VisitAllModules(func(module android.Module) {
+		if m, ok := module.(android.Module); ok && !m.Enabled(ctx) {
 			return
 		}
 
-		if m, ok := android.OtherModuleProvider(ctx, module, NdkHeaderInfoProvider); ok {
-			headerSrcPaths = append(headerSrcPaths, m.SrcPaths...)
-			headerInstallPaths = append(headerInstallPaths, m.InstallPaths...)
-			if !m.SkipVerification {
-				for i, installPath := range m.InstallPaths {
+		if m, ok := module.(*headerModule); ok {
+			headerSrcPaths = append(headerSrcPaths, m.srcPaths...)
+			headerInstallPaths = append(headerInstallPaths, m.installPaths...)
+			if !Bool(m.properties.Skip_verification) {
+				for i, installPath := range m.installPaths {
 					headersToVerify = append(headersToVerify, srcDestPair{
-						src:  m.SrcPaths[i],
+						src:  m.srcPaths[i],
 						dest: installPath,
 					})
 				}
 			}
-			installPaths = append(installPaths, m.InstallPaths...)
-			licensePaths = append(licensePaths, m.LicensePath)
+			installPaths = append(installPaths, m.installPaths...)
+			licensePaths = append(licensePaths, m.licensePath)
 		}
 
-		if m, ok := android.OtherModuleProvider(ctx, module, NdkPreprocessedHeaderInfoProvider); ok {
-			headerSrcPaths = append(headerSrcPaths, m.SrcPaths...)
-			headerInstallPaths = append(headerInstallPaths, m.InstallPaths...)
-			if !m.SkipVerification {
-				for i, installPath := range m.InstallPaths {
+		if m, ok := module.(*preprocessedHeadersModule); ok {
+			headerSrcPaths = append(headerSrcPaths, m.srcPaths...)
+			headerInstallPaths = append(headerInstallPaths, m.installPaths...)
+			if !Bool(m.properties.Skip_verification) {
+				for i, installPath := range m.installPaths {
 					headersToVerify = append(headersToVerify, srcDestPair{
-						src:  m.SrcPaths[i],
+						src:  m.srcPaths[i],
 						dest: installPath,
 					})
 				}
 			}
-			installPaths = append(installPaths, m.InstallPaths...)
-			licensePaths = append(licensePaths, m.LicensePath)
+			installPaths = append(installPaths, m.installPaths...)
+			licensePaths = append(licensePaths, m.licensePath)
 		}
 
-		if ccInfo, ok := android.OtherModuleProvider(ctx, module, CcInfoProvider); ok {
-			if installer := ccInfo.InstallerInfo; installer != nil && installer.StubDecoratorInfo != nil &&
-				ccInfo.LibraryInfo != nil && ccInfo.LibraryInfo.BuildStubs {
-				installPaths = append(installPaths, installer.StubDecoratorInfo.InstallPath)
+		if m, ok := module.(*Module); ok {
+			if installer, ok := m.installer.(*stubDecorator); ok && m.library.BuildStubs() {
+				installPaths = append(installPaths, installer.installPath)
 			}
 
-			if ccInfo.LinkerInfo != nil {
-				if library := ccInfo.LinkerInfo.LibraryDecoratorInfo; library != nil {
-					if library.NdkSysrootPath != nil {
-						staticLibInstallPaths = append(
-							staticLibInstallPaths, library.NdkSysrootPath)
-					}
+			if library, ok := m.linker.(*libraryDecorator); ok {
+				if library.ndkSysrootPath != nil {
+					staticLibInstallPaths = append(
+						staticLibInstallPaths, library.ndkSysrootPath)
 				}
+			}
 
-				if object := ccInfo.LinkerInfo.ObjectLinkerInfo; object != nil {
-					if object.NdkSysrootPath != nil {
-						staticLibInstallPaths = append(
-							staticLibInstallPaths, object.NdkSysrootPath)
-					}
+			if object, ok := m.linker.(*objectLinker); ok {
+				if object.ndkSysrootPath != nil {
+					staticLibInstallPaths = append(
+						staticLibInstallPaths, object.ndkSysrootPath)
 				}
 			}
 		}

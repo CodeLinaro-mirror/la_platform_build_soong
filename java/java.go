@@ -432,9 +432,6 @@ type JavaInfo struct {
 	DexJarBuildPath OptionalDexJarPath
 
 	DexpreopterInfo *DexpreopterInfo
-
-	XrefJavaFiles   android.Paths
-	XrefKotlinFiles android.Paths
 }
 
 var JavaInfoProvider = blueprint.NewProvider[*JavaInfo]()
@@ -3363,10 +3360,19 @@ func (j *Import) UseProfileGuidedDexpreopt() bool {
 
 // Add compile time check for interface implementation
 var _ android.IDEInfo = (*Import)(nil)
+var _ android.IDECustomizedModuleName = (*Import)(nil)
 
 // Collect information for opening IDE project files in java/jdeps.go.
+
 func (j *Import) IDEInfo(ctx android.BaseModuleContext, dpInfo *android.IdeInfo) {
 	dpInfo.Jars = append(dpInfo.Jars, j.combinedImplementationFile.String())
+}
+
+func (j *Import) IDECustomizedModuleName() string {
+	// TODO(b/113562217): Extract the base module name from the Import name, often the Import name
+	// has a prefix "prebuilt_". Remove the prefix explicitly if needed until we find a better
+	// solution to get the Import name.
+	return android.RemoveOptionalPrebuiltPrefix(j.Name())
 }
 
 var _ android.PrebuiltInterface = (*Import)(nil)
@@ -3643,10 +3649,10 @@ type kytheExtractJavaSingleton struct {
 func (ks *kytheExtractJavaSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 	var xrefTargets android.Paths
 	var xrefKotlinTargets android.Paths
-	ctx.VisitAllModuleProxies(func(module android.ModuleProxy) {
-		if javaInfo, ok := android.OtherModuleProvider(ctx, module, JavaInfoProvider); ok {
-			xrefTargets = append(xrefTargets, javaInfo.XrefJavaFiles...)
-			xrefKotlinTargets = append(xrefKotlinTargets, javaInfo.XrefKotlinFiles...)
+	ctx.VisitAllModules(func(module android.Module) {
+		if javaModule, ok := module.(xref); ok {
+			xrefTargets = append(xrefTargets, javaModule.XrefJavaFiles()...)
+			xrefKotlinTargets = append(xrefKotlinTargets, javaModule.XrefKotlinFiles()...)
 		}
 	})
 	// TODO(asmundak): perhaps emit a rule to output a warning if there were no xrefTargets
@@ -3846,10 +3852,5 @@ func setExtraJavaInfo(ctx android.ModuleContext, module android.Module, javaInfo
 			ApexSystemServerDexpreoptInstalls: di.ApexSystemServerDexpreoptInstalls(),
 			ApexSystemServerDexJars:           di.ApexSystemServerDexJars(),
 		}
-	}
-
-	if xr, ok := module.(xref); ok {
-		javaInfo.XrefJavaFiles = xr.XrefJavaFiles()
-		javaInfo.XrefKotlinFiles = xr.XrefKotlinFiles()
 	}
 }

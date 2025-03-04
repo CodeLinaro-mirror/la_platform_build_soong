@@ -87,7 +87,6 @@ type DeviceProperties struct {
 
 	Ramdisk_node_list      *string `android:"path"`
 	Releasetools_extension *string `android:"path"`
-	FastbootInfo           *string `android:"path"`
 }
 
 type androidDevice struct {
@@ -176,7 +175,7 @@ func (a *androidDevice) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 
 	allInstalledModules := a.allInstalledModules(ctx)
 
-	a.buildTargetFilesZip(ctx, allInstalledModules)
+	a.buildTargetFilesZip(ctx)
 	a.buildProguardZips(ctx, allInstalledModules)
 
 	var deps []android.Path
@@ -280,7 +279,7 @@ func (a *androidDevice) allInstalledModules(ctx android.ModuleContext) []android
 
 	ret := []android.Module{}
 	ctx.WalkDepsProxy(func(mod, _ android.ModuleProxy) bool {
-		if variations, ok := allOwners[ctx.OtherModuleName(mod)]; ok && android.InList(ctx.OtherModuleSubDir(mod), variations) {
+		if variations, ok := allOwners[mod.Name()]; ok && android.InList(ctx.OtherModuleSubDir(mod), variations) {
 			ret = append(ret, mod)
 		}
 		return true
@@ -326,11 +325,10 @@ func (a *androidDevice) distFiles(ctx android.ModuleContext) {
 	}
 }
 
-func (a *androidDevice) MakeVars(_ android.MakeVarsModuleContext) []android.ModuleMakeVarsValue {
+func (a *androidDevice) MakeVars(ctx android.MakeVarsModuleContext) {
 	if proptools.Bool(a.deviceProps.Main_device) {
-		return []android.ModuleMakeVarsValue{{"SOONG_ONLY_ALL_IMAGES_ZIP", a.allImagesZip.String()}}
+		ctx.StrictRaw("SOONG_ONLY_ALL_IMAGES_ZIP", a.allImagesZip.String())
 	}
-	return nil
 }
 
 func (a *androidDevice) buildProguardZips(ctx android.ModuleContext, allInstalledModules []android.Module) {
@@ -394,7 +392,7 @@ type targetFilesystemZipCopy struct {
 	destSubdir string
 }
 
-func (a *androidDevice) buildTargetFilesZip(ctx android.ModuleContext, allInstalledModules []android.Module) {
+func (a *androidDevice) buildTargetFilesZip(ctx android.ModuleContext) {
 	targetFilesDir := android.PathForModuleOut(ctx, "target_files_dir")
 	targetFilesZip := android.PathForModuleOut(ctx, "target_files.zip")
 
@@ -498,7 +496,7 @@ func (a *androidDevice) buildTargetFilesZip(ctx android.ModuleContext, allInstal
 	}
 
 	a.copyImagesToTargetZip(ctx, builder, targetFilesDir)
-	a.copyMetadataToTargetZip(ctx, builder, targetFilesDir, allInstalledModules)
+	a.copyMetadataToTargetZip(ctx, builder, targetFilesDir)
 
 	builder.Command().
 		BuiltTool("soong_zip").
@@ -550,7 +548,7 @@ func (a *androidDevice) copyImagesToTargetZip(ctx android.ModuleContext, builder
 	}
 }
 
-func (a *androidDevice) copyMetadataToTargetZip(ctx android.ModuleContext, builder *android.RuleBuilder, targetFilesDir android.WritablePath, allInstalledModules []android.Module) {
+func (a *androidDevice) copyMetadataToTargetZip(ctx android.ModuleContext, builder *android.RuleBuilder, targetFilesDir android.WritablePath) {
 	// Create a META/ subdirectory
 	builder.Command().Textf("mkdir -p %s/META", targetFilesDir.String())
 	if proptools.Bool(a.deviceProps.Ab_ota_updater) {
@@ -588,22 +586,7 @@ func (a *androidDevice) copyMetadataToTargetZip(ctx android.ModuleContext, build
 		if android.InList(partition, []string{"userdata"}) {
 			continue
 		}
-		if partition != "vendor_ramdisk" {
-			// vendor_ramdisk will be handled separately.
-			builder.Command().Textf("cp").Input(fsInfos[partition].FilesystemConfig).Textf(" %s/META/%s", targetFilesDir.String(), a.filesystemConfigNameForTargetFiles(partition))
-		}
-		if partition == "ramdisk" {
-			// Create an additional copy at boot_filesystem_config.txt
-			builder.Command().Textf("cp").Input(fsInfos[partition].FilesystemConfig).Textf(" %s/META/boot_filesystem_config.txt", targetFilesDir.String())
-		}
-		if partition == "system" {
-			// Create root_filesystem_config from the assembled ROOT/ intermediates directory
-			a.generateFilesystemConfigForTargetFiles(ctx, builder, targetFilesDir.String(), targetFilesDir.String()+"/ROOT", "root_filesystem_config.txt")
-		}
-		if partition == "vendor_ramdisk" {
-			// Create vendor_boot_filesystem_config from the assembled VENDOR_BOOT/RAMDISK intermediates directory
-			a.generateFilesystemConfigForTargetFiles(ctx, builder, targetFilesDir.String(), targetFilesDir.String()+"/VENDOR_BOOT/RAMDISK", "vendor_boot_filesystem_config.txt")
-		}
+		builder.Command().Textf("cp").Input(fsInfos[partition].FilesystemConfig).Textf(" %s/META/%s", targetFilesDir.String(), a.filesystemConfigNameForTargetFiles(partition))
 	}
 	// Copy ramdisk_node_list
 	if ramdiskNodeList := android.PathForModuleSrc(ctx, proptools.String(a.deviceProps.Ramdisk_node_list)); ramdiskNodeList != nil {
@@ -613,52 +596,6 @@ func (a *androidDevice) copyMetadataToTargetZip(ctx android.ModuleContext, build
 	if releaseTools := android.PathForModuleSrc(ctx, proptools.String(a.deviceProps.Releasetools_extension)); releaseTools != nil {
 		builder.Command().Textf("cp").Input(releaseTools).Textf(" %s/META/", targetFilesDir.String())
 	}
-	// apexkeys.txt
-	var installedApexKeys []android.Path
-	for _, installedModule := range allInstalledModules {
-		if info, ok := android.OtherModuleProvider(ctx, installedModule, ApexKeyPathInfoProvider); ok {
-			installedApexKeys = append(installedApexKeys, info.ApexKeyPath)
-		}
-	}
-	installedApexKeys = android.SortedUniquePaths(installedApexKeys) // Sort by keypath to match make
-	builder.Command().Text("cat").Inputs(installedApexKeys).Textf(" >> %s/META/apexkeys.txt", targetFilesDir.String())
-	// Copy fastboot-info.txt
-	if fastbootInfo := android.PathForModuleSrc(ctx, proptools.String(a.deviceProps.FastbootInfo)); fastbootInfo != nil {
-		// TODO (b/399788523): Autogenerate fastboot-info.txt if there is no source fastboot-info.txt
-		// https://cs.android.com/android/_/android/platform/build/+/80b9546f8f69e78b8fe1870e0e745d70fc18dfcd:core/Makefile;l=5831-5893;drc=077490384423dff9eac954da5c001c6f0be3fa6e;bpv=0;bpt=0
-		builder.Command().Textf("cp").Input(fastbootInfo).Textf(" %s/META/fastboot-info.txt", targetFilesDir.String())
-	}
-
-	if a.partitionProps.Super_partition_name != nil {
-		superPartition := ctx.GetDirectDepProxyWithTag(*a.partitionProps.Super_partition_name, superPartitionDepTag)
-		if info, ok := android.OtherModuleProvider(ctx, superPartition, SuperImageProvider); ok {
-			// dynamic_partitions_info.txt
-			// TODO (b/390192334): Add `building_super_empty_partition=true`
-			builder.Command().Text("cp").Input(info.DynamicPartitionsInfo).Textf(" %s/META/", targetFilesDir.String())
-		} else {
-			ctx.ModuleErrorf("Super partition %s does set SuperImageProvider\n", superPartition.Name())
-		}
-	}
-
-}
-
-type ApexKeyPathInfo struct {
-	ApexKeyPath android.Path
-}
-
-var ApexKeyPathInfoProvider = blueprint.NewProvider[ApexKeyPathInfo]()
-
-func (a *androidDevice) generateFilesystemConfigForTargetFiles(ctx android.ModuleContext, builder *android.RuleBuilder, targetFilesDir, stagingDir, filename string) {
-	fsConfigOut := android.PathForModuleOut(ctx, filename)
-	ctx.Build(pctx, android.BuildParams{
-		Rule:   fsConfigRule,
-		Output: fsConfigOut,
-		Args: map[string]string{
-			"rootDir": stagingDir,
-			"prefix":  "",
-		},
-	})
-	builder.Command().Textf("cp").Input(fsConfigOut).Textf(" %s/META/", targetFilesDir)
 }
 
 // Filenames for the partition specific fs_config files.

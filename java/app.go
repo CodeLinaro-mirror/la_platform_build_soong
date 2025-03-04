@@ -1124,11 +1124,6 @@ func (a *AndroidApp) generateAndroidBuildActions(ctx android.ModuleContext) {
 		android.SetProvider(ctx, JavaInfoProvider, javaInfo)
 	}
 
-	android.SetProvider(ctx, android.ApexBundleDepsDataProvider, android.ApexBundleDepsData{
-		FlatListPath: a.FlatListPath(),
-		Updatable:    a.Updatable(),
-	})
-
 	moduleInfoJSON := ctx.ModuleInfoJSON()
 	moduleInfoJSON.Class = []string{"APPS"}
 	if !a.embeddedJniLibs {
@@ -1175,7 +1170,7 @@ func collectAppDeps(ctx android.ModuleContext, app appDepsInterface,
 			apkInApex := ctx.Module().(android.ApexModule).NotInPlatform()
 			childLinkable, _ := android.OtherModuleProvider(ctx, child, cc.LinkableInfoProvider)
 			parentIsLinkable := false
-			if android.EqualModules(ctx.Module(), parent) {
+			if ctx.EqualModules(ctx.Module(), parent) {
 				parentLinkable, _ := ctx.Module().(cc.LinkableInterface)
 				parentIsLinkable = parentLinkable != nil
 			} else {
