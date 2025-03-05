@@ -340,6 +340,26 @@ func (f *filesystemCreator) createReleaseToolsFilegroup(ctx android.LoadHookCont
 	return releaseToolsFilegroupName, true
 }
 
+func (f *filesystemCreator) createFastbootInfoFilegroup(ctx android.LoadHookContext) (string, bool) {
+	fastbootInfoFile := ctx.Config().ProductVariables().PartitionVarsForSoongMigrationOnlyDoNotUse.BoardFastbootInfoFile
+	if fastbootInfoFile == "" {
+		return "", false
+	}
+
+	fastbootInfoFilegroupName := generatedModuleName(ctx.Config(), "fastboot")
+	filegroupProps := &struct {
+		Name       *string
+		Srcs       []string
+		Visibility []string
+	}{
+		Name:       proptools.StringPtr(fastbootInfoFilegroupName),
+		Srcs:       []string{fastbootInfoFile},
+		Visibility: []string{"//visibility:public"},
+	}
+	ctx.CreateModuleInDirectory(android.FileGroupFactory, ".", filegroupProps)
+	return fastbootInfoFilegroupName, true
+}
+
 func (f *filesystemCreator) createDeviceModule(
 	ctx android.LoadHookContext,
 	partitions allGeneratedPartitionData,
@@ -347,11 +367,9 @@ func (f *filesystemCreator) createDeviceModule(
 	superImageSubPartitions []string,
 ) {
 	baseProps := &struct {
-		Name         *string
-		Android_info *string
+		Name *string
 	}{
-		Name:         proptools.StringPtr(generatedModuleName(ctx.Config(), "device")),
-		Android_info: proptools.StringPtr(":" + generatedModuleName(ctx.Config(), "android_info.prop{.txt}")),
+		Name: proptools.StringPtr(generatedModuleName(ctx.Config(), "device")),
 	}
 
 	// Currently, only the system and system_ext partition module is created.
@@ -406,6 +424,8 @@ func (f *filesystemCreator) createDeviceModule(
 		Ab_ota_partitions:         ctx.Config().ProductVariables().PartitionVarsForSoongMigrationOnlyDoNotUse.AbOtaPartitions,
 		Ab_ota_postinstall_config: ctx.Config().ProductVariables().PartitionVarsForSoongMigrationOnlyDoNotUse.AbOtaPostInstallConfig,
 		Ramdisk_node_list:         proptools.StringPtr(":ramdisk_node_list"),
+		Android_info:              proptools.StringPtr(":" + generatedModuleName(ctx.Config(), "android_info.prop{.txt}")),
+		Kernel_version:            ctx.Config().ProductVariables().BoardKernelVersion,
 	}
 
 	if bootloader, ok := f.createBootloaderFilegroup(ctx); ok {
@@ -413,6 +433,9 @@ func (f *filesystemCreator) createDeviceModule(
 	}
 	if releaseTools, ok := f.createReleaseToolsFilegroup(ctx); ok {
 		deviceProps.Releasetools_extension = proptools.StringPtr(":" + releaseTools)
+	}
+	if fastbootInfo, ok := f.createFastbootInfoFilegroup(ctx); ok {
+		deviceProps.FastbootInfo = proptools.StringPtr(":" + fastbootInfo)
 	}
 
 	ctx.CreateModule(filesystem.AndroidDeviceFactory, baseProps, partitionProps, deviceProps)
@@ -470,10 +493,6 @@ func partitionSpecificFsProps(ctx android.EarlyModuleContext, partitions allGene
 		fsProps.Base_dir = proptools.StringPtr("system")
 		fsProps.Dirs = proptools.NewSimpleConfigurable(commonPartitionDirs)
 		fsProps.Security_patch = proptools.StringPtr(ctx.Config().PlatformSecurityPatch())
-
-		if systemExtName := partitions.nameForType("system_ext"); systemExtName != "" {
-			fsProps.Import_aconfig_flags_from = []string{systemExtName}
-		}
 		fsProps.Stem = proptools.StringPtr("system.img")
 	case "system_ext":
 		if partitionVars.ProductFsverityGenerateMetadata {

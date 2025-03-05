@@ -219,11 +219,7 @@ func (p propagateRROEnforcementTransitionMutator) Mutate(ctx android.BottomUpMut
 func (a *aapt) useResourceProcessorBusyBox(ctx android.BaseModuleContext) bool {
 	return BoolDefault(a.aaptProperties.Use_resource_processor, true) &&
 		// TODO(b/331641946): remove this when ResourceProcessorBusyBox supports generating shared libraries.
-		!slices.Contains(a.aaptProperties.Aaptflags, "--shared-lib") &&
-		// Use the legacy resource processor in kythe builds.
-		// The legacy resource processor creates an R.srcjar, which kythe can use for generating crossrefs.
-		// TODO(b/354854007): Re-enable BusyBox in kythe builds
-		!ctx.Config().EmitXrefRules()
+		!slices.Contains(a.aaptProperties.Aaptflags, "--shared-lib")
 }
 
 func (a *aapt) filterProduct() string {
@@ -945,6 +941,12 @@ type AndroidLibraryInfo struct {
 
 var AndroidLibraryInfoProvider = blueprint.NewProvider[AndroidLibraryInfo]()
 
+type AARImportInfo struct {
+	// Empty for now
+}
+
+var AARImportInfoProvider = blueprint.NewProvider[AARImportInfo]()
+
 type AndroidLibrary struct {
 	Library
 	aapt
@@ -1570,6 +1572,8 @@ func (a *AARImport) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	android.SetProvider(ctx, JniPackageProvider, JniPackageInfo{
 		JniPackages: a.jniPackages,
 	})
+
+	android.SetProvider(ctx, AARImportInfoProvider, AARImportInfo{})
 
 	ctx.SetOutputFiles([]android.Path{a.implementationAndResourcesJarFile}, "")
 	ctx.SetOutputFiles([]android.Path{a.aarPath}, ".aar")
