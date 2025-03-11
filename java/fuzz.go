@@ -63,7 +63,7 @@ func JavaFuzzFactory() android.Module {
 
 	module.Module.properties.Installable = proptools.BoolPtr(true)
 	module.Module.dexpreopter.isTest = true
-	module.Module.linter.properties.Lint.Test = proptools.BoolPtr(true)
+	module.Module.linter.properties.Lint.Test_module_type = proptools.BoolPtr(true)
 	module.Module.sourceProperties.Test_only = proptools.BoolPtr(true)
 	module.Module.sourceProperties.Top_level_test_target = true
 
@@ -107,7 +107,7 @@ func (j *JavaFuzzTest) DepsMutator(ctx android.BottomUpMutatorContext) {
 }
 
 func (j *JavaFuzzTest) GenerateAndroidBuildActions(ctx android.ModuleContext) {
-	j.fuzzPackagedModule = cc.PackageFuzzModule(ctx, j.fuzzPackagedModule, pctx)
+	j.fuzzPackagedModule = cc.PackageFuzzModule(ctx, j.fuzzPackagedModule)
 
 	_, sharedDeps := cc.CollectAllSharedDependencies(ctx)
 	for _, dep := range sharedDeps {

@@ -15,6 +15,9 @@
 package android
 
 import (
+	"slices"
+	"sync"
+
 	"github.com/google/blueprint"
 )
 
@@ -81,6 +84,9 @@ type SingletonContext interface {
 	VisitAllModuleVariantProxies(module Module, visit func(proxy ModuleProxy))
 
 	PrimaryModule(module Module) Module
+
+	PrimaryModuleProxy(module ModuleProxy) ModuleProxy
+
 	IsFinalModule(module Module) bool
 
 	AddNinjaFileDeps(deps ...string)
@@ -97,6 +103,24 @@ type SingletonContext interface {
 	// HasMutatorFinished returns true if the given mutator has finished running.
 	// It will panic if given an invalid mutator name.
 	HasMutatorFinished(mutatorName string) bool
+
+	// DistForGoals creates a rule to copy one or more Paths to the artifacts
+	// directory on the build server when any of the specified goals are built.
+	DistForGoal(goal string, paths ...Path)
+
+	// DistForGoalWithFilename creates a rule to copy a Path to the artifacts
+	// directory on the build server with the given filename when the specified
+	// goal is built.
+	DistForGoalWithFilename(goal string, path Path, filename string)
+
+	// DistForGoals creates a rule to copy one or more Paths to the artifacts
+	// directory on the build server when any of the specified goals are built.
+	DistForGoals(goals []string, paths ...Path)
+
+	// DistForGoalsWithFilename creates a rule to copy a Path to the artifacts
+	// directory on the build server with the given filename when any of the
+	// specified goals are built.
+	DistForGoalsWithFilename(goals []string, path Path, filename string)
 }
 
 type singletonAdaptor struct {
@@ -118,6 +142,13 @@ func (s *singletonAdaptor) GenerateBuildActions(ctx blueprint.SingletonContext) 
 
 	s.buildParams = sctx.buildParams
 	s.ruleParams = sctx.ruleParams
+
+	if len(sctx.dists) > 0 {
+		dists := getSingletonDists(sctx.Config())
+		dists.lock.Lock()
+		defer dists.lock.Unlock()
+		dists.dists = append(dists.dists, sctx.dists...)
+	}
 }
 
 func (s *singletonAdaptor) BuildParamsForTests() []BuildParams {
@@ -126,6 +157,19 @@ func (s *singletonAdaptor) BuildParamsForTests() []BuildParams {
 
 func (s *singletonAdaptor) RuleParamsForTests() map[blueprint.Rule]blueprint.RuleParams {
 	return s.ruleParams
+}
+
+var singletonDistsKey = NewOnceKey("singletonDistsKey")
+
+type singletonDistsAndLock struct {
+	dists []dist
+	lock  sync.Mutex
+}
+
+func getSingletonDists(config Config) *singletonDistsAndLock {
+	return config.Once(singletonDistsKey, func() interface{} {
+		return &singletonDistsAndLock{}
+	}).(*singletonDistsAndLock)
 }
 
 type Singleton interface {
@@ -137,6 +181,7 @@ type singletonContextAdaptor struct {
 
 	buildParams []BuildParams
 	ruleParams  map[blueprint.Rule]blueprint.RuleParams
+	dists       []dist
 }
 
 func (s *singletonContextAdaptor) blueprintSingletonContext() blueprint.SingletonContext {
@@ -229,6 +274,22 @@ func predAdaptor(pred func(Module) bool) func(blueprint.Module) bool {
 	}
 }
 
+func (s *singletonContextAdaptor) ModuleName(module blueprint.Module) string {
+	return s.SingletonContext.ModuleName(getWrappedModule(module))
+}
+
+func (s *singletonContextAdaptor) ModuleDir(module blueprint.Module) string {
+	return s.SingletonContext.ModuleDir(getWrappedModule(module))
+}
+
+func (s *singletonContextAdaptor) ModuleSubDir(module blueprint.Module) string {
+	return s.SingletonContext.ModuleSubDir(getWrappedModule(module))
+}
+
+func (s *singletonContextAdaptor) ModuleType(module blueprint.Module) string {
+	return s.SingletonContext.ModuleType(getWrappedModule(module))
+}
+
 func (s *singletonContextAdaptor) VisitAllModulesBlueprint(visit func(blueprint.Module)) {
 	s.SingletonContext.VisitAllModules(visit)
 }
@@ -273,6 +334,10 @@ func (s *singletonContextAdaptor) PrimaryModule(module Module) Module {
 	return s.SingletonContext.PrimaryModule(module).(Module)
 }
 
+func (s *singletonContextAdaptor) PrimaryModuleProxy(module ModuleProxy) ModuleProxy {
+	return ModuleProxy{s.SingletonContext.PrimaryModuleProxy(module.module)}
+}
+
 func (s *singletonContextAdaptor) IsFinalModule(module Module) bool {
 	return s.SingletonContext.IsFinalModule(module)
 }
@@ -314,4 +379,32 @@ func (s *singletonContextAdaptor) OtherModulePropertyErrorf(module Module, prope
 
 func (s *singletonContextAdaptor) HasMutatorFinished(mutatorName string) bool {
 	return s.blueprintSingletonContext().HasMutatorFinished(mutatorName)
+}
+func (s *singletonContextAdaptor) DistForGoal(goal string, paths ...Path) {
+	s.DistForGoals([]string{goal}, paths...)
+}
+
+func (s *singletonContextAdaptor) DistForGoalWithFilename(goal string, path Path, filename string) {
+	s.DistForGoalsWithFilename([]string{goal}, path, filename)
+}
+
+func (s *singletonContextAdaptor) DistForGoals(goals []string, paths ...Path) {
+	var copies distCopies
+	for _, path := range paths {
+		copies = append(copies, distCopy{
+			from: path,
+			dest: path.Base(),
+		})
+	}
+	s.dists = append(s.dists, dist{
+		goals: slices.Clone(goals),
+		paths: copies,
+	})
+}
+
+func (s *singletonContextAdaptor) DistForGoalsWithFilename(goals []string, path Path, filename string) {
+	s.dists = append(s.dists, dist{
+		goals: slices.Clone(goals),
+		paths: distCopies{{from: path, dest: filename}},
+	})
 }

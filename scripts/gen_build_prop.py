@@ -165,7 +165,7 @@ def generate_common_build_props(args):
   print(f"ro.{partition}.build.version.release={config['Platform_version_last_stable']}")
   print(f"ro.{partition}.build.version.release_or_codename={config['Platform_version_name']}")
   print(f"ro.{partition}.build.version.sdk={config['Platform_sdk_version']}")
-  print(f"ro.{partition}.build.version.sdk_minor={build_flags['RELEASE_PLATFORM_SDK_MINOR_VERSION']}")
+  print(f"ro.{partition}.build.version.sdk_full={config['Platform_sdk_version_full']}")
 
 def generate_build_info(args):
   print()
@@ -198,7 +198,7 @@ def generate_build_info(args):
     print(f"ro.build.display.id?={config['BuildDesc']}")
   print(f"ro.build.version.incremental={config['BuildNumber']}")
   print(f"ro.build.version.sdk={config['Platform_sdk_version']}")
-  print(f"ro.build.version.sdk_minor={build_flags['RELEASE_PLATFORM_SDK_MINOR_VERSION']}")
+  print(f"ro.build.version.sdk_full={config['Platform_sdk_version_full']}")
   print(f"ro.build.version.preview_sdk={config['Platform_preview_sdk_version']}")
   print(f"ro.build.version.preview_sdk_fingerprint={config['PlatformPreviewSdkFingerprint']}")
   print(f"ro.build.version.codename={config['Platform_sdk_codename']}")
@@ -311,7 +311,15 @@ def append_additional_system_props(args):
     props.append(f"ro.sanitize.{sanitize_target}=true")
 
   # Sets the default value of ro.postinstall.fstab.prefix to /system.
-  # Device board config should override the value to /product when needed by:
+  #
+  # Device board configs can override this to /product to use a
+  # product-specific fstab.postinstall file (installed to
+  # /product/etc/fstab.postinstall). If not overridden, the
+  # system/extras/cppreopts/fstab.postinstall file (installed to
+  # /system/etc/fstab.postinstall) will be used.
+  # Note: The default fstab.postinstall is generic and may be slower
+  # because it tries different mount options line by line to ensure
+  # compatibility across various devices.
   #
   #     PRODUCT_PRODUCT_PROPERTIES += ro.postinstall.fstab.prefix=/product
   #
@@ -364,9 +372,6 @@ def append_additional_system_props(args):
       props = list(filter(lambda x: not x.startswith("ro.setupwizard.mode="), props))
       props.append("ro.setupwizard.mode=OPTIONAL")
 
-    if not config["SdkBuild"]:
-      # To speedup startup of non-preopted builds, don't verify or compile the boot image.
-      props.append("dalvik.vm.image-dex2oat-filter=extract")
     # b/323566535
     props.append("init.svc_debug.no_fatal.zygote=true")
 

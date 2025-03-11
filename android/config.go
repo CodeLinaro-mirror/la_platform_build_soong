@@ -83,6 +83,7 @@ type CmdArgs struct {
 	OutDir         string
 	SoongOutDir    string
 	SoongVariables string
+	KatiSuffix     string
 
 	ModuleGraphFile   string
 	ModuleActionsFile string
@@ -289,6 +290,14 @@ func (c Config) ReleaseUseSystemFeatureBuildFlags() bool {
 	return c.config.productVariables.GetBuildFlagBool("RELEASE_USE_SYSTEM_FEATURE_BUILD_FLAGS")
 }
 
+func (c Config) ReleaseFingerprintAconfigPackages() bool {
+	return c.config.productVariables.GetBuildFlagBool("RELEASE_FINGERPRINT_ACONFIG_PACKAGES")
+}
+
+func (c Config) ReleaseAconfigCheckApiLevel() bool {
+	return c.config.productVariables.GetBuildFlagBool("RELEASE_ACONFIG_CHECK_API_LEVEL")
+}
+
 // A DeviceConfig object represents the configuration for a particular device
 // being built. For now there will only be one of these, but in the future there
 // may be multiple devices being built.
@@ -345,6 +354,7 @@ type config struct {
 	// Changes behavior based on whether Kati runs after soong_build, or if soong_build
 	// runs standalone.
 	katiEnabled bool
+	katiSuffix  string
 
 	captureBuild      bool // true for tests, saves build parameters for each module
 	ignoreEnvironment bool // true for tests, returns empty from all Getenv calls
@@ -376,12 +386,23 @@ type config struct {
 
 type partialCompileFlags struct {
 	// Is partial compilation enabled at all?
-	enabled bool
+	Enabled bool
 
 	// Whether to use d8 instead of r8
-	use_d8 bool
+	Use_d8 bool
 
 	// Add others as needed.
+}
+
+// These are the flags when `SOONG_PARTIAL_COMPILE` is empty or not set.
+var defaultPartialCompileFlags = partialCompileFlags{
+	Enabled: false,
+}
+
+// These are the flags when `SOONG_PARTIAL_COMPILE=true`.
+var enabledPartialCompileFlags = partialCompileFlags{
+	Enabled: true,
+	Use_d8:  true,
 }
 
 type deviceConfig struct {
@@ -417,11 +438,6 @@ type jsonConfigurable interface {
 // To add a new feature to the list, add the field in the struct
 // `partialCompileFlags` above, and then add the name of the field in the
 // switch statement below.
-var defaultPartialCompileFlags = partialCompileFlags{
-	// Set any opt-out flags here.  Opt-in flags are off by default.
-	enabled: false,
-}
-
 func (c *config) parsePartialCompileFlags(isEngBuild bool) (partialCompileFlags, error) {
 	if !isEngBuild {
 		return partialCompileFlags{}, nil
@@ -462,15 +478,14 @@ func (c *config) parsePartialCompileFlags(isEngBuild bool) (partialCompileFlags,
 		}
 		switch tok {
 		case "true":
-			ret = defaultPartialCompileFlags
-			ret.enabled = true
+			ret = enabledPartialCompileFlags
 		case "false":
 			// Set everything to false.
 			ret = partialCompileFlags{}
 		case "enabled":
-			ret.enabled = makeVal(state, defaultPartialCompileFlags.enabled)
+			ret.Enabled = makeVal(state, defaultPartialCompileFlags.Enabled)
 		case "use_d8":
-			ret.use_d8 = makeVal(state, defaultPartialCompileFlags.use_d8)
+			ret.Use_d8 = makeVal(state, defaultPartialCompileFlags.Use_d8)
 		default:
 			return partialCompileFlags{}, fmt.Errorf("Unknown SOONG_PARTIAL_COMPILE value: %v", tok)
 		}
@@ -616,6 +631,7 @@ func NewConfig(cmdArgs CmdArgs, availableEnv map[string]string) (Config, error) 
 		outDir:            cmdArgs.OutDir,
 		soongOutDir:       cmdArgs.SoongOutDir,
 		runGoTests:        cmdArgs.RunGoTests,
+		katiSuffix:        cmdArgs.KatiSuffix,
 		multilibConflicts: make(map[ArchType]bool),
 
 		moduleListFile: cmdArgs.ModuleListFile,
@@ -764,11 +780,7 @@ func (c *config) SetAllowMissingDependencies() {
 // BlueprintToolLocation returns the directory containing build system tools
 // from Blueprint, like soong_zip and merge_zips.
 func (c *config) HostToolDir() string {
-	if c.KatiEnabled() {
-		return filepath.Join(c.outDir, "host", c.PrebuiltOS(), "bin")
-	} else {
-		return filepath.Join(c.soongOutDir, "host", c.PrebuiltOS(), "bin")
-	}
+	return filepath.Join(c.outDir, "host", c.PrebuiltOS(), "bin")
 }
 
 func (c *config) HostToolPath(ctx PathContext, tool string) Path {
@@ -981,6 +993,10 @@ func (c *config) PlatformVersionName() string {
 
 func (c *config) PlatformSdkVersion() ApiLevel {
 	return uncheckedFinalApiLevel(*c.productVariables.Platform_sdk_version)
+}
+
+func (c *config) PlatformSdkVersionFull() string {
+	return proptools.StringDefault(c.productVariables.Platform_sdk_version_full, "")
 }
 
 func (c *config) RawPlatformSdkVersion() *int {
@@ -1317,11 +1333,16 @@ func (c *config) UseRemoteBuild() bool {
 }
 
 func (c *config) RunErrorProne() bool {
-	return c.IsEnvTrue("RUN_ERROR_PRONE")
+	return c.IsEnvTrue("RUN_ERROR_PRONE") || c.RunErrorProneInline()
 }
 
+// Returns if the errorprone build should be run "inline", that is, using errorprone as part
+// of the main javac compilation instead of its own separate compilation. This is good for CI
+// but bad for local development, because if you toggle errorprone+inline on/off it will repeatedly
+// clobber java files from the old configuration.
 func (c *config) RunErrorProneInline() bool {
-	return c.IsEnvTrue("RUN_ERROR_PRONE_INLINE")
+	value := strings.ToLower(c.Getenv("RUN_ERROR_PRONE"))
+	return c.IsEnvTrue("RUN_ERROR_PRONE_INLINE") || value == "inline"
 }
 
 // XrefCorpusName returns the Kythe cross-reference corpus name.
@@ -1505,6 +1526,10 @@ func IsTrunkStableVendorApiLevel(level string) bool {
 
 func (c *config) VendorApiLevelFrozen() bool {
 	return c.productVariables.GetBuildFlagBool("RELEASE_BOARD_API_LEVEL_FROZEN")
+}
+
+func (c *config) katiPackageMkDir() string {
+	return filepath.Join(c.soongOutDir, "kati_packaging"+c.katiSuffix)
 }
 
 func (c *deviceConfig) Arches() []Arch {
@@ -2155,12 +2180,20 @@ func (c *config) UseOptimizedResourceShrinkingByDefault() bool {
 	return c.productVariables.GetBuildFlagBool("RELEASE_USE_OPTIMIZED_RESOURCE_SHRINKING_BY_DEFAULT")
 }
 
-func (c *config) UseResourceProcessorByDefault() bool {
-	return c.productVariables.GetBuildFlagBool("RELEASE_USE_RESOURCE_PROCESSOR_BY_DEFAULT")
+func (c *config) UseR8FullModeByDefault() bool {
+	return c.productVariables.GetBuildFlagBool("RELEASE_R8_FULL_MODE_BY_DEFAULT")
 }
 
-func (c *config) UseTransitiveJarsInClasspath() bool {
-	return c.productVariables.GetBuildFlagBool("RELEASE_USE_TRANSITIVE_JARS_IN_CLASSPATH")
+func (c *config) UseR8OnlyRuntimeVisibleAnnotations() bool {
+	return c.productVariables.GetBuildFlagBool("RELEASE_R8_ONLY_RUNTIME_VISIBLE_ANNOTATIONS")
+}
+
+func (c *config) UseR8StoreStoreFenceConstructorInlining() bool {
+	return c.productVariables.GetBuildFlagBool("RELEASE_R8_STORE_STORE_FENCE_CONSTRUCTOR_INLINING")
+}
+
+func (c *config) UseR8GlobalCheckNotNullFlags() bool {
+	return c.productVariables.GetBuildFlagBool("RELEASE_R8_GLOBAL_CHECK_NOT_NULL_FLAGS")
 }
 
 func (c *config) UseDexV41() bool {
@@ -2173,13 +2206,13 @@ var (
 		"RELEASE_APEX_CONTRIBUTIONS_ADSERVICES":              "com.android.adservices",
 		"RELEASE_APEX_CONTRIBUTIONS_APPSEARCH":               "com.android.appsearch",
 		"RELEASE_APEX_CONTRIBUTIONS_ART":                     "com.android.art",
-		"RELEASE_APEX_CONTRIBUTIONS_BLUETOOTH":               "com.android.btservices",
+		"RELEASE_APEX_CONTRIBUTIONS_BLUETOOTH":               "com.android.bt",
 		"RELEASE_APEX_CONTRIBUTIONS_CAPTIVEPORTALLOGIN":      "",
 		"RELEASE_APEX_CONTRIBUTIONS_CELLBROADCAST":           "com.android.cellbroadcast",
 		"RELEASE_APEX_CONTRIBUTIONS_CONFIGINFRASTRUCTURE":    "com.android.configinfrastructure",
 		"RELEASE_APEX_CONTRIBUTIONS_CONNECTIVITY":            "com.android.tethering",
 		"RELEASE_APEX_CONTRIBUTIONS_CONSCRYPT":               "com.android.conscrypt",
-		"RELEASE_APEX_CONTRIBUTIONS_CRASHRECOVERY":           "",
+		"RELEASE_APEX_CONTRIBUTIONS_CRASHRECOVERY":           "com.android.crashrecovery",
 		"RELEASE_APEX_CONTRIBUTIONS_DEVICELOCK":              "com.android.devicelock",
 		"RELEASE_APEX_CONTRIBUTIONS_DOCUMENTSUIGOOGLE":       "",
 		"RELEASE_APEX_CONTRIBUTIONS_EXTSERVICES":             "com.android.extservices",
@@ -2190,9 +2223,11 @@ var (
 		"RELEASE_APEX_CONTRIBUTIONS_MODULE_METADATA":         "",
 		"RELEASE_APEX_CONTRIBUTIONS_NETWORKSTACKGOOGLE":      "",
 		"RELEASE_APEX_CONTRIBUTIONS_NEURALNETWORKS":          "com.android.neuralnetworks",
+		"RELEASE_APEX_CONTRIBUTIONS_NFC":                     "com.android.nfcservices",
 		"RELEASE_APEX_CONTRIBUTIONS_ONDEVICEPERSONALIZATION": "com.android.ondevicepersonalization",
 		"RELEASE_APEX_CONTRIBUTIONS_PERMISSION":              "com.android.permission",
 		"RELEASE_APEX_CONTRIBUTIONS_PRIMARY_LIBS":            "",
+		"RELEASE_APEX_CONTRIBUTIONS_PROFILING":               "com.android.profiling",
 		"RELEASE_APEX_CONTRIBUTIONS_REMOTEKEYPROVISIONING":   "com.android.rkpd",
 		"RELEASE_APEX_CONTRIBUTIONS_RESOLV":                  "com.android.resolv",
 		"RELEASE_APEX_CONTRIBUTIONS_SCHEDULING":              "com.android.scheduling",
@@ -2201,6 +2236,7 @@ var (
 		"RELEASE_APEX_CONTRIBUTIONS_STATSD":                  "com.android.os.statsd",
 		"RELEASE_APEX_CONTRIBUTIONS_TELEMETRY_TVP":           "",
 		"RELEASE_APEX_CONTRIBUTIONS_TZDATA":                  "com.android.tzdata",
+		"RELEASE_APEX_CONTRIBUTIONS_UPROBESTATS":             "com.android.uprobestats",
 		"RELEASE_APEX_CONTRIBUTIONS_UWB":                     "com.android.uwb",
 		"RELEASE_APEX_CONTRIBUTIONS_WIFI":                    "com.android.wifi",
 	}
@@ -2268,10 +2304,6 @@ func (c *config) OdmPropFiles(ctx PathContext) Paths {
 
 func (c *config) VendorPropFiles(ctx PathContext) Paths {
 	return PathsForSource(ctx, c.productVariables.VendorPropFiles)
-}
-
-func (c *config) ExtraAllowedDepsTxt() string {
-	return String(c.productVariables.ExtraAllowedDepsTxt)
 }
 
 func (c *config) EnableUffdGc() string {

@@ -65,8 +65,8 @@ func (afdo *afdo) isAfdoCompile(ctx ModuleContext) bool {
 }
 
 func getFdoProfilePathFromDep(ctx ModuleContext) string {
-	fdoProfileDeps := ctx.GetDirectDepsWithTag(FdoProfileTag)
-	if len(fdoProfileDeps) > 0 && fdoProfileDeps[0] != nil {
+	fdoProfileDeps := ctx.GetDirectDepsProxyWithTag(FdoProfileTag)
+	if len(fdoProfileDeps) > 0 {
 		if info, ok := android.OtherModuleProvider(ctx, fdoProfileDeps[0], FdoProfileProvider); ok {
 			return info.Path.String()
 		}
@@ -96,8 +96,10 @@ func (afdo *afdo) flags(ctx ModuleContext, flags Flags) Flags {
 		flags.Local.CFlags = append([]string{"-funique-internal-linkage-names"}, flags.Local.CFlags...)
 		// Flags for Flow Sensitive AutoFDO
 		flags.Local.CFlags = append([]string{"-mllvm", "-enable-fs-discriminator=true"}, flags.Local.CFlags...)
+		flags.Local.LdFlags = append([]string{"-Wl,-mllvm,-enable-fs-discriminator=true"}, flags.Local.LdFlags...)
 		// TODO(b/266595187): Remove the following feature once it is enabled in LLVM by default.
 		flags.Local.CFlags = append([]string{"-mllvm", "-improved-fs-discriminator=true"}, flags.Local.CFlags...)
+		flags.Local.LdFlags = append([]string{"-Wl,-mllvm,-improved-fs-discriminator=true"}, flags.Local.LdFlags...)
 	}
 	if fdoProfilePath := getFdoProfilePathFromDep(ctx); fdoProfilePath != "" {
 		// The flags are prepended to allow overriding.

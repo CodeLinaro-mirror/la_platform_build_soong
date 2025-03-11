@@ -56,7 +56,7 @@ var (
 				`$zipTemplate${config.SoongZipCmd} -jar -o $out.tmp -C $outDir -D $outDir && ` +
 				`if ! cmp -s "$out.tmp" "$out"; then mv "$out.tmp" "$out"; fi && ` +
 				`if ! cmp -s "$annoSrcJar.tmp" "$annoSrcJar"; then mv "$annoSrcJar.tmp" "$annoSrcJar"; fi && ` +
-				`if [[ -f "$out.pc_state.new" ]]; then mv "$out.pc_state.new" "$out.pc_state"; fi && ` +
+				`if [ -f "$out.pc_state.new" ]; then mv "$out.pc_state.new" "$out.pc_state"; fi && ` +
 				`rm -rf "$srcJarDir" "$outDir"`,
 			CommandDeps: []string{
 				"${config.FindInputDeltaCmd}",
@@ -226,6 +226,12 @@ var (
 		},
 		"jarArgs")
 
+	extractR8Rules = pctx.AndroidStaticRule("extractR8Rules",
+		blueprint.RuleParams{
+			Command:     `${config.ExtractR8RulesCmd} --rules-output $out --include-origin-comments $in`,
+			CommandDeps: []string{"${config.ExtractR8RulesCmd}"},
+		})
+
 	jarjar = pctx.AndroidStaticRule("jarjar",
 		blueprint.RuleParams{
 			Command: "" +
@@ -316,6 +322,13 @@ var (
 		blueprint.RuleParams{
 			Command:     `${keep-flagged-apis} ${in} > ${out}`,
 			CommandDeps: []string{"${keep-flagged-apis}"},
+		})
+
+	generateApiXMLRule = pctx.AndroidStaticRule("generateApiXMLRule",
+		blueprint.RuleParams{
+			Command:     `${config.JavaCmd} ${config.JavaVmFlags} -Xmx4g -jar ${config.MetalavaJar} jar-to-jdiff ${in} ${out}`,
+			CommandDeps: []string{"${config.JavaCmd}", "${config.MetalavaJar}"},
+			Description: "Converting API file to XML",
 		})
 )
 
@@ -462,6 +475,7 @@ func turbineFlags(ctx android.ModuleContext, flags javaBuilderFlags, dir string,
 		android.WriteFileRule(ctx, srcJarRspFile, strings.Join(srcJars.Strings(), "\n"))
 		srcJarArgs = "@" + srcJarRspFile.String()
 		implicits = append(implicits, srcJarRspFile)
+		rspFiles = append(rspFiles, srcJarRspFile)
 		rbeInputs = append(rbeInputs, srcJarRspFile)
 	} else {
 		rbeInputs = append(rbeInputs, srcJars...)
@@ -739,6 +753,16 @@ func TransformJarsToJar(ctx android.ModuleContext, outputFile android.WritablePa
 	})
 }
 
+func TransformJarToR8Rules(ctx android.ModuleContext, outputFile android.WritablePath,
+	jar android.Path) {
+
+	ctx.Build(pctx, android.BuildParams{
+		Rule:   extractR8Rules,
+		Output: outputFile,
+		Input:  jar,
+	})
+}
+
 func convertImplementationJarToHeaderJar(ctx android.ModuleContext, implementationJarFile android.Path,
 	headerJarFile android.WritablePath) {
 	ctx.Build(pctx, android.BuildParams{
@@ -779,7 +803,7 @@ func TransformJarJarWithShards(ctx android.ModuleContext, outputFile android.Wri
 	totalStr := strconv.Itoa(totalShards)
 	for i := 0; i < totalShards; i++ {
 		iStr := strconv.Itoa(i)
-		tempOut := android.PathForOutput(ctx, outputFile.String()+"-"+iStr+".jar")
+		tempOut := outputFile.ReplaceExtension(ctx, "-"+iStr+".jar")
 		ctx.Build(pctx, android.BuildParams{
 			Rule:        jarjar,
 			Description: "jarjar (" + iStr + "/" + totalStr + ")",
