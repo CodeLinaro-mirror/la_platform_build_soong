@@ -36,6 +36,7 @@ func (a *androidDevice) copyFilesToProductOutForSoongOnly(ctx android.ModuleCont
 	filesystemInfos := a.getFsInfos(ctx)
 
 	var deps android.Paths
+	var depsNoImg android.Paths // subset of deps without any img files. used for sbom creation.
 
 	for _, partition := range android.SortedKeys(filesystemInfos) {
 		info := filesystemInfos[partition]
@@ -51,7 +52,7 @@ func (a *androidDevice) copyFilesToProductOutForSoongOnly(ctx android.ModuleCont
 		if partition == "system_ext" {
 			partition = "systemext"
 		}
-		partition = partition + "imgage"
+		partition = partition + "image"
 		ctx.Phony(info.ModuleName, imgInstallPath)
 		ctx.Phony(partition, imgInstallPath)
 		for _, fip := range info.FullInstallPaths {
@@ -69,9 +70,15 @@ func (a *androidDevice) copyFilesToProductOutForSoongOnly(ctx android.ModuleCont
 					// if that's the case.
 					if fip.SymlinkTarget == "" {
 						ctx.Build(pctx, android.BuildParams{
-							Rule:   android.Cp,
+							Rule:   android.CpWithBash,
 							Input:  fip.SourcePath,
 							Output: fip.FullInstallPath,
+							Args: map[string]string{
+								// Preserve timestamps for adb sync, so that this installed file's
+								// timestamp matches the timestamp in the filesystem's intermediate
+								// staging dir
+								"cpFlags": "-p",
+							},
 						})
 					} else {
 						ctx.Build(pctx, android.BuildParams{
@@ -86,6 +93,7 @@ func (a *androidDevice) copyFilesToProductOutForSoongOnly(ctx android.ModuleCont
 				ctx.Phony(info.ModuleName, fip.FullInstallPath)
 				ctx.Phony(partition, fip.FullInstallPath)
 				deps = append(deps, fip.FullInstallPath)
+				depsNoImg = append(depsNoImg, fip.FullInstallPath)
 				ctx.Phony("sync_"+partition, fip.FullInstallPath)
 				ctx.Phony("sync", fip.FullInstallPath)
 			}
@@ -93,6 +101,8 @@ func (a *androidDevice) copyFilesToProductOutForSoongOnly(ctx android.ModuleCont
 
 		deps = append(deps, imgInstallPath)
 	}
+
+	a.createComplianceMetadataTimestamp(ctx, depsNoImg)
 
 	// List all individual files to be copied to PRODUCT_OUT here
 	if a.deviceProps.Bootloader != nil {
@@ -173,7 +183,29 @@ func (a *androidDevice) copyFilesToProductOutForSoongOnly(ctx android.ModuleCont
 		Implicits: deps,
 	})
 
+	emptyFile := android.PathForModuleOut(ctx, "empty_file")
+	android.WriteFileRule(ctx, emptyFile, "")
+
+	// TODO: We don't have these tests building in soong yet. Add phonies for them so that CI builds
+	// that try to build them don't error out.
+	ctx.Phony("continuous_instrumentation_tests", emptyFile)
+	ctx.Phony("continuous_native_tests", emptyFile)
+	ctx.Phony("device-tests", emptyFile)
+	ctx.Phony("device-platinum-tests", emptyFile)
+	ctx.Phony("platform_tests", emptyFile)
+
 	return copyToProductOutTimestamp
+}
+
+// createComplianceMetadataTimestampForSoongOnly creates a timestamp file in m --soong-only
+// this timestamp file depends on installed files of the main `android_device`.
+// Any changes to installed files of the main `android_device` will retrigger SBOM generation
+func (a *androidDevice) createComplianceMetadataTimestamp(ctx android.ModuleContext, installedFiles android.Paths) {
+	ctx.Build(pctx, android.BuildParams{
+		Rule:      android.Touch,
+		Implicits: installedFiles,
+		Output:    android.PathForOutput(ctx, "compliance-metadata", ctx.Config().DeviceProduct(), "installed_files.stamp"),
+	})
 }
 
 // Returns a mapping from partition type -> FilesystemInfo. This includes filesystems that are

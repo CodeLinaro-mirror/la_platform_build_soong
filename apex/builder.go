@@ -20,12 +20,14 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
 	"android/soong/aconfig"
 	"android/soong/android"
+	"android/soong/dexpreopt"
 	"android/soong/java"
 
 	"github.com/google/blueprint"
@@ -426,8 +428,6 @@ func (a *apexBundle) buildFileContexts(ctx android.ModuleContext) android.Path {
 		ctx.PropertyErrorf("file_contexts", "cannot find file_contexts file: %q", fileContexts.String())
 	}
 
-	useFileContextsAsIs := proptools.Bool(a.properties.Use_file_contexts_as_is)
-
 	output := android.PathForModuleOut(ctx, "file_contexts")
 	rule := android.NewRuleBuilder(pctx, ctx)
 
@@ -444,11 +444,9 @@ func (a *apexBundle) buildFileContexts(ctx android.ModuleContext) android.Path {
 	rule.Command().Text("cat").Input(fileContexts).Text(">>").Output(output)
 	// new line
 	rule.Command().Text("echo").Text(">>").Output(output)
-	if !useFileContextsAsIs {
-		// force-label /apex_manifest.pb and /
-		rule.Command().Text("echo").Text("/apex_manifest\\\\.pb").Text(labelForManifest).Text(">>").Output(output)
-		rule.Command().Text("echo").Text("/").Text(labelForRoot).Text(">>").Output(output)
-	}
+	// force-label /apex_manifest.pb and /
+	rule.Command().Text("echo").Text("/apex_manifest\\\\.pb").Text(labelForManifest).Text(">>").Output(output)
+	rule.Command().Text("echo").Text("/").Text(labelForRoot).Text(">>").Output(output)
 
 	rule.Build("file_contexts."+a.Name(), "Generate file_contexts")
 	return output
@@ -526,9 +524,10 @@ func markManifestTestOnly(ctx android.ModuleContext, androidManifestFile android
 	})
 }
 
-func isVintfFragment(fi apexFile) bool {
+func shouldApplyAssembleVintf(fi apexFile) bool {
 	isVintfFragment, _ := path.Match("etc/vintf/*", fi.path())
-	return isVintfFragment
+	_, fromVintfFragmentModule := fi.module.(*android.VintfFragmentModule)
+	return isVintfFragment && !fromVintfFragmentModule
 }
 
 func runAssembleVintf(ctx android.ModuleContext, vintfFragment android.Path) android.Path {
@@ -540,6 +539,65 @@ func runAssembleVintf(ctx android.ModuleContext, vintfFragment android.Path) and
 		Description: "run assemble_vintf for VINTF in APEX",
 	})
 	return processed
+}
+
+// installApexSystemServerFiles installs dexpreopt and dexjar files for system server classpath entries
+// provided by the apex.  They are installed here instead of in library module because there may be multiple
+// variants of the library, generally one for the "main" apex and another with a different min_sdk_version
+// for the Android Go version of the apex.  Both variants would attempt to install to the same locations,
+// and the library variants cannot determine which one should.  The apex module is better equipped to determine
+// if it is "selected".
+// This assumes that the jars produced by different min_sdk_version values are identical, which is currently
+// true but may not be true if the min_sdk_version difference between the variants spans version that changed
+// the dex format.
+func (a *apexBundle) installApexSystemServerFiles(ctx android.ModuleContext) {
+	// If performInstalls is set this module is responsible for creating the install rules.
+	performInstalls := a.GetOverriddenBy() == "" && !a.testApex && a.installable()
+	// TODO(b/234351700): Remove once ART does not have separated debug APEX, or make the selection
+	// explicit in the ART Android.bp files.
+	if ctx.Config().UseDebugArt() {
+		if ctx.ModuleName() == "com.android.art" {
+			performInstalls = false
+		}
+	} else {
+		if ctx.ModuleName() == "com.android.art.debug" {
+			performInstalls = false
+		}
+	}
+
+	psi := android.PrebuiltSelectionInfoMap{}
+	ctx.VisitDirectDeps(func(am android.Module) {
+		if info, exists := android.OtherModuleProvider(ctx, am, android.PrebuiltSelectionInfoProvider); exists {
+			psi = info
+		}
+	})
+
+	if len(psi.GetSelectedModulesForApiDomain(ctx.ModuleName())) > 0 {
+		performInstalls = false
+	}
+
+	for _, fi := range a.filesInfo {
+		for _, install := range fi.systemServerDexpreoptInstalls {
+			var installedFile android.InstallPath
+			if performInstalls {
+				installedFile = ctx.InstallFile(install.InstallDirOnDevice, install.InstallFileOnDevice, install.OutputPathOnHost)
+			} else {
+				// Another module created the install rules, but this module should still depend on
+				// the installed locations.
+				installedFile = install.InstallDirOnDevice.Join(ctx, install.InstallFileOnDevice)
+			}
+			a.extraInstalledFiles = append(a.extraInstalledFiles, installedFile)
+			a.extraInstalledPairs = append(a.extraInstalledPairs, installPair{install.OutputPathOnHost, installedFile})
+			ctx.PackageFile(install.InstallDirOnDevice, install.InstallFileOnDevice, install.OutputPathOnHost)
+		}
+		if performInstalls {
+			for _, dexJar := range fi.systemServerDexJars {
+				// Copy the system server dex jar to a predefined location where dex2oat will find it.
+				android.CopyFileRule(ctx, dexJar,
+					android.PathForOutput(ctx, dexpreopt.SystemServerDexjarsDir, dexJar.Base()))
+			}
+		}
+	}
 }
 
 // buildApex creates build rules to build an APEX using apexer.
@@ -579,7 +637,7 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 			copyCommands = append(copyCommands, "ln -sfn "+pathOnDevice+" "+destPath)
 		} else {
 			// Copy the file into APEX
-			if !a.testApex && isVintfFragment(fi) {
+			if !a.testApex && shouldApplyAssembleVintf(fi) {
 				// copy the output of assemble_vintf instead of the original
 				vintfFragment := runAssembleVintf(ctx, fi.builtFile)
 				copyCommands = append(copyCommands, "cp -f "+vintfFragment.String()+" "+destPath)
@@ -603,7 +661,7 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 			} else {
 				if installSymbolFiles {
 					// store installedPath. symlinks might be created if required.
-					installedPath = apexDir.Join(ctx, fi.installDir, fi.stem())
+					installedPath = ctx.InstallFile(apexDir.Join(ctx, fi.installDir), fi.stem(), fi.builtFile)
 				}
 			}
 
@@ -985,9 +1043,9 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 		a.SkipInstall()
 	}
 
+	installDeps := slices.Concat(a.compatSymlinks, a.extraInstalledFiles)
 	// Install to $OUT/soong/{target,host}/.../apex.
-	a.installedFile = ctx.InstallFile(a.installDir, a.Name()+installSuffix, a.outputFile,
-		a.compatSymlinks...)
+	a.installedFile = ctx.InstallFile(a.installDir, a.Name()+installSuffix, a.outputFile, installDeps...)
 
 	// installed-files.txt is dist'ed
 	a.installedFilesFile = a.buildInstalledFilesFile(ctx, a.outputFile, imageDir)
@@ -1044,7 +1102,7 @@ func (a *apexBundle) buildApexDependencyInfo(ctx android.ModuleContext) {
 	}
 
 	depInfos := android.DepNameToDepInfoMap{}
-	a.WalkPayloadDepsProxy(ctx, func(ctx android.BaseModuleContext, from, to android.ModuleProxy, externalDep bool) bool {
+	a.WalkPayloadDeps(ctx, func(ctx android.BaseModuleContext, from android.Module, to android.ApexModule, externalDep bool) bool {
 		if from.Name() == to.Name() {
 			// This can happen for cc.reuseObjTag. We are not interested in tracking this.
 			// As soon as the dependency graph crosses the APEX boundary, don't go further.
@@ -1071,10 +1129,9 @@ func (a *apexBundle) buildApexDependencyInfo(ctx android.ModuleContext) {
 			depInfos[to.Name()] = info
 		} else {
 			toMinSdkVersion := "(no version)"
-			if info, ok := android.OtherModuleProvider(ctx, to, android.CommonModuleInfoKey); ok {
-				if v := info.MinSdkVersion; v != "" {
-					toMinSdkVersion = v
-				}
+			if info, ok := android.OtherModuleProvider(ctx, to, android.CommonModuleInfoKey); ok &&
+				!info.MinSdkVersion.IsPlatform && info.MinSdkVersion.ApiLevel != nil {
+				toMinSdkVersion = info.MinSdkVersion.ApiLevel.String()
 			}
 			depInfos[to.Name()] = android.ApexModuleDepInfo{
 				To:            to.Name(),

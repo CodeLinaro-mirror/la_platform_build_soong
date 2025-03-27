@@ -15,15 +15,25 @@
 package filesystem
 
 import (
+	"cmp"
 	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 
 	"android/soong/android"
+	"android/soong/java"
 
 	"github.com/google/blueprint"
 	"github.com/google/blueprint/proptools"
 )
+
+var proguardDictToProto = pctx.AndroidStaticRule("proguard_dict_to_proto", blueprint.RuleParams{
+	Command:     `${symbols_map} -r8 $in -location $location -write_if_changed $out`,
+	Restat:      true,
+	CommandDeps: []string{"${symbols_map}"},
+}, "location")
 
 type PartitionNameProperties struct {
 	// Name of the super partition filesystem module
@@ -70,7 +80,13 @@ type DeviceProperties struct {
 	// blueprint:"mutated" and still set it from filesystem_creator
 	Main_device *bool
 
-	Ab_ota_updater *bool
+	Ab_ota_updater            *bool
+	Ab_ota_partitions         []string
+	Ab_ota_keys               []string
+	Ab_ota_postinstall_config []string
+
+	Ramdisk_node_list      *string `android:"path"`
+	Releasetools_extension *string `android:"path"`
 }
 
 type androidDevice struct {
@@ -79,6 +95,12 @@ type androidDevice struct {
 	partitionProps PartitionNameProperties
 
 	deviceProps DeviceProperties
+
+	allImagesZip android.Path
+
+	proguardDictZip     android.Path
+	proguardDictMapping android.Path
+	proguardUsageZip    android.Path
 }
 
 func AndroidDeviceFactory() android.Module {
@@ -151,7 +173,11 @@ func (a *androidDevice) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		}
 	}
 
-	//a.buildTargetFilesZip(ctx) TODO(b/393203512): re-enable target_files.zip
+	allInstalledModules := a.allInstalledModules(ctx)
+
+	a.buildTargetFilesZip(ctx)
+	a.buildProguardZips(ctx, allInstalledModules)
+
 	var deps []android.Path
 	if proptools.String(a.partitionProps.Super_partition_name) != "" {
 		superImage := ctx.GetDirectDepProxyWithTag(*a.partitionProps.Super_partition_name, superPartitionDepTag)
@@ -202,6 +228,17 @@ func (a *androidDevice) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		deps = append(deps, imageOutput.DefaultOutputFiles[0])
 	})
 
+	allImagesZip := android.PathForModuleOut(ctx, "all_images.zip")
+	allImagesZipBuilder := android.NewRuleBuilder(pctx, ctx)
+	cmd := allImagesZipBuilder.Command().BuiltTool("soong_zip")
+	for _, dep := range deps {
+		cmd.FlagWithArg("-e ", dep.Base())
+		cmd.FlagWithInput("-f ", dep)
+	}
+	cmd.FlagWithOutput("-o ", allImagesZip)
+	allImagesZipBuilder.Build("soong_all_images_zip", "all_images.zip")
+	a.allImagesZip = allImagesZip
+
 	allImagesStamp := android.PathForModuleOut(ctx, "all_images_stamp")
 	var validations android.Paths
 	if !ctx.Config().KatiEnabled() && proptools.Bool(a.deviceProps.Main_device) {
@@ -224,6 +261,125 @@ func (a *androidDevice) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	ctx.CheckbuildFile(allImagesStamp)
 
 	a.setVbmetaPhonyTargets(ctx)
+
+	a.distFiles(ctx)
+}
+
+// Returns a list of modules that are installed, which are collected from the dependency
+// filesystem and super_image modules.
+func (a *androidDevice) allInstalledModules(ctx android.ModuleContext) []android.Module {
+	fsInfoMap := a.getFsInfos(ctx)
+	allOwners := make(map[string][]string)
+	for _, partition := range android.SortedKeys(fsInfoMap) {
+		fsInfo := fsInfoMap[partition]
+		for _, owner := range fsInfo.Owners {
+			allOwners[owner.Name] = append(allOwners[owner.Name], owner.Variation)
+		}
+	}
+
+	ret := []android.Module{}
+	ctx.WalkDepsProxy(func(mod, _ android.ModuleProxy) bool {
+		if variations, ok := allOwners[ctx.OtherModuleName(mod)]; ok && android.InList(ctx.OtherModuleSubDir(mod), variations) {
+			ret = append(ret, mod)
+		}
+		return true
+	})
+
+	// Remove duplicates
+	ret = android.FirstUniqueFunc(ret, func(a, b android.Module) bool {
+		return a.String() == b.String()
+	})
+
+	// Sort the modules by their names and variants
+	slices.SortFunc(ret, func(a, b android.Module) int {
+		return cmp.Compare(a.String(), b.String())
+	})
+	return ret
+}
+
+func insertBeforeExtension(file, insertion string) string {
+	ext := filepath.Ext(file)
+	return strings.TrimSuffix(file, ext) + insertion + ext
+}
+
+func (a *androidDevice) distFiles(ctx android.ModuleContext) {
+	if !ctx.Config().KatiEnabled() && proptools.Bool(a.deviceProps.Main_device) {
+		fsInfoMap := a.getFsInfos(ctx)
+		for _, partition := range android.SortedKeys(fsInfoMap) {
+			fsInfo := fsInfoMap[partition]
+			if fsInfo.InstalledFiles.Json != nil {
+				ctx.DistForGoal("droidcore-unbundled", fsInfo.InstalledFiles.Json)
+			}
+			if fsInfo.InstalledFiles.Txt != nil {
+				ctx.DistForGoal("droidcore-unbundled", fsInfo.InstalledFiles.Txt)
+			}
+		}
+
+		namePrefix := ""
+		if ctx.Config().HasDeviceProduct() {
+			namePrefix = ctx.Config().DeviceProduct() + "-"
+		}
+		ctx.DistForGoalWithFilename("droidcore-unbundled", a.proguardDictZip, namePrefix+insertBeforeExtension(a.proguardDictZip.Base(), "-FILE_NAME_TAG_PLACEHOLDER"))
+		ctx.DistForGoalWithFilename("droidcore-unbundled", a.proguardDictMapping, namePrefix+insertBeforeExtension(a.proguardDictMapping.Base(), "-FILE_NAME_TAG_PLACEHOLDER"))
+		ctx.DistForGoalWithFilename("droidcore-unbundled", a.proguardUsageZip, namePrefix+insertBeforeExtension(a.proguardUsageZip.Base(), "-FILE_NAME_TAG_PLACEHOLDER"))
+	}
+}
+
+func (a *androidDevice) MakeVars(_ android.MakeVarsModuleContext) []android.ModuleMakeVarsValue {
+	if proptools.Bool(a.deviceProps.Main_device) {
+		return []android.ModuleMakeVarsValue{{"SOONG_ONLY_ALL_IMAGES_ZIP", a.allImagesZip.String()}}
+	}
+	return nil
+}
+
+func (a *androidDevice) buildProguardZips(ctx android.ModuleContext, allInstalledModules []android.Module) {
+	dictZip := android.PathForModuleOut(ctx, "proguard-dict.zip")
+	dictZipBuilder := android.NewRuleBuilder(pctx, ctx)
+	dictZipCmd := dictZipBuilder.Command().BuiltTool("soong_zip").Flag("-d").FlagWithOutput("-o ", dictZip)
+
+	dictMapping := android.PathForModuleOut(ctx, "proguard-dict-mapping.textproto")
+	dictMappingBuilder := android.NewRuleBuilder(pctx, ctx)
+	dictMappingCmd := dictMappingBuilder.Command().BuiltTool("symbols_map").Flag("-merge").Output(dictMapping)
+
+	protosDir := android.PathForModuleOut(ctx, "proguard_mapping_protos")
+
+	usageZip := android.PathForModuleOut(ctx, "proguard-usage.zip")
+	usageZipBuilder := android.NewRuleBuilder(pctx, ctx)
+	usageZipCmd := usageZipBuilder.Command().BuiltTool("merge_zips").Output(usageZip)
+
+	for _, mod := range allInstalledModules {
+		if proguardInfo, ok := android.OtherModuleProvider(ctx, mod, java.ProguardProvider); ok {
+			// Maintain these out/target/common paths for backwards compatibility. They may be able
+			// to be changed if tools look up file locations from the protobuf, but I'm not
+			// exactly sure how that works.
+			dictionaryFakePath := fmt.Sprintf("out/target/common/obj/%s/%s_intermediates/proguard_dictionary", proguardInfo.Class, proguardInfo.ModuleName)
+			dictZipCmd.FlagWithArg("-e ", dictionaryFakePath)
+			dictZipCmd.FlagWithInput("-f ", proguardInfo.ProguardDictionary)
+			dictZipCmd.Textf("-e out/target/common/obj/%s/%s_intermediates/classes.jar", proguardInfo.Class, proguardInfo.ModuleName)
+			dictZipCmd.FlagWithInput("-f ", proguardInfo.ClassesJar)
+
+			protoFile := protosDir.Join(ctx, filepath.Dir(dictionaryFakePath), "proguard_dictionary.textproto")
+			ctx.Build(pctx, android.BuildParams{
+				Rule:   proguardDictToProto,
+				Input:  proguardInfo.ProguardDictionary,
+				Output: protoFile,
+				Args: map[string]string{
+					"location": dictionaryFakePath,
+				},
+			})
+			dictMappingCmd.Input(protoFile)
+
+			usageZipCmd.Input(proguardInfo.ProguardUsageZip)
+		}
+	}
+
+	dictZipBuilder.Build("proguard_dict_zip", "Building proguard dictionary zip")
+	dictMappingBuilder.Build("proguard_dict_mapping_proto", "Building proguard mapping proto")
+	usageZipBuilder.Build("proguard_usage_zip", "Building proguard usage zip")
+
+	a.proguardDictZip = dictZip
+	a.proguardDictMapping = dictMapping
+	a.proguardUsageZip = usageZip
 }
 
 // Helper structs for target_files.zip creation
@@ -257,11 +413,6 @@ func (a *androidDevice) buildTargetFilesZip(ctx android.ModuleContext) {
 		targetFilesZipCopy{a.partitionProps.Init_boot_partition_name, "INIT_BOOT/RAMDISK"},
 		targetFilesZipCopy{a.partitionProps.Vendor_boot_partition_name, "VENDOR_BOOT/RAMDISK"},
 	}
-	// TODO: Handle cases where recovery files are copied to BOOT/ or RECOVERY/
-	// https://cs.android.com/android/platform/superproject/main/+/main:build/make/core/Makefile;l=6211-6219?q=core%2FMakefile&ss=android%2Fplatform%2Fsuperproject%2Fmain
-	if ctx.DeviceConfig().BoardMoveRecoveryResourcesToVendorBoot() {
-		toCopy = append(toCopy, targetFilesZipCopy{a.partitionProps.Recovery_partition_name, "VENDOR_BOOT/RAMDISK"})
-	}
 
 	filesystemsToCopy := []targetFilesystemZipCopy{}
 	for _, zipCopy := range toCopy {
@@ -277,7 +428,7 @@ func (a *androidDevice) buildTargetFilesZip(ctx android.ModuleContext) {
 	if a.partitionProps.Super_partition_name != nil {
 		superPartition := ctx.GetDirectDepProxyWithTag(*a.partitionProps.Super_partition_name, superPartitionDepTag)
 		if info, ok := android.OtherModuleProvider(ctx, superPartition, SuperImageProvider); ok {
-			for _, partition := range android.SortedStringKeys(info.SubImageInfo) {
+			for _, partition := range android.SortedKeys(info.SubImageInfo) {
 				filesystemsToCopy = append(
 					filesystemsToCopy,
 					targetFilesystemZipCopy{info.SubImageInfo[partition], strings.ToUpper(partition)},
@@ -298,6 +449,12 @@ func (a *androidDevice) buildTargetFilesZip(ctx android.ModuleContext) {
 			BuiltTool("acp").
 			Textf("-rd %s/. %s/%s", rootDirString, targetFilesDir, toCopy.destSubdir).
 			Implicit(toCopy.fsInfo.Output) // so that the staging dir is built
+		for _, extraRootDir := range toCopy.fsInfo.ExtraRootDirs {
+			builder.Command().
+				BuiltTool("acp").
+				Textf("-rd %s/. %s/%s", extraRootDir, targetFilesDir, toCopy.destSubdir).
+				Implicit(toCopy.fsInfo.Output) // so that the staging dir is built
+		}
 
 		if toCopy.destSubdir == "SYSTEM" {
 			// Create the ROOT partition in target_files.zip
@@ -379,8 +536,12 @@ func (a *androidDevice) copyImagesToTargetZip(ctx android.ModuleContext, builder
 		superPartition := ctx.GetDirectDepProxyWithTag(*a.partitionProps.Super_partition_name, superPartitionDepTag)
 		if info, ok := android.OtherModuleProvider(ctx, superPartition, SuperImageProvider); ok {
 			for _, partition := range android.SortedKeys(info.SubImageInfo) {
-				builder.Command().Textf("cp ").Input(info.SubImageInfo[partition].OutputHermetic).Textf(" %s/IMAGES/", targetFilesDir.String())
-				builder.Command().Textf("cp ").Input(info.SubImageInfo[partition].MapFile).Textf(" %s/IMAGES/", targetFilesDir.String())
+				if info.SubImageInfo[partition].OutputHermetic != nil {
+					builder.Command().Textf("cp ").Input(info.SubImageInfo[partition].OutputHermetic).Textf(" %s/IMAGES/", targetFilesDir.String())
+				}
+				if info.SubImageInfo[partition].MapFile != nil {
+					builder.Command().Textf("cp ").Input(info.SubImageInfo[partition].MapFile).Textf(" %s/IMAGES/", targetFilesDir.String())
+				}
 			}
 		} else {
 			ctx.ModuleErrorf("Super partition %s does set SuperImageProvider\n", superPartition.Name())
@@ -396,9 +557,58 @@ func (a *androidDevice) copyMetadataToTargetZip(ctx android.ModuleContext, build
 			info, _ := android.OtherModuleProvider(ctx, child, android.OutputFilesProvider)
 			builder.Command().Textf("cp").Inputs(info.DefaultOutputFiles).Textf(" %s/META/", targetFilesDir.String())
 		})
+		builder.Command().Textf("cp").Input(android.PathForSource(ctx, "external/zucchini/version_info.h")).Textf(" %s/META/zucchini_config.txt", targetFilesDir.String())
+		builder.Command().Textf("cp").Input(android.PathForSource(ctx, "system/update_engine/update_engine.conf")).Textf(" %s/META/update_engine_config.txt", targetFilesDir.String())
+		if a.getFsInfos(ctx)["system"].ErofsCompressHints != nil {
+			builder.Command().Textf("cp").Input(a.getFsInfos(ctx)["system"].ErofsCompressHints).Textf(" %s/META/erofs_default_compress_hints.txt", targetFilesDir.String())
+		}
+		// ab_partitions.txt
+		abPartitionsSorted := android.SortedUniqueStrings(a.deviceProps.Ab_ota_partitions)
+		abPartitionsSortedString := proptools.ShellEscape(strings.Join(abPartitionsSorted, "\\n"))
+		builder.Command().Textf("echo -e").Flag(abPartitionsSortedString).Textf(" > %s/META/ab_partitions.txt", targetFilesDir.String())
+		// otakeys.txt
+		abOtaKeysSorted := android.SortedUniqueStrings(a.deviceProps.Ab_ota_keys)
+		abOtaKeysSortedString := proptools.ShellEscape(strings.Join(abOtaKeysSorted, "\\n"))
+		builder.Command().Textf("echo -e").Flag(abOtaKeysSortedString).Textf(" > %s/META/otakeys.txt", targetFilesDir.String())
+		// postinstall_config.txt
+		abOtaPostInstallConfigString := proptools.ShellEscape(strings.Join(a.deviceProps.Ab_ota_postinstall_config, "\\n"))
+		builder.Command().Textf("echo -e").Flag(abOtaPostInstallConfigString).Textf(" > %s/META/postinstall_config.txt", targetFilesDir.String())
+		// selinuxfc
+		if a.getFsInfos(ctx)["system"].SelinuxFc != nil {
+			builder.Command().Textf("cp").Input(a.getFsInfos(ctx)["system"].SelinuxFc).Textf(" %s/META/file_contexts.bin", targetFilesDir.String())
+		}
 	}
-	builder.Command().Textf("cp").Input(android.PathForSource(ctx, "external/zucchini/version_info.h")).Textf(" %s/META/zucchini_config.txt", targetFilesDir.String())
-	builder.Command().Textf("cp").Input(android.PathForSource(ctx, "system/update_engine/update_engine.conf")).Textf(" %s/META/update_engine_config.txt", targetFilesDir.String())
+	// Copy $partition_filesystem_config.txt
+	fsInfos := a.getFsInfos(ctx)
+	for _, partition := range android.SortedKeys(fsInfos) {
+		if fsInfos[partition].FilesystemConfig == nil {
+			continue
+		}
+		if android.InList(partition, []string{"userdata"}) {
+			continue
+		}
+		builder.Command().Textf("cp").Input(fsInfos[partition].FilesystemConfig).Textf(" %s/META/%s", targetFilesDir.String(), a.filesystemConfigNameForTargetFiles(partition))
+	}
+	// Copy ramdisk_node_list
+	if ramdiskNodeList := android.PathForModuleSrc(ctx, proptools.String(a.deviceProps.Ramdisk_node_list)); ramdiskNodeList != nil {
+		builder.Command().Textf("cp").Input(ramdiskNodeList).Textf(" %s/META/", targetFilesDir.String())
+	}
+	// Copy releasetools.py
+	if releaseTools := android.PathForModuleSrc(ctx, proptools.String(a.deviceProps.Releasetools_extension)); releaseTools != nil {
+		builder.Command().Textf("cp").Input(releaseTools).Textf(" %s/META/", targetFilesDir.String())
+	}
+}
+
+// Filenames for the partition specific fs_config files.
+// Hardcode the ramdisk files to their boot image prefix
+func (a *androidDevice) filesystemConfigNameForTargetFiles(partition string) string {
+	name := partition + "_filesystem_config.txt"
+	if partition == "system" {
+		name = "filesystem_config.txt"
+	} else if partition == "ramdisk" {
+		name = "init_boot_filesystem_config.txt"
+	}
+	return name
 }
 
 func (a *androidDevice) getFilesystemInfo(ctx android.ModuleContext, depName string) FilesystemInfo {

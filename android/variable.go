@@ -552,6 +552,8 @@ type ProductVariables struct {
 	SystemExtManifestFiles []string `json:",omitempty"`
 	DeviceManifestFiles    []string `json:",omitempty"`
 	OdmManifestFiles       []string `json:",omitempty"`
+
+	UseSoongNoticeXML *bool `json:",omitempty"`
 }
 
 type PartitionQualifiedVariablesType struct {
@@ -663,6 +665,9 @@ type PartitionVariables struct {
 	ProductVirtualAbCompressionFactor string                                   `json:",omitempty"`
 	ProductVirtualAbCowVersion        string                                   `json:",omitempty"`
 	AbOtaUpdater                      bool                                     `json:",omitempty"`
+	AbOtaPartitions                   []string                                 `json:",omitempty"`
+	AbOtaKeys                         []string                                 `json:",omitempty"`
+	AbOtaPostInstallConfig            []string                                 `json:",omitempty"`
 
 	// Avb (android verified boot) stuff
 	BoardAvbEnable          bool                                `json:",omitempty"`
@@ -709,6 +714,8 @@ type PartitionVariables struct {
 	ProductFsCasefold    string `json:",omitempty"`
 	ProductQuotaProjid   string `json:",omitempty"`
 	ProductFsCompression string `json:",omitempty"`
+
+	ReleaseToolsExtensionDir string `json:",omitempty"`
 }
 
 func boolPtr(v bool) *bool {

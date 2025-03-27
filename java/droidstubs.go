@@ -564,7 +564,15 @@ func (d *Droidstubs) apiLevelsAnnotationsFlags(ctx android.ModuleContext, cmd *a
 		})
 	}
 	if apiVersions != nil {
-		cmd.FlagWithArg("--current-version ", ctx.Config().PlatformSdkVersion().String())
+		// We are migrating from a single API level to major.minor
+		// versions and PlatformSdkVersionFull is not yet set in all
+		// release configs. If it is not set, fall back on the single
+		// API level.
+		if fullSdkVersion := ctx.Config().PlatformSdkVersionFull(); len(fullSdkVersion) > 0 {
+			cmd.FlagWithArg("--current-version ", fullSdkVersion)
+		} else {
+			cmd.FlagWithArg("--current-version ", ctx.Config().PlatformSdkVersion().String())
+		}
 		if ctx.Config().PlatformSdkVersion().String() != "36" || ctx.Config().PlatformSdkCodename() != "Baklava" {
 			cmd.FlagWithArg("--current-codename ", ctx.Config().PlatformSdkCodename())
 		}
@@ -1431,6 +1439,16 @@ func (d *Droidstubs) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	d.setOutputFiles(ctx)
 
 	d.setPhonyRules(ctx)
+
+	if d.apiLintTimestamp != nil {
+		if d.apiLintReport != nil {
+			ctx.DistForGoalsWithFilename(
+				[]string{fmt.Sprintf("%s-api-lint", d.Name()), "droidcore"},
+				d.apiLintReport,
+				fmt.Sprintf("apilint/%s-lint-report.txt", d.Name()),
+			)
+		}
+	}
 }
 
 func setDroidInfo(ctx android.ModuleContext, d *Droidstubs, info *StubsInfo, typ StubsType) {

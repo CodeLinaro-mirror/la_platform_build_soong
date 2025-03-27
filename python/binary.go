@@ -23,6 +23,7 @@ import (
 
 	"android/soong/android"
 	"android/soong/cc"
+
 	"github.com/google/blueprint"
 )
 
@@ -113,6 +114,12 @@ func (p *PythonBinaryModule) GenerateAndroidBuildActions(ctx android.ModuleConte
 	android.SetProvider(ctx, PythonBinaryInfoProvider, PythonBinaryInfo{})
 
 	ctx.SetOutputFiles(android.Paths{p.installSource}, "")
+
+	moduleInfoJSON := ctx.ModuleInfoJSON()
+	moduleInfoJSON.Class = []string{"EXECUTABLES"}
+	moduleInfoJSON.Dependencies = append(moduleInfoJSON.Dependencies, p.androidMkSharedLibs...)
+	moduleInfoJSON.SharedLibs = append(moduleInfoJSON.SharedLibs, p.androidMkSharedLibs...)
+	moduleInfoJSON.SystemSharedLibs = []string{"none"}
 }
 
 func (p *PythonBinaryModule) buildBinary(ctx android.ModuleContext) {
@@ -143,8 +150,7 @@ func (p *PythonBinaryModule) buildBinary(ctx android.ModuleContext) {
 	}
 	srcsZips = append(srcsZips, depsSrcsZips...)
 	p.installSource = registerBuildActionForParFile(ctx, embeddedLauncher, launcherPath,
-		p.getHostInterpreterName(ctx, p.properties.Actual_version),
-		main, p.getStem(ctx), srcsZips)
+		"python3", main, p.getStem(ctx), srcsZips)
 
 	var sharedLibs []string
 	// if embedded launcher is enabled, we need to collect the shared library dependencies of the
@@ -203,23 +209,6 @@ func (p *PythonBinaryModule) isEmbeddedLauncherEnabled() bool {
 
 func (b *PythonBinaryModule) autorun() bool {
 	return BoolDefault(b.binaryProperties.Autorun, true)
-}
-
-// get host interpreter name.
-func (p *PythonBinaryModule) getHostInterpreterName(ctx android.ModuleContext,
-	actualVersion string) string {
-	var interp string
-	switch actualVersion {
-	case pyVersion2:
-		interp = "python2.7"
-	case pyVersion3:
-		interp = "python3"
-	default:
-		panic(fmt.Errorf("unknown Python actualVersion: %q for module: %q.",
-			actualVersion, ctx.ModuleName()))
-	}
-
-	return interp
 }
 
 // find main program path within runfiles tree.

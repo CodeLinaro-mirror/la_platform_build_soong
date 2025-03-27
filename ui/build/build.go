@@ -401,6 +401,7 @@ func Build(ctx Context, config Config) {
 		if what&RunKati != 0 {
 			installCleanIfNecessary(ctx, config)
 		}
+		partialCompileCleanIfNecessary(ctx, config)
 		runNinjaForBuild(ctx, config)
 		updateBuildIdDir(ctx, config)
 	}
@@ -425,6 +426,9 @@ func evaluateWhatToRun(config Config, verboseln func(v ...interface{})) int {
 	//evaluate what to run
 	what := 0
 	if config.Checkbuild() {
+		what |= RunBuildTests
+	}
+	if value, ok := config.environ.Get("RUN_BUILD_TESTS"); ok && value == "true" {
 		what |= RunBuildTests
 	}
 	if !config.SkipConfig() {

@@ -419,8 +419,8 @@ type libraryDecorator struct {
 	// Location of the linked, stripped library for shared libraries, strip: "all"
 	strippedAllOutputFile android.Path
 
-	// Location of the file that should be copied to dist dir when requested
-	distFile android.Path
+	// Location of the file that should be copied to dist dir when no explicit tag is requested
+	defaultDistFile android.Path
 
 	versionScriptPath android.OptionalPath
 
@@ -634,9 +634,16 @@ func (library *libraryDecorator) compile(ctx ModuleContext, flags Flags, deps Pa
 	}
 	if library.sabi.shouldCreateSourceAbiDump() {
 		dirs := library.exportedIncludeDirsForAbiCheck(ctx)
-		flags.SAbiFlags = make([]string, 0, len(dirs))
+		flags.SAbiFlags = make([]string, 0, len(dirs)+1)
 		for _, dir := range dirs {
 			flags.SAbiFlags = append(flags.SAbiFlags, "-I"+dir)
+		}
+		// If this library does not export any include directory, do not append the flags
+		// so that the ABI tool dumps everything without filtering by the include directories.
+		// requiresGlobalIncludes returns whether this library can include CommonGlobalIncludes.
+		// If the library cannot include them, it cannot export them.
+		if len(dirs) > 0 && requiresGlobalIncludes(ctx) {
+			flags.SAbiFlags = append(flags.SAbiFlags, "${config.CommonGlobalIncludes}")
 		}
 		totalLength := len(srcs) + len(deps.GeneratedSources) +
 			len(sharedSrcs) + len(staticSrcs)
@@ -1063,7 +1070,7 @@ func (library *libraryDecorator) linkStatic(ctx ModuleContext,
 			library.injectVersionSymbol(ctx, outputFile, versionedOutputFile)
 		} else {
 			versionedOutputFile := android.PathForModuleOut(ctx, "versioned", fileName)
-			library.distFile = versionedOutputFile
+			library.defaultDistFile = versionedOutputFile
 			library.injectVersionSymbol(ctx, outputFile, versionedOutputFile)
 		}
 	}
@@ -1203,11 +1210,11 @@ func (library *libraryDecorator) linkShared(ctx ModuleContext,
 			library.injectVersionSymbol(ctx, outputFile, versionedOutputFile)
 		} else {
 			versionedOutputFile := android.PathForModuleOut(ctx, "versioned", fileName)
-			library.distFile = versionedOutputFile
+			library.defaultDistFile = versionedOutputFile
 
 			if library.stripper.NeedsStrip(ctx) {
 				out := android.PathForModuleOut(ctx, "versioned-stripped", fileName)
-				library.distFile = out
+				library.defaultDistFile = out
 				library.stripper.StripExecutableOrSharedLib(ctx, versionedOutputFile, out, stripFlags)
 			}
 
@@ -1234,7 +1241,7 @@ func (library *libraryDecorator) linkShared(ctx ModuleContext,
 	linkerDeps = append(linkerDeps, deps.SharedLibsDeps...)
 	linkerDeps = append(linkerDeps, deps.LateSharedLibsDeps...)
 
-	if generatedLib := generateRustStaticlib(ctx, deps.RustRlibDeps); generatedLib != nil && !library.BuildStubs() {
+	if generatedLib := GenerateRustStaticlib(ctx, deps.RustRlibDeps); generatedLib != nil && !library.BuildStubs() {
 		if ctx.Module().(*Module).WholeRustStaticlib {
 			deps.WholeStaticLibs = append(deps.WholeStaticLibs, generatedLib)
 		} else {
@@ -1366,13 +1373,15 @@ func (library *libraryDecorator) linkLlndkSAbiDumpFiles(ctx ModuleContext,
 	deps PathDeps, sAbiDumpFiles android.Paths, soFile android.Path, libFileName string,
 	excludeSymbolVersions, excludeSymbolTags []string,
 	sdkVersionForVendorApiLevel string) android.Path {
+	// Though LLNDK is implemented in system, the callers in vendor cannot include CommonGlobalIncludes,
+	// so commonGlobalIncludes is false.
 	return transformDumpToLinkedDump(ctx,
 		sAbiDumpFiles, soFile, libFileName+".llndk",
 		library.llndkIncludeDirsForAbiCheck(ctx, deps),
 		android.OptionalPathForModuleSrc(ctx, library.Properties.Llndk.Symbol_file),
 		append([]string{"*_PLATFORM", "*_PRIVATE"}, excludeSymbolVersions...),
 		append([]string{"platform-only"}, excludeSymbolTags...),
-		[]string{"llndk"}, sdkVersionForVendorApiLevel)
+		[]string{"llndk"}, sdkVersionForVendorApiLevel, false /* commonGlobalIncludes */)
 }
 
 func (library *libraryDecorator) linkApexSAbiDumpFiles(ctx ModuleContext,
@@ -1385,7 +1394,7 @@ func (library *libraryDecorator) linkApexSAbiDumpFiles(ctx ModuleContext,
 		android.OptionalPathForModuleSrc(ctx, library.Properties.Stubs.Symbol_file),
 		append([]string{"*_PLATFORM", "*_PRIVATE"}, excludeSymbolVersions...),
 		append([]string{"platform-only"}, excludeSymbolTags...),
-		[]string{"apex", "systemapi"}, sdkVersion)
+		[]string{"apex", "systemapi"}, sdkVersion, requiresGlobalIncludes(ctx))
 }
 
 func getRefAbiDumpFile(ctx android.ModuleInstallPathContext,
@@ -1528,7 +1537,7 @@ func (library *libraryDecorator) linkSAbiDumpFiles(ctx ModuleContext, deps PathD
 			android.OptionalPathForModuleSrc(ctx, library.symbolFileForAbiCheck(ctx)),
 			headerAbiChecker.Exclude_symbol_versions,
 			headerAbiChecker.Exclude_symbol_tags,
-			[]string{} /* includeSymbolTags */, currSdkVersion)
+			[]string{} /* includeSymbolTags */, currSdkVersion, requiresGlobalIncludes(ctx))
 
 		var llndkDump, apexVariantDump android.Path
 		tags := classifySourceAbiDump(ctx.Module().(*Module))
@@ -2085,6 +2094,13 @@ func (library *libraryDecorator) overriddenModules() []string {
 	return library.Properties.Overrides
 }
 
+func (library *libraryDecorator) defaultDistFiles() []android.Path {
+	if library.defaultDistFile == nil {
+		return nil
+	}
+	return []android.Path{library.defaultDistFile}
+}
+
 var _ overridable = (*libraryDecorator)(nil)
 
 var versioningMacroNamesListKey = android.NewOnceKey("versioningMacroNamesList")
@@ -2224,6 +2240,9 @@ func (linkageTransitionMutator) Split(ctx android.BaseModuleContext) []string {
 }
 
 func (linkageTransitionMutator) OutgoingTransition(ctx android.OutgoingTransitionContext, sourceVariation string) string {
+	if ctx.DepTag() == android.PrebuiltDepTag {
+		return sourceVariation
+	}
 	return ""
 }
 
@@ -2280,11 +2299,13 @@ func (linkageTransitionMutator) Mutate(ctx android.BottomUpMutatorContext, varia
 			library.setStatic()
 			if !library.buildStatic() {
 				library.disablePrebuilt()
+				ctx.Module().(*Module).Prebuilt().SetUsePrebuilt(false)
 			}
 		} else if variation == "shared" {
 			library.setShared()
 			if !library.buildShared() {
 				library.disablePrebuilt()
+				ctx.Module().(*Module).Prebuilt().SetUsePrebuilt(false)
 			}
 		}
 	} else if library, ok := ctx.Module().(LinkableInterface); ok && library.CcLibraryInterface() {
@@ -2397,6 +2418,9 @@ func (versionTransitionMutator) Split(ctx android.BaseModuleContext) []string {
 }
 
 func (versionTransitionMutator) OutgoingTransition(ctx android.OutgoingTransitionContext, sourceVariation string) string {
+	if ctx.DepTag() == android.PrebuiltDepTag {
+		return sourceVariation
+	}
 	return ""
 }
 
