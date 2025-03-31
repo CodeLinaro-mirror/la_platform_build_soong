@@ -16,9 +16,21 @@ package filesystem
 
 import (
 	"android/soong/android"
+	"strconv"
 
 	"github.com/google/blueprint"
 	"github.com/google/blueprint/proptools"
+)
+
+func init() {
+	pctx.HostBinToolVariable("aconfig", "aconfig")
+}
+
+var (
+	aconfigCreateStorage = pctx.AndroidStaticRule("aconfig_create_storage", blueprint.RuleParams{
+		Command:     `$aconfig create-storage --container $container --file $fileType --out $out --cache $in --version $version`,
+		CommandDeps: []string{"$aconfig"},
+	}, "container", "fileType", "version")
 )
 
 type installedAconfigFlagsInfo struct {
@@ -33,7 +45,13 @@ type importAconfigDepDag struct {
 
 var importAconfigDependencyTag = interPartitionDepTag{}
 
-func (f *filesystem) buildAconfigFlagsFiles(ctx android.ModuleContext, builder *android.RuleBuilder, specs map[string]android.PackagingSpec, dir android.OutputPath) {
+func (f *filesystem) buildAconfigFlagsFiles(
+	ctx android.ModuleContext,
+	builder *android.RuleBuilder,
+	specs map[string]android.PackagingSpec,
+	dir android.OutputPath,
+	fullInstallPaths *[]FullInstallPathInfo,
+) {
 	var caches []android.Path
 	for _, ps := range specs {
 		caches = append(caches, ps.GetAconfigPaths()...)
@@ -59,30 +77,57 @@ func (f *filesystem) buildAconfigFlagsFiles(ctx android.ModuleContext, builder *
 
 	container := f.PartitionType()
 
-	installAconfigFlagsPath := dir.Join(ctx, "etc", "aconfig_flags.pb")
-	cmd := builder.Command().
+	aconfigFlagsPb := android.PathForModuleOut(ctx, "aconfig", "aconfig_flags.pb")
+	aconfigFlagsPbBuilder := android.NewRuleBuilder(pctx, ctx)
+	cmd := aconfigFlagsPbBuilder.Command().
 		BuiltTool("aconfig").
 		Text(" dump-cache --dedup --format protobuf --out").
-		Output(installAconfigFlagsPath).
+		Output(aconfigFlagsPb).
 		Textf("--filter container:%s+state:ENABLED", container).
 		Textf("--filter container:%s+permission:READ_WRITE", container)
 	for _, cache := range caches {
 		cmd.FlagWithInput("--cache ", cache)
 	}
+	aconfigFlagsPbBuilder.Build("aconfig_flags_pb", "build aconfig_flags.pb")
+
+	installAconfigFlagsPath := dir.Join(ctx, "etc", "aconfig_flags.pb")
+	builder.Command().Text("mkdir -p ").Text(dir.Join(ctx, "etc").String())
+	builder.Command().Text("cp").Input(aconfigFlagsPb).Text(installAconfigFlagsPath.String())
+	*fullInstallPaths = append(*fullInstallPaths, FullInstallPathInfo{
+		FullInstallPath: android.PathForModuleInPartitionInstall(ctx, f.PartitionType(), "etc/aconfig_flags.pb"),
+		SourcePath:      aconfigFlagsPb,
+	})
 	f.appendToEntry(ctx, installAconfigFlagsPath)
+
+	// To enable fingerprint, we need to have v2 storage files. The default version is 1.
+	storageFilesVersion := 1
+	if ctx.Config().ReleaseFingerprintAconfigPackages() {
+		storageFilesVersion = 2
+	}
 
 	installAconfigStorageDir := dir.Join(ctx, "etc", "aconfig")
 	builder.Command().Text("mkdir -p").Text(installAconfigStorageDir.String())
 
 	generatePartitionAconfigStorageFile := func(fileType, fileName string) {
-		outputPath := installAconfigStorageDir.Join(ctx, fileName)
+		outPath := android.PathForModuleOut(ctx, "aconfig", fileName)
+		installPath := installAconfigStorageDir.Join(ctx, fileName)
+		ctx.Build(pctx, android.BuildParams{
+			Rule:   aconfigCreateStorage,
+			Input:  aconfigFlagsPb,
+			Output: outPath,
+			Args: map[string]string{
+				"container": container,
+				"fileType":  fileType,
+				"version":   strconv.Itoa(storageFilesVersion),
+			},
+		})
 		builder.Command().
-			BuiltTool("aconfig").
-			FlagWithArg("create-storage --container ", container).
-			FlagWithArg("--file ", fileType).
-			FlagWithOutput("--out ", outputPath).
-			FlagWithArg("--cache ", installAconfigFlagsPath.String())
-		f.appendToEntry(ctx, outputPath)
+			Text("cp").Input(outPath).Text(installPath.String())
+		*fullInstallPaths = append(*fullInstallPaths, FullInstallPathInfo{
+			SourcePath:      outPath,
+			FullInstallPath: android.PathForModuleInPartitionInstall(ctx, f.PartitionType(), "etc/aconfig", fileName),
+		})
+		f.appendToEntry(ctx, installPath)
 	}
 
 	if ctx.Config().ReleaseCreateAconfigStorageFile() {

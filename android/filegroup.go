@@ -41,11 +41,11 @@ type fileGroupProperties struct {
 
 	Exclude_srcs proptools.Configurable[[]string] `android:"path"`
 
-	// Sources the will be included in the filegroup, but any module dependencies will be added
+	// Sources that will be included in the filegroup, but any module dependencies will be added
 	// using the device os and the device's first architecture's variant.
 	Device_first_srcs proptools.Configurable[[]string] `android:"path_device_first"`
 
-	// Sources the will be included in the filegroup, but any module dependencies will be added
+	// Sources that will be included in the filegroup, but any module dependencies will be added
 	// using the device os and the common architecture's variant.
 	Device_common_srcs proptools.Configurable[[]string] `android:"path_device_common"`
 
@@ -104,7 +104,6 @@ func (fg *fileGroup) GenerateAndroidBuildActions(ctx ModuleContext) {
 	if fg.properties.Path != nil {
 		srcs = PathsWithModuleSrcSubDir(ctx, srcs, String(fg.properties.Path))
 	}
-	SetProvider(ctx, blueprint.SrcsFileProviderKey, blueprint.SrcsFileProviderData{SrcPaths: srcs.Strings()})
 
 	var aconfigDeclarations []string
 	var intermediateCacheOutputPaths Paths

@@ -36,10 +36,16 @@ const (
 	ninjaWeightListFileName = ".ninja_weight_list"
 )
 
+// Runs ninja with the arguments from the command line, as found in
+// config.NinjaArgs().
+func runNinjaForBuild(ctx Context, config Config) {
+	runNinja(ctx, config, config.NinjaArgs())
+}
+
 // Constructs and runs the Ninja command line with a restricted set of
 // environment variables. It's important to restrict the environment Ninja runs
 // for hermeticity reasons, and to avoid spurious rebuilds.
-func runNinjaForBuild(ctx Context, config Config) {
+func runNinja(ctx Context, config Config, ninjaArgs []string) {
 	ctx.BeginTrace(metrics.PrimaryNinja, "ninja")
 	defer ctx.EndTrace()
 
@@ -76,7 +82,7 @@ func runNinjaForBuild(ctx Context, config Config) {
 			//"--frontend-file", fifo,
 		}
 	default:
-		// NINJA_NINJA is the default.
+		// NINJA_NINJA or NINJA_NINJAGO.
 		executable = config.NinjaBin()
 		args = []string{
 			"-d", "keepdepfile",
@@ -88,7 +94,7 @@ func runNinjaForBuild(ctx Context, config Config) {
 			"-w", "missingdepfile=err",
 		}
 	}
-	args = append(args, config.NinjaArgs()...)
+	args = append(args, ninjaArgs...)
 
 	var parallel int
 	if config.UseRemoteBuild() {
@@ -244,6 +250,8 @@ func runNinjaForBuild(ctx Context, config Config) {
 			"RUST_LOG",
 
 			// SOONG_USE_PARTIAL_COMPILE only determines which half of the rule we execute.
+			// When it transitions true => false, we build phony target "partialcompileclean",
+			// which removes all files that could have been created while it was true.
 			"SOONG_USE_PARTIAL_COMPILE",
 
 			// Directory for ExecutionMetrics
@@ -351,12 +359,18 @@ func (c *ninjaStucknessChecker) check(ctx Context, config Config) {
 }
 
 // Constructs and runs the Ninja command line to get the inputs of a goal.
-// For now, this will always run ninja, because ninjago, n2 and siso don't have the
+// For n2 and siso, this will always run ninja, because they don't have the
 // `-t inputs` command.  This command will use the inputs command's -d option,
 // to use the dep file iff ninja was the executor. For other executors, the
 // results will be wrong.
 func runNinjaInputs(ctx Context, config Config, goal string) ([]string, error) {
-	executable := config.PrebuiltBuildTool("ninja")
+	var executable string
+	switch config.ninjaCommand {
+	case NINJA_N2, NINJA_SISO:
+		executable = config.PrebuiltBuildTool("ninja")
+	default:
+		executable = config.NinjaBin()
+	}
 
 	args := []string{
 		"-f",

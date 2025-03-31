@@ -140,6 +140,9 @@ message MetricsBase {
 
   // Metrics related to optimized builds.
   optional OptimizedBuildMetrics optimized_build_metrics = 35;
+
+  // The target release information. e.g., trunk_staging.
+  optional string target_release = 36;
 }
 
 message BuildConfig {
@@ -177,6 +180,21 @@ message BuildConfig {
   // EXTERNAL_FILE - ninja uses an external custom weight list
   // HINT_FROM_SOONG - ninja uses a prioritized module list from Soong
   optional NinjaWeightListSource ninja_weight_list_source = 8 [default = NOT_USED];
+
+  // Values of some build-affecting environment variables.
+  optional SoongEnvVars soong_env_vars = 9;
+
+  // Whether this build uses soong-only (no kati) mode (either via environment variable,
+  // command line flag or product config.
+  optional bool soong_only = 10;
+}
+
+message SoongEnvVars {
+  // SOONG_PARTIAL_COMPILE
+  optional string partial_compile = 1;
+
+  // SOONG_USE_PARTIAL_COMPILE
+  optional string use_partial_compile = 2;
 }
 
 message SystemResourceInfo {
@@ -452,13 +470,19 @@ message OptimizedBuildMetrics {
   }
 }
 
+// This is created by soong_ui from SoongExexcutionMetrics files.
+message ExecutionMetrics {
+  // The arguments provided on the command line.
+  repeated string command_args = 1;
+
+  // Changed files detected by the build.
+  optional AggregatedFileList changed_files = 2;
+}
+
 // This is created by soong_ui from the various
 // android.find_input_delta_proto.FileList metrics provided to it by
 // find_input_delta.
 message AggregatedFileList {
-  // The arguments provided on the command line.
-  repeated string command_args = 1;
-
   // The (possibly truncated list of) added files.
   repeated string additions = 2;
 
@@ -473,6 +497,8 @@ message AggregatedFileList {
 
   // Counts by extension.
   repeated FileCount counts = 6;
+
+  reserved 1;
 }
 
 message FileCount {
