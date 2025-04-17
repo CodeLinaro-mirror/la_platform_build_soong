@@ -688,6 +688,7 @@ type PartitionVariables struct {
 	BoardVendorBootimagePartitionSize string   `json:",omitempty"`
 	BoardInitBootimagePartitionSize   string   `json:",omitempty"`
 	BoardBootHeaderVersion            string   `json:",omitempty"`
+	BoardInitBootHeaderVersion        string   `json:",omitempty"`
 	TargetKernelPath                  string   `json:",omitempty"`
 	BoardUsesGenericKernelImage       bool     `json:",omitempty"`
 	BootSecurityPatch                 string   `json:",omitempty"`
