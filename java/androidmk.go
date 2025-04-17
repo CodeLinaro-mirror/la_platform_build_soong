@@ -70,11 +70,7 @@ func (library *Library) AndroidMkEntries() []android.AndroidMkEntries {
 	if library.hideApexVariantFromMake {
 		// For a java library built for an APEX, we don't need a Make module for itself. Otherwise, it
 		// will conflict with the platform variant because they have the same module name in the
-		// makefile. However, we need to add its dexpreopt outputs as sub-modules, if it is preopted.
-		dexpreoptEntries := library.dexpreopter.AndroidMkEntriesForApex()
-		if len(dexpreoptEntries) > 0 {
-			entriesList = append(entriesList, dexpreoptEntries...)
-		}
+		// makefile.
 		entriesList = append(entriesList, android.AndroidMkEntries{Disabled: true})
 	} else if !library.ApexModuleBase.AvailableFor(android.AvailableToPlatform) {
 		// Platform variant.  If not available for the platform, we don't need Make module.
@@ -121,6 +117,14 @@ func (library *Library) AndroidMkEntries() []android.AndroidMkEntries {
 
 					if library.dexpreopter.configPath != nil {
 						entries.SetPath("LOCAL_SOONG_DEXPREOPT_CONFIG", library.dexpreopter.configPath)
+					}
+				},
+			},
+			ExtraFooters: []android.AndroidMkExtraFootersFunc{
+				func(w io.Writer, name, prefix, moduleDir string) {
+					if library.apiXmlFile != nil {
+						fmt.Fprintf(w, "$(call declare-1p-target,%s,)\n", library.apiXmlFile.String())
+						fmt.Fprintf(w, "$(eval $(call copy-one-file,%s,$(TARGET_OUT_COMMON_INTERMEDIATES)/%s))\n", library.apiXmlFile.String(), library.apiXmlFile.Base())
 					}
 				},
 			},
@@ -556,8 +560,6 @@ func (dstubs *Droidstubs) AndroidMkEntries() []android.AndroidMkEntries {
 			func(w io.Writer, name, prefix, moduleDir string) {
 				if dstubs.apiLintTimestamp != nil {
 					if dstubs.apiLintReport != nil {
-						fmt.Fprintf(w, "$(call dist-for-goals,%s,%s:%s)\n", dstubs.Name()+"-api-lint",
-							dstubs.apiLintReport.String(), "apilint/"+dstubs.Name()+"-lint-report.txt")
 						fmt.Fprintf(w, "$(call declare-0p-target,%s)\n", dstubs.apiLintReport.String())
 					}
 				}

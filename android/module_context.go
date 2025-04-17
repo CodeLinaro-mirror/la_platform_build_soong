@@ -81,6 +81,8 @@ type BuildParams struct {
 	Default bool
 	// Args is a key value mapping for replacements of variables within the Rule
 	Args map[string]string
+	// PhonyOutput marks this build as `phony_output = true`
+	PhonyOutput bool
 }
 
 type ModuleBuildParams BuildParams
@@ -255,6 +257,24 @@ type ModuleContext interface {
 	setContainersInfo(info ContainersInfo)
 
 	setAconfigPaths(paths Paths)
+
+	// DistForGoals creates a rule to copy one or more Paths to the artifacts
+	// directory on the build server when any of the specified goals are built.
+	DistForGoal(goal string, paths ...Path)
+
+	// DistForGoalWithFilename creates a rule to copy a Path to the artifacts
+	// directory on the build server with the given filename when the specified
+	// goal is built.
+	DistForGoalWithFilename(goal string, path Path, filename string)
+
+	// DistForGoals creates a rule to copy one or more Paths to the artifacts
+	// directory on the build server when any of the specified goals are built.
+	DistForGoals(goals []string, paths ...Path)
+
+	// DistForGoalsWithFilename creates a rule to copy a Path to the artifacts
+	// directory on the build server with the given filename when any of the
+	// specified goals are built.
+	DistForGoalsWithFilename(goals []string, path Path, filename string)
 }
 
 type moduleContext struct {
@@ -312,6 +332,8 @@ type moduleContext struct {
 	// complianceMetadataInfo is for different module types to dump metadata.
 	// See android.ModuleContext interface.
 	complianceMetadataInfo *ComplianceMetadataInfo
+
+	dists []dist
 }
 
 var _ ModuleContext = &moduleContext{}
@@ -349,6 +371,7 @@ func convertBuildParams(params BuildParams) blueprint.BuildParams {
 		Validations:     params.Validations.Strings(),
 		Args:            params.Args,
 		Default:         params.Default,
+		PhonyOutput:     params.PhonyOutput,
 	}
 
 	if params.Depfile != nil {
@@ -632,6 +655,7 @@ func (m *moduleContext) packageFile(fullInstallPath InstallPath, srcPath Path, e
 		owner:                 owner,
 		requiresFullInstall:   requiresFullInstall,
 		fullInstallPath:       fullInstallPath,
+		variation:             m.ModuleSubDir(),
 	}
 	m.packagingSpecs = append(m.packagingSpecs, spec)
 	return spec
@@ -639,6 +663,9 @@ func (m *moduleContext) packageFile(fullInstallPath InstallPath, srcPath Path, e
 
 func (m *moduleContext) installFile(installPath InstallPath, name string, srcPath Path, deps []InstallPath,
 	executable bool, hooks bool, checkbuild bool, extraZip *extraFilesZip) InstallPath {
+	if _, ok := srcPath.(InstallPath); ok {
+		m.ModuleErrorf("Src path cannot be another installed file. Please use a path from source or intermediates instead.")
+	}
 
 	fullInstallPath := installPath.Join(m, name)
 	if hooks {
@@ -690,6 +717,17 @@ func (m *moduleContext) installFile(installPath InstallPath, name string, srcPat
 				implicitDeps = append(implicitDeps, extraZip.zip)
 			}
 
+			var cpFlags = "-f"
+
+			// If this is a device file, copy while preserving timestamps. This is to support
+			// adb sync in soong-only builds. Because soong-only builds have 2 different staging
+			// directories, the out/target/product one and the out/soong/.intermediates one,
+			// we need to ensure the files in them have the same timestamps so that adb sync doesn't
+			// update the files on device.
+			if strings.Contains(fullInstallPath.String(), "target/product") {
+				cpFlags += " -p"
+			}
+
 			m.Build(pctx, BuildParams{
 				Rule:        rule,
 				Description: "install " + fullInstallPath.Base(),
@@ -699,7 +737,7 @@ func (m *moduleContext) installFile(installPath InstallPath, name string, srcPat
 				OrderOnly:   orderOnlyDeps,
 				Args: map[string]string{
 					"extraCmds": extraCmds,
-					"cpFlags":   "-f",
+					"cpFlags":   cpFlags,
 				},
 			})
 		}
@@ -769,6 +807,7 @@ func (m *moduleContext) InstallSymlink(installPath InstallPath, name string, src
 		owner:               owner,
 		requiresFullInstall: m.requiresFullInstall(),
 		fullInstallPath:     fullInstallPath,
+		variation:           m.ModuleSubDir(),
 	})
 
 	return fullInstallPath
@@ -793,7 +832,7 @@ func (m *moduleContext) InstallAbsoluteSymlink(installPath InstallPath, name str
 		})
 		if !m.Config().KatiEnabled() {
 			m.Build(pctx, BuildParams{
-				Rule:        Symlink,
+				Rule:        SymlinkWithBash,
 				Description: "install symlink " + fullInstallPath.Base() + " -> " + absPath,
 				Output:      fullInstallPath,
 				Args: map[string]string{
@@ -819,6 +858,7 @@ func (m *moduleContext) InstallAbsoluteSymlink(installPath InstallPath, name str
 		owner:               owner,
 		requiresFullInstall: m.requiresFullInstall(),
 		fullInstallPath:     fullInstallPath,
+		variation:           m.ModuleSubDir(),
 	})
 
 	return fullInstallPath
@@ -955,4 +995,33 @@ func (m *moduleContext) getContainersInfo() ContainersInfo {
 
 func (m *moduleContext) setContainersInfo(info ContainersInfo) {
 	m.containersInfo = info
+}
+
+func (c *moduleContext) DistForGoal(goal string, paths ...Path) {
+	c.DistForGoals([]string{goal}, paths...)
+}
+
+func (c *moduleContext) DistForGoalWithFilename(goal string, path Path, filename string) {
+	c.DistForGoalsWithFilename([]string{goal}, path, filename)
+}
+
+func (c *moduleContext) DistForGoals(goals []string, paths ...Path) {
+	var copies distCopies
+	for _, path := range paths {
+		copies = append(copies, distCopy{
+			from: path,
+			dest: path.Base(),
+		})
+	}
+	c.dists = append(c.dists, dist{
+		goals: slices.Clone(goals),
+		paths: copies,
+	})
+}
+
+func (c *moduleContext) DistForGoalsWithFilename(goals []string, path Path, filename string) {
+	c.dists = append(c.dists, dist{
+		goals: slices.Clone(goals),
+		paths: distCopies{{from: path, dest: filename}},
+	})
 }
