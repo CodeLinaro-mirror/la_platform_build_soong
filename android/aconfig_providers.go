@@ -238,8 +238,7 @@ func getContainer(m Module) string {
 	} else if base.ProductSpecific() {
 		container = "product"
 	} else if base.SystemExtSpecific() {
-		// system_ext and system partitions should be treated as one container
-		container = "system"
+		container = "system_ext"
 	}
 
 	return container
@@ -249,14 +248,13 @@ func getContainer(m Module) string {
 // Please only access the module's internal data through providers.
 func getContainerUsingProviders(ctx OtherModuleProviderContext, m Module) string {
 	container := "system"
-	commonInfo, _ := OtherModuleProvider(ctx, m, CommonModuleInfoKey)
+	commonInfo := OtherModulePointerProviderOrDefault(ctx, m, CommonModuleInfoProvider)
 	if commonInfo.Vendor || commonInfo.Proprietary || commonInfo.SocSpecific {
 		container = "vendor"
 	} else if commonInfo.ProductSpecific {
 		container = "product"
 	} else if commonInfo.SystemExtSpecific {
-		// system_ext and system partitions should be treated as one container
-		container = "system"
+		container = "system_ext"
 	}
 
 	return container

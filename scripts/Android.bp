@@ -254,11 +254,6 @@ python_binary_host {
     ],
 }
 
-sh_binary_host {
-    name: "list_image",
-    src: "list_image.sh",
-}
-
 filegroup {
     name: "rustfmt.toml",
     srcs: ["rustfmt.toml"],
@@ -287,9 +282,13 @@ python_test_host {
     ],
 }
 
-sh_binary_host {
-    name: "keep-flagged-apis",
-    src: "keep-flagged-apis.sh",
+python_binary_host {
+    name: "aconfig-to-metalava-flags",
+    main: "aconfig-to-metalava-flags.py",
+    srcs: ["aconfig-to-metalava-flags.py"],
+    libs: [
+        "libaconfig_python_proto",
+    ],
 }
 
 python_binary_host {

@@ -81,18 +81,23 @@ type LinkerInfo struct {
 	HeaderLibs               []string
 	ImplementationModuleName *string
 
-	BinaryDecoratorInfo    *BinaryDecoratorInfo
-	LibraryDecoratorInfo   *LibraryDecoratorInfo
-	TestBinaryInfo         *TestBinaryInfo
-	BenchmarkDecoratorInfo *BenchmarkDecoratorInfo
-	ObjectLinkerInfo       *ObjectLinkerInfo
-	StubDecoratorInfo      *StubDecoratorInfo
+	BinaryDecoratorInfo       *BinaryDecoratorInfo
+	LibraryDecoratorInfo      *LibraryDecoratorInfo
+	TestBinaryInfo            *TestBinaryInfo
+	BenchmarkDecoratorInfo    *BenchmarkDecoratorInfo
+	ObjectLinkerInfo          *ObjectLinkerInfo
+	StubDecoratorInfo         *StubDecoratorInfo
+	PrebuiltLibraryLinkerInfo *PrebuiltLibraryLinkerInfo
 }
 
 type BinaryDecoratorInfo struct{}
 type LibraryDecoratorInfo struct {
 	ExportIncludeDirs []string
 	InjectBsslHash    bool
+	// Location of the static library in the sysroot. Empty if the library is
+	// not included in the NDK.
+	NdkSysrootPath android.Path
+	VndkFileName   string
 }
 
 type SnapshotInfo struct {
@@ -104,12 +109,36 @@ type TestBinaryInfo struct {
 }
 type BenchmarkDecoratorInfo struct{}
 
-type StubDecoratorInfo struct{}
+type StubDecoratorInfo struct {
+	AbiDumpPath  android.OutputPath
+	HasAbiDump   bool
+	AbiDiffPaths android.Paths
+	InstallPath  android.Path
+}
 
-type ObjectLinkerInfo struct{}
+type ObjectLinkerInfo struct {
+	// Location of the object in the sysroot. Empty if the object is not
+	// included in the NDK.
+	NdkSysrootPath android.Path
+}
+
+type PrebuiltLibraryLinkerInfo struct {
+	VndkFileName string
+}
 
 type LibraryInfo struct {
 	BuildStubs bool
+}
+
+type InstallerInfo struct {
+	StubDecoratorInfo *StubDecoratorInfo
+}
+
+type LocalOrGlobalFlagsInfo struct {
+	CommonFlags []string // Flags that apply to C, C++, and assembly source files
+	CFlags      []string // Flags that apply to C and C++ source files
+	ConlyFlags  []string // Flags that apply to C source files
+	CppFlags    []string // Flags that apply to C++ source files
 }
 
 // Common info about the cc module.
@@ -122,6 +151,7 @@ type CcInfo struct {
 	LinkerInfo             *LinkerInfo
 	SnapshotInfo           *SnapshotInfo
 	LibraryInfo            *LibraryInfo
+	InstallerInfo          *InstallerInfo
 }
 
 var CcInfoProvider = blueprint.NewProvider[*CcInfo]()
@@ -131,6 +161,7 @@ type LinkableInfo struct {
 	StaticExecutable     bool
 	Static               bool
 	Shared               bool
+	Header               bool
 	HasStubsVariants     bool
 	StubsVersion         string
 	IsStubs              bool
@@ -176,6 +207,13 @@ type LinkableInfo struct {
 	// Symlinks returns a list of symlinks that should be created for this module.
 	Symlinks               []string
 	APIListCoverageXMLPath android.ModuleOutPath
+	// FuzzSharedLibraries returns the shared library dependencies for this module.
+	// Expects that IsFuzzModule returns true.
+	FuzzSharedLibraries      android.RuleBuilderInstalls
+	IsVndkPrebuiltLibrary    bool
+	HasLLNDKStubs            bool
+	IsLLNDKMovedToApex       bool
+	ImplementationModuleName string
 }
 
 var LinkableInfoProvider = blueprint.NewProvider[*LinkableInfo]()
@@ -758,7 +796,13 @@ type linker interface {
 	// Get the deps that have been explicitly specified in the properties.
 	linkerSpecifiedDeps(ctx android.ConfigurableEvaluatorContext, module *Module, specifiedDeps specifiedDeps) specifiedDeps
 
+	// Gets a list of files that will be disted when using the dist property without specifying
+	// an output file tag.
+	defaultDistFiles() []android.Path
+
 	moduleInfoJSON(ctx ModuleContext, moduleInfoJSON *android.ModuleInfoJSON)
+
+	testSuiteInfo(ctx ModuleContext)
 }
 
 // specifiedDeps is a tuple struct representing dependencies of a linked binary owned by the linker.
@@ -2337,8 +2381,11 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 		case *binaryDecorator:
 			ccInfo.LinkerInfo.BinaryDecoratorInfo = &BinaryDecoratorInfo{}
 		case *libraryDecorator:
+			lk := c.linker.(*libraryDecorator)
 			ccInfo.LinkerInfo.LibraryDecoratorInfo = &LibraryDecoratorInfo{
-				InjectBsslHash: Bool(c.linker.(*libraryDecorator).Properties.Inject_bssl_hash),
+				InjectBsslHash: Bool(lk.Properties.Inject_bssl_hash),
+				NdkSysrootPath: lk.ndkSysrootPath,
+				VndkFileName:   lk.getLibNameHelper(c.BaseModuleName(), true, false) + ".so",
 			}
 		case *testBinary:
 			ccInfo.LinkerInfo.TestBinaryInfo = &TestBinaryInfo{
@@ -2347,9 +2394,16 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 		case *benchmarkDecorator:
 			ccInfo.LinkerInfo.BenchmarkDecoratorInfo = &BenchmarkDecoratorInfo{}
 		case *objectLinker:
-			ccInfo.LinkerInfo.ObjectLinkerInfo = &ObjectLinkerInfo{}
+			ccInfo.LinkerInfo.ObjectLinkerInfo = &ObjectLinkerInfo{
+				NdkSysrootPath: c.linker.(*objectLinker).ndkSysrootPath,
+			}
 		case *stubDecorator:
 			ccInfo.LinkerInfo.StubDecoratorInfo = &StubDecoratorInfo{}
+		case *prebuiltLibraryLinker:
+			ccInfo.LinkerInfo.PrebuiltLibraryLinkerInfo = &PrebuiltLibraryLinkerInfo{
+				VndkFileName: c.linker.(*prebuiltLibraryLinker).getLibNameHelper(
+					c.BaseModuleName(), true, false) + ".so",
+			}
 		}
 
 		if s, ok := c.linker.(SnapshotInterface); ok {
@@ -2361,10 +2415,23 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 			name := v.ImplementationModuleName(ctx.OtherModuleName(c))
 			ccInfo.LinkerInfo.ImplementationModuleName = &name
 		}
+
+		c.linker.testSuiteInfo(ctx)
 	}
 	if c.library != nil {
 		ccInfo.LibraryInfo = &LibraryInfo{
 			BuildStubs: c.library.BuildStubs(),
+		}
+	}
+	if c.installer != nil {
+		ccInfo.InstallerInfo = &InstallerInfo{}
+		if installer, ok := c.installer.(*stubDecorator); ok {
+			ccInfo.InstallerInfo.StubDecoratorInfo = &StubDecoratorInfo{
+				HasAbiDump:   installer.hasAbiDump,
+				AbiDumpPath:  installer.abiDumpPath,
+				AbiDiffPaths: installer.abiDiffPaths,
+				InstallPath:  installer.installPath,
+			}
 		}
 	}
 	android.SetProvider(ctx, CcInfoProvider, &ccInfo)
@@ -2374,6 +2441,27 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 	if c.makeVarsInfo != nil {
 		android.SetProvider(ctx, CcMakeVarsInfoProvider, c.makeVarsInfo)
 	}
+}
+
+func (c *Module) CleanupAfterBuildActions() {
+	// Clear as much of Module as possible to reduce memory usage.
+	c.generators = nil
+	c.compiler = nil
+	c.installer = nil
+	c.features = nil
+	c.coverage = nil
+	c.fuzzer = nil
+	c.sabi = nil
+	c.lto = nil
+	c.afdo = nil
+	c.orderfile = nil
+
+	// TODO: these can be cleared after nativeBinaryInfoProperties and nativeLibInfoProperties are switched to
+	//  using providers.
+	// c.linker = nil
+	// c.stl = nil
+	// c.sanitize = nil
+	// c.library = nil
 }
 
 func CreateCommonLinkableInfo(ctx android.ModuleContext, mod VersionedLinkableInterface) *LinkableInfo {
@@ -2408,12 +2496,23 @@ func CreateCommonLinkableInfo(ctx android.ModuleContext, mod VersionedLinkableIn
 		Multilib:                        mod.Multilib(),
 		ImplementationModuleNameForMake: mod.ImplementationModuleNameForMake(),
 		Symlinks:                        mod.Symlinks(),
+		Header:                          mod.Header(),
+		IsVndkPrebuiltLibrary:           mod.IsVndkPrebuiltLibrary(),
 	}
 
 	vi := mod.VersionedInterface()
 	if vi != nil {
 		info.IsStubsImplementationRequired = vi.IsStubsImplementationRequired()
 		info.APIListCoverageXMLPath = vi.GetAPIListCoverageXMLPath()
+		info.HasLLNDKStubs = vi.HasLLNDKStubs()
+		info.IsLLNDKMovedToApex = vi.IsLLNDKMovedToApex()
+		info.ImplementationModuleName = vi.ImplementationModuleName(mod.BaseModuleName())
+	}
+
+	if !mod.PreventInstall() && fuzz.IsValid(ctx, mod.FuzzModuleStruct()) && mod.IsFuzzModule() {
+		info.FuzzSharedLibraries = mod.FuzzSharedLibraries()
+		fm := mod.FuzzPackagedModule()
+		fuzz.SetFuzzPackagedModuleInfo(ctx, &fm)
 	}
 
 	return info
@@ -2428,6 +2527,10 @@ func (c *Module) setOutputFiles(ctx ModuleContext) {
 	if c.linker != nil {
 		ctx.SetOutputFiles(android.PathsIfNonNil(c.linker.unstrippedOutputFilePath()), "unstripped")
 		ctx.SetOutputFiles(android.PathsIfNonNil(c.linker.strippedAllOutputFilePath()), "stripped_all")
+		defaultDistFiles := c.linker.defaultDistFiles()
+		if len(defaultDistFiles) > 0 {
+			ctx.SetOutputFiles(defaultDistFiles, android.DefaultDistTag)
+		}
 	}
 }
 
@@ -3360,7 +3463,7 @@ func (c *Module) depsToPaths(ctx android.ModuleContext) PathDeps {
 			return
 		}
 
-		commonInfo := android.OtherModuleProviderOrDefault(ctx, dep, android.CommonModuleInfoKey)
+		commonInfo := android.OtherModulePointerProviderOrDefault(ctx, dep, android.CommonModuleInfoProvider)
 		if commonInfo.Target.Os != ctx.Os() {
 			ctx.ModuleErrorf("OS mismatch between %q (%s) and %q (%s)", ctx.ModuleName(), ctx.Os().Name, depName, dep.Target().Os.Name)
 			return
@@ -3614,7 +3717,7 @@ func (c *Module) depsToPaths(ctx android.ModuleContext) PathDeps {
 					c.sabi.Properties.ReexportedSystemIncludes, depExporterInfo.SystemIncludeDirs.Strings()...)
 			}
 
-			makeLibName := MakeLibName(ccInfo, linkableInfo, &commonInfo, commonInfo.BaseModuleName) + libDepTag.makeSuffix
+			makeLibName := MakeLibName(ccInfo, linkableInfo, commonInfo, commonInfo.BaseModuleName) + libDepTag.makeSuffix
 			switch {
 			case libDepTag.header():
 				c.Properties.AndroidMkHeaderLibs = append(
@@ -3641,7 +3744,7 @@ func (c *Module) depsToPaths(ctx android.ModuleContext) PathDeps {
 			switch depTag {
 			case runtimeDepTag:
 				c.Properties.AndroidMkRuntimeLibs = append(
-					c.Properties.AndroidMkRuntimeLibs, MakeLibName(ccInfo, linkableInfo, &commonInfo,
+					c.Properties.AndroidMkRuntimeLibs, MakeLibName(ccInfo, linkableInfo, commonInfo,
 						commonInfo.BaseModuleName)+libDepTag.makeSuffix)
 			case objDepTag:
 				depPaths.Objs.objFiles = append(depPaths.Objs.objFiles, linkFile.Path())
@@ -3685,7 +3788,7 @@ func (c *Module) depsToPaths(ctx android.ModuleContext) PathDeps {
 func ShouldUseStubForApex(ctx android.ModuleContext, parent android.Module, dep android.ModuleProxy) bool {
 	inVendorOrProduct := false
 	bootstrap := false
-	if ctx.EqualModules(ctx.Module(), parent) {
+	if android.EqualModules(ctx.Module(), parent) {
 		if linkable, ok := parent.(LinkableInterface); !ok {
 			ctx.ModuleErrorf("Not a Linkable module: %q", ctx.ModuleName())
 		} else {
@@ -3717,7 +3820,7 @@ func ShouldUseStubForApex(ctx android.ModuleContext, parent android.Module, dep 
 		// platform APIs, use stubs only when it is from an APEX (and not from
 		// platform) However, for host, ramdisk, vendor_ramdisk, recovery or
 		// bootstrap modules, always link to non-stub variant
-		isNotInPlatform := android.OtherModuleProviderOrDefault(ctx, dep, android.CommonModuleInfoKey).NotInPlatform
+		isNotInPlatform := android.OtherModulePointerProviderOrDefault(ctx, dep, android.CommonModuleInfoProvider).NotInPlatform
 
 		useStubs = isNotInPlatform && !bootstrap
 	} else {

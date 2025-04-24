@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/google/blueprint"
+	"github.com/google/blueprint/gobtools"
 )
 
 // Adds cross-cutting licenses dependency to propagate license metadata through the build system.
@@ -65,6 +66,31 @@ type applicableLicensesProperty interface {
 type applicableLicensesPropertyImpl struct {
 	name             string
 	licensesProperty *[]string
+}
+
+type applicableLicensesPropertyImplGob struct {
+	Name             string
+	LicensesProperty []string
+}
+
+func (a *applicableLicensesPropertyImpl) ToGob() *applicableLicensesPropertyImplGob {
+	return &applicableLicensesPropertyImplGob{
+		Name:             a.name,
+		LicensesProperty: *a.licensesProperty,
+	}
+}
+
+func (a *applicableLicensesPropertyImpl) FromGob(data *applicableLicensesPropertyImplGob) {
+	a.name = data.Name
+	a.licensesProperty = &data.LicensesProperty
+}
+
+func (a applicableLicensesPropertyImpl) GobEncode() ([]byte, error) {
+	return gobtools.CustomGobEncode[applicableLicensesPropertyImplGob](&a)
+}
+
+func (a *applicableLicensesPropertyImpl) GobDecode(data []byte) error {
+	return gobtools.CustomGobDecode[applicableLicensesPropertyImplGob](data, a)
 }
 
 func newApplicableLicensesProperty(name string, licensesProperty *[]string) applicableLicensesProperty {
@@ -351,9 +377,7 @@ func licensesMakeVarsProvider(ctx MakeVarsContext) {
 	ctx.Strict("HTMLNOTICE", ctx.Config().HostToolPath(ctx, "htmlnotice").String())
 	ctx.Strict("XMLNOTICE", ctx.Config().HostToolPath(ctx, "xmlnotice").String())
 	ctx.Strict("TEXTNOTICE", ctx.Config().HostToolPath(ctx, "textnotice").String())
-	ctx.Strict("COMPLIANCENOTICE_BOM", ctx.Config().HostToolPath(ctx, "compliancenotice_bom").String())
 	ctx.Strict("COMPLIANCENOTICE_SHIPPEDLIBS", ctx.Config().HostToolPath(ctx, "compliancenotice_shippedlibs").String())
 	ctx.Strict("COMPLIANCE_LISTSHARE", ctx.Config().HostToolPath(ctx, "compliance_listshare").String())
 	ctx.Strict("COMPLIANCE_CHECKSHARE", ctx.Config().HostToolPath(ctx, "compliance_checkshare").String())
-	ctx.Strict("COMPLIANCE_SBOM", ctx.Config().HostToolPath(ctx, "compliance_sbom").String())
 }

@@ -16,6 +16,12 @@ var _ OtherModuleProviderContext = BottomUpMutatorContext(nil)
 var _ OtherModuleProviderContext = SingletonContext(nil)
 var _ OtherModuleProviderContext = (*TestContext)(nil)
 
+// ConfigAndOtherModuleProviderContext is OtherModuleProviderContext + ConfigContext
+type ConfigAndOtherModuleProviderContext interface {
+	OtherModuleProviderContext
+	ConfigContext
+}
+
 // OtherModuleProvider reads the provider for the given module.  If the provider has been set the value is
 // returned and the boolean is true.  If it has not been set the zero value of the provider's type  is returned
 // and the boolean is false.  The value returned may be a deep copy of the value originally passed to SetProvider.
@@ -33,6 +39,14 @@ func OtherModuleProvider[K any](ctx OtherModuleProviderContext, module blueprint
 func OtherModuleProviderOrDefault[K any](ctx OtherModuleProviderContext, module blueprint.Module, provider blueprint.ProviderKey[K]) K {
 	value, _ := OtherModuleProvider(ctx, module, provider)
 	return value
+}
+
+func OtherModulePointerProviderOrDefault[K *T, T any](ctx OtherModuleProviderContext, module blueprint.Module, provider blueprint.ProviderKey[K]) K {
+	if value, ok := OtherModuleProvider(ctx, module, provider); ok {
+		return value
+	}
+	var val T
+	return &val
 }
 
 // ModuleProviderContext is a helper interface that is a subset of ModuleContext or BottomUpMutatorContext

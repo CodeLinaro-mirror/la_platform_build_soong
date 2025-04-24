@@ -82,6 +82,7 @@ type AppInfo struct {
 	Certificate                   Certificate
 	PrivAppAllowlist              android.OptionalPath
 	OverriddenManifestPackageName *string
+	ApkCertsFile                  android.Path
 }
 
 var AppInfoProvider = blueprint.NewProvider[*AppInfo]()
@@ -425,6 +426,10 @@ func (a *AndroidTestHelperApp) GenerateAndroidBuildActions(ctx android.ModuleCon
 	} else {
 		moduleInfoJSON.CompatibilitySuites = append(moduleInfoJSON.CompatibilitySuites, "null-suite")
 	}
+
+	android.SetProvider(ctx, android.TestSuiteInfoProvider, android.TestSuiteInfo{
+		TestSuites: a.appTestHelperAppProperties.Test_suites,
+	})
 }
 
 func (a *AndroidApp) GenerateAndroidBuildActions(ctx android.ModuleContext) {
@@ -531,7 +536,7 @@ func (a *AndroidApp) checkJniLibsSdkVersion(ctx android.ModuleContext, minSdkVer
 		if _, ok := android.OtherModuleProvider(ctx, m, cc.CcInfoProvider); !ok {
 			panic(fmt.Errorf("jni dependency is not a cc module: %v", m))
 		}
-		commonInfo, ok := android.OtherModuleProvider(ctx, m, android.CommonModuleInfoKey)
+		commonInfo, ok := android.OtherModuleProvider(ctx, m, android.CommonModuleInfoProvider)
 		if !ok {
 			panic(fmt.Errorf("jni dependency doesn't have CommonModuleInfo provider: %v", m))
 		}
@@ -611,7 +616,7 @@ func getAconfigFilePaths(ctx android.ModuleContext) (aconfigTextFilePaths androi
 	ctx.VisitDirectDepsProxy(func(dep android.ModuleProxy) {
 		tag := ctx.OtherModuleDependencyTag(dep)
 		switch tag {
-		case staticLibTag:
+		case staticLibTag, rroDepTag:
 			if flagPackages, ok := android.OtherModuleProvider(ctx, dep, FlagsPackagesProvider); ok {
 				aconfigTextFilePaths = append(aconfigTextFilePaths, flagPackages.AconfigTextFiles...)
 			}
@@ -687,7 +692,7 @@ func (a *AndroidApp) aaptBuildActions(ctx android.ModuleContext) {
 	}
 
 	// Use non final ids if we are doing optimized shrinking and are using R8.
-	nonFinalIds := a.dexProperties.optimizedResourceShrinkingEnabled(ctx) && a.dexer.effectiveOptimizeEnabled()
+	nonFinalIds := a.dexProperties.optimizedResourceShrinkingEnabled(ctx) && a.dexer.effectiveOptimizeEnabled(ctx)
 
 	aconfigTextFilePaths := getAconfigFilePaths(ctx)
 
@@ -1124,6 +1129,11 @@ func (a *AndroidApp) generateAndroidBuildActions(ctx android.ModuleContext) {
 		android.SetProvider(ctx, JavaInfoProvider, javaInfo)
 	}
 
+	android.SetProvider(ctx, android.ApexBundleDepsDataProvider, android.ApexBundleDepsData{
+		FlatListPath: a.FlatListPath(),
+		Updatable:    a.Updatable(),
+	})
+
 	moduleInfoJSON := ctx.ModuleInfoJSON()
 	moduleInfoJSON.Class = []string{"APPS"}
 	if !a.embeddedJniLibs {
@@ -1170,7 +1180,7 @@ func collectAppDeps(ctx android.ModuleContext, app appDepsInterface,
 			apkInApex := ctx.Module().(android.ApexModule).NotInPlatform()
 			childLinkable, _ := android.OtherModuleProvider(ctx, child, cc.LinkableInfoProvider)
 			parentIsLinkable := false
-			if ctx.EqualModules(ctx.Module(), parent) {
+			if android.EqualModules(ctx.Module(), parent) {
 				parentLinkable, _ := ctx.Module().(cc.LinkableInterface)
 				parentIsLinkable = parentLinkable != nil
 			} else {
@@ -1224,7 +1234,7 @@ func collectJniDeps(ctx android.ModuleContext,
 	seenModulePaths := make(map[string]bool)
 
 	ctx.WalkDepsProxy(func(module, parent android.ModuleProxy) bool {
-		if !android.OtherModuleProviderOrDefault(ctx, module, android.CommonModuleInfoKey).Enabled {
+		if !android.OtherModulePointerProviderOrDefault(ctx, module, android.CommonModuleInfoProvider).Enabled {
 			return false
 		}
 		otherName := ctx.OtherModuleName(module)
@@ -1244,7 +1254,7 @@ func collectJniDeps(ctx android.ModuleContext,
 					}
 					seenModulePaths[path.String()] = true
 
-					commonInfo := android.OtherModuleProviderOrDefault(ctx, module, android.CommonModuleInfoKey)
+					commonInfo := android.OtherModulePointerProviderOrDefault(ctx, module, android.CommonModuleInfoProvider)
 					if checkNativeSdkVersion && commonInfo.SdkVersion == "" {
 						ctx.PropertyErrorf("jni_libs", "JNI dependency %q uses platform APIs, but this module does not",
 							otherName)
@@ -1282,13 +1292,13 @@ func collectJniDeps(ctx android.ModuleContext,
 }
 
 func (a *AndroidApp) WalkPayloadDeps(ctx android.BaseModuleContext, do android.PayloadDepsCallback) {
-	ctx.WalkDeps(func(child, parent android.Module) bool {
+	ctx.WalkDepsProxy(func(child, parent android.ModuleProxy) bool {
 		// TODO(ccross): Should this use android.DepIsInSameApex?  Right now it is applying the android app
 		// heuristics to every transitive dependency, when it should probably be using the heuristics of the
 		// immediate parent.
 		isExternal := !a.GetDepInSameApexChecker().OutgoingDepIsInSameApex(ctx.OtherModuleDependencyTag(child))
-		if am, ok := child.(android.ApexModule); ok {
-			if !do(ctx, parent, am, isExternal) {
+		if am, ok := android.OtherModuleProvider(ctx, child, android.CommonModuleInfoProvider); ok && am.IsApexModule {
+			if !do(ctx, parent, child, isExternal) {
 				return false
 			}
 		}
@@ -1302,12 +1312,12 @@ func (a *AndroidApp) buildAppDependencyInfo(ctx android.ModuleContext) {
 	}
 
 	depsInfo := android.DepNameToDepInfoMap{}
-	a.WalkPayloadDeps(ctx, func(ctx android.BaseModuleContext, from android.Module, to android.ApexModule, externalDep bool) bool {
+	a.WalkPayloadDeps(ctx, func(ctx android.BaseModuleContext, from, to android.ModuleProxy, externalDep bool) bool {
 		depName := to.Name()
 
 		// Skip dependencies that are only available to APEXes; they are developed with updatability
 		// in mind and don't need manual approval.
-		if android.OtherModuleProviderOrDefault(ctx, to, android.CommonModuleInfoKey).NotAvailableForPlatform {
+		if android.OtherModulePointerProviderOrDefault(ctx, to, android.CommonModuleInfoProvider).NotAvailableForPlatform {
 			return true
 		}
 
@@ -1317,7 +1327,7 @@ func (a *AndroidApp) buildAppDependencyInfo(ctx android.ModuleContext) {
 			depsInfo[depName] = info
 		} else {
 			toMinSdkVersion := "(no version)"
-			if info, ok := android.OtherModuleProvider(ctx, to, android.CommonModuleInfoKey); ok &&
+			if info, ok := android.OtherModuleProvider(ctx, to, android.CommonModuleInfoProvider); ok &&
 				!info.MinSdkVersion.IsPlatform && info.MinSdkVersion.ApiLevel != nil {
 				toMinSdkVersion = info.MinSdkVersion.ApiLevel.String()
 			}
@@ -1698,6 +1708,10 @@ func (a *AndroidTest) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		moduleInfoJSON.AutoTestConfig = []string{"true"}
 	}
 	moduleInfoJSON.TestMainlineModules = append(moduleInfoJSON.TestMainlineModules, a.testProperties.Test_mainline_modules...)
+
+	android.SetProvider(ctx, android.TestSuiteInfoProvider, android.TestSuiteInfo{
+		TestSuites: a.testProperties.Test_suites,
+	})
 }
 
 func testcaseRel(paths android.Paths) []string {
@@ -2204,3 +2218,7 @@ func setCommonAppInfo(appInfo *AppInfo, m androidApp) {
 	appInfo.Certificate = m.Certificate()
 	appInfo.PrivAppAllowlist = m.PrivAppAllowlist()
 }
+
+type AppInfos []AppInfo
+
+var AppInfosProvider = blueprint.NewProvider[AppInfos]()
