@@ -1217,6 +1217,10 @@ func (library *libraryDecorator) compilerFlags(ctx ModuleContext, flags Flags, d
 
 		flags = addStubLibraryCompilerFlags(flags)
 	}
+	libName := library.getLibName(ctx)
+	if  libName == "libinit" && ctx.Config().IsEnvTrue("BOARD_SUPPORTS_RAMDISK_EARLY_INIT") {
+		flags.Local.CFlags = append(flags.Local.CFlags , "-DENABLE_EARLY_SERVICES")
+	}
 	return flags
 }
 

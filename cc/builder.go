@@ -376,6 +376,7 @@ type builderFlags struct {
 	toolchain     config.Toolchain
 
 	// True if these extra features are enabled.
+	sdclang       bool
 	tidy          bool
 	needTidyFiles bool
 	gcovCoverage  bool
@@ -626,7 +627,13 @@ func transformSourceToObj(ctx ModuleContext, subdir string, srcFiles, noTidySrcs
 		// ccCmd is "clang" or "clang++"
 		ccDesc := ccCmd
 
-		ccCmd = "${config.ClangBin}/" + ccCmd
+		var extraFlags string
+		if flags.sdclang {
+			ccCmd = "${config.SDClangBin}/" + ccCmd
+			extraFlags = " ${config.SDClangFlags}"
+		} else {
+			ccCmd = "${config.ClangBin}/" + ccCmd
+		}
 
 		var implicitOutputs android.WritablePaths
 		if coverage {
@@ -644,7 +651,7 @@ func transformSourceToObj(ctx ModuleContext, subdir string, srcFiles, noTidySrcs
 			Implicits:       cFlagsDeps,
 			OrderOnly:       pathDeps,
 			Args: map[string]string{
-				"cFlags": shareFlags("cFlags", moduleFlags),
+				"cFlags": shareFlags("cFlags", moduleFlags+extraFlags),
 				"ccCmd":  ccCmd, // short and not shared
 			},
 		})
@@ -749,6 +756,9 @@ func transformObjToStaticLib(ctx android.ModuleContext,
 	flags builderFlags, outputFile android.ModuleOutPath, deps android.Paths, validations android.Paths) {
 
 	arCmd := "${config.ClangBin}/llvm-ar"
+	if flags.sdclang {
+		arCmd = "${config.SDClangBin}/llvm-ar"
+	}
 	arFlags := ""
 	if !ctx.Darwin() {
 		arFlags += " --format=gnu"
@@ -793,7 +803,14 @@ func transformObjToDynamicBinary(ctx android.ModuleContext,
 	groupLate bool, flags builderFlags, outputFile android.WritablePath,
 	implicitOutputs android.WritablePaths, validations android.Paths) {
 
-	ldCmd := "${config.ClangBin}/clang++"
+	var ldCmd string
+	var extraFlags string
+	if flags.sdclang {
+		ldCmd = "${config.SDClangBin}/clang++"
+		extraFlags = " ${config.SDClangFlags}"
+	} else {
+		ldCmd = "${config.ClangBin}/clang++"
+	}
 
 	var libFlagsList []string
 
@@ -841,7 +858,7 @@ func transformObjToDynamicBinary(ctx android.ModuleContext,
 		"crtBegin":      strings.Join(crtBegin.Strings(), " "),
 		"libFlags":      strings.Join(libFlagsList, " "),
 		"extraLibFlags": flags.extraLibFlags,
-		"ldFlags":       flags.globalLdFlags + " " + flags.localLdFlags,
+		"ldFlags":       flags.globalLdFlags + " " + flags.localLdFlags + " " + extraFlags,
 		"crtEnd":        strings.Join(crtEnd.Strings(), " "),
 	}
 	if ctx.Config().UseRBE() && ctx.Config().IsEnvTrue("RBE_CXX_LINKS") {
@@ -923,6 +940,20 @@ func transformAbiDumpToAbiDiff(ctx android.ModuleContext, inputDump, referenceDu
 	}
 	libName := strings.TrimSuffix(baseName, filepath.Ext(baseName))
 
+	var sdclangAbiCheckIgnoreList = []string{
+		"libbinder",
+		"libhwbinder",
+		"libprotobuf-cpp-lite",
+		"libprotobuf-cpp-full",
+		"libunwindstack",
+		"libvixl-arm64",
+		"libvixl-arm",
+	}
+	if config.SDClang && !inList("-advice-only", extraFlags) &&
+		inList(ctx.ModuleName(), sdclangAbiCheckIgnoreList) {
+		extraFlags = append(extraFlags, "-advice-only")
+	}
+
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        sAbiDiff,
 		Description: "header-abi-diff " + outputFile.Base(),
@@ -968,12 +999,19 @@ func TransformSharedObjectToToc(ctx android.ModuleContext, inputFile android.Pat
 func transformObjsToObj(ctx android.ModuleContext, objFiles android.Paths,
 	flags builderFlags, outputFile android.WritablePath, deps android.Paths) {
 
-	ldCmd := "${config.ClangBin}/clang++"
+	var ldCmd string
+	var extraFlags string
+	if flags.sdclang {
+		ldCmd = "${config.SDClangBin}/clang++"
+		extraFlags = " ${config.SDClangFlags}"
+	} else {
+		ldCmd = "${config.ClangBin}/clang++"
+	}
 
 	rule := partialLd
 	args := map[string]string{
 		"ldCmd":   ldCmd,
-		"ldFlags": flags.globalLdFlags + " " + flags.localLdFlags,
+		"ldFlags": flags.globalLdFlags + " " + flags.localLdFlags + " " + extraFlags,
 	}
 	if ctx.Config().UseRBE() && ctx.Config().IsEnvTrue("RBE_CXX_LINKS") {
 		rule = partialLdRE

@@ -86,6 +86,12 @@ func GetConfig(name string) PathConfig {
 // This list specifies whether a particular binary from $PATH is allowed to be
 // run during the build. For more documentation, see path_interposer.go .
 var Configuration = map[string]PathConfig{
+	"aarch64-linux-android-ar":      Log,
+	"aarch64-linux-android-gcc":     Log,
+	"aarch64-linux-android-ld":      Log,
+	"aarch64-linux-android-nm":      Log,
+	"aarch64-linux-android-objcopy": Log,
+	"aarch64-linux-android-objdump": Log,
 	"bash":    Allowed,
 	"dd":      Allowed,
 	"diff":    Allowed,
@@ -100,6 +106,8 @@ var Configuration = map[string]PathConfig{
 	"javap":   Allowed,
 	"lsof":    Allowed,
 	"openssl": Allowed,
+	"perl":    Log,
+	"printf":  Log,
 	"pstree":  Allowed,
 	"rsync":   Allowed,
 	"sh":      Allowed,
@@ -122,10 +130,72 @@ var Configuration = map[string]PathConfig{
 	"ld.gold":    Forbidden,
 	"pkg-config": Forbidden,
 
-	// These are toybox tools that only work on Linux.
-	"pgrep": LinuxOnlyPrebuilt,
-	"pkill": LinuxOnlyPrebuilt,
-	"ps":    LinuxOnlyPrebuilt,
+	// On Linux we'll use the toybox versions of these instead.
+	"basename":  LinuxOnlyPrebuilt,
+	"cat":       LinuxOnlyPrebuilt,
+	"chmod":     LinuxOnlyPrebuilt,
+	// TODO (b/121282416): switch back to LinuxOnlyPrebuilt when build is hermetic
+	"cmp":       Log,
+	// TODO (b/121282416): switch back to LinuxOnlyPrebuilt when build is hermetic
+	"cp":        Log,
+	"comm":      LinuxOnlyPrebuilt,
+	"cut":       LinuxOnlyPrebuilt,
+	"date":      LinuxOnlyPrebuilt,
+	// TODO (b/121282416): switch back to LinuxOnlyPrebuilt when build is hermetic
+	"dirname":   Log,
+	"du":        LinuxOnlyPrebuilt,
+	"echo":      LinuxOnlyPrebuilt,
+	"egrep":     LinuxOnlyPrebuilt,
+	"env":       LinuxOnlyPrebuilt,
+	"getconf":   LinuxOnlyPrebuilt,
+	"grep":      LinuxOnlyPrebuilt,
+	"head":      LinuxOnlyPrebuilt,
+	"hostname":  LinuxOnlyPrebuilt,
+	"id":        LinuxOnlyPrebuilt,
+	"ln":        LinuxOnlyPrebuilt,
+	"ls":        LinuxOnlyPrebuilt,
+	"md5sum":    LinuxOnlyPrebuilt,
+	// TODO (b/121282416): switch back to LinuxOnlyPrebuilt when build is hermetic
+	"mkdir":     Log,
+	"mktemp":    LinuxOnlyPrebuilt,
+	"mv":        LinuxOnlyPrebuilt,
+	"od":        LinuxOnlyPrebuilt,
+	// TODO (b/121282416): switch back to LinuxOnlyPrebuilt when build is hermetic
+	"paste":     Log,
+	"pgrep":     LinuxOnlyPrebuilt,
+	"pkill":     LinuxOnlyPrebuilt,
+	"ps":        LinuxOnlyPrebuilt,
+	// TODO (b/121282416): switch back to LinuxOnlyPrebuilt when build is hermetic
+	"pwd":       Log,
+	"readlink":  LinuxOnlyPrebuilt,
+	"rm":        LinuxOnlyPrebuilt,
+	// TODO (b/121282416): switch back to LinuxOnlyPrebuilt when build is hermetic
+	"rmdir":     Log,
+	"sed":       LinuxOnlyPrebuilt,
+	"seq":       LinuxOnlyPrebuilt,
+	"setsid":    LinuxOnlyPrebuilt,
+	"sha1sum":   LinuxOnlyPrebuilt,
+	"sha256sum": LinuxOnlyPrebuilt,
+	"sha512sum": LinuxOnlyPrebuilt,
+	"sleep":     LinuxOnlyPrebuilt,
+	"sort":      LinuxOnlyPrebuilt,
+	"stat":      LinuxOnlyPrebuilt,
+	// TODO (b/121282416): switch back to LinuxOnlyPrebuilt when build is hermetic
+	"tail":      Log,
+	"tar":       LinuxOnlyPrebuilt,
+	"tee":       LinuxOnlyPrebuilt,
+	"timeout":   LinuxOnlyPrebuilt,
+	// TODO (b/121282416): switch back to LinuxOnlyPrebuilt when build is hermetic
+	"touch":     Log,
+	"true":      LinuxOnlyPrebuilt,
+	"uname":     LinuxOnlyPrebuilt,
+	"uniq":      LinuxOnlyPrebuilt,
+	"unix2dos":  LinuxOnlyPrebuilt,
+	"wc":        LinuxOnlyPrebuilt,
+	"whoami":    LinuxOnlyPrebuilt,
+	"which":     LinuxOnlyPrebuilt,
+	// TODO (b/121282416): switch back to LinuxOnlyPrebuilt when build is hermetic
+	"xxd":       Log,
 }
 
 func init() {
