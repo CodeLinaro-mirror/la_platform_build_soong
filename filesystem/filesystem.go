@@ -147,14 +147,14 @@ type filesystemProperties struct {
 func filesystemFactory() android.Module {
 	module := &filesystem{}
 	module.filterPackagingSpec = module.filterInstallablePackagingSpec
-	initFilesystemModule(module)
+	initFilesystemModule(module, module)
 	return module
 }
 
-func initFilesystemModule(module *filesystem) {
-	module.AddProperties(&module.properties)
-	android.InitPackageModule(module)
-	module.PackagingBase.DepsCollectFirstTargetOnly = true
+func initFilesystemModule(module android.DefaultableModule, filesystemModule *filesystem) {
+	module.AddProperties(&filesystemModule.properties)
+	android.InitPackageModule(filesystemModule)
+	filesystemModule.PackagingBase.DepsCollectFirstTargetOnly = true
 	android.InitAndroidMultiTargetsArchModule(module, android.DeviceSupported, android.MultilibCommon)
 	android.InitDefaultableModule(module)
 }
@@ -331,6 +331,14 @@ func (f *filesystem) copyPackagingSpecs(ctx android.ModuleContext, builder *andr
 	return f.CopySpecsToDirs(ctx, builder, dirsToSpecs)
 }
 
+func (f *filesystem) copyFilesToProductOut(ctx android.ModuleContext, builder *android.RuleBuilder, rebasedDir android.OutputPath) {
+	if f.Name() != ctx.Config().SoongDefinedSystemImage() {
+		return
+	}
+	installPath := android.PathForModuleInPartitionInstall(ctx, f.partitionName())
+	builder.Command().Textf("cp -prf %s/* %s", rebasedDir, installPath)
+}
+
 func (f *filesystem) buildImageUsingBuildImage(ctx android.ModuleContext) android.OutputPath {
 	rootDir := android.PathForModuleOut(ctx, "root").OutputPath
 	rebasedDir := rootDir
@@ -348,6 +356,7 @@ func (f *filesystem) buildImageUsingBuildImage(ctx android.ModuleContext) androi
 	f.buildFsverityMetadataFiles(ctx, builder, specs, rootDir, rebasedDir)
 	f.buildEventLogtagsFile(ctx, builder, rebasedDir)
 	f.buildAconfigFlagsFiles(ctx, builder, specs, rebasedDir)
+	f.copyFilesToProductOut(ctx, builder, rebasedDir)
 
 	// run host_init_verifier
 	// Ideally we should have a concept of pluggable linters that verify the generated image.
@@ -490,6 +499,7 @@ func (f *filesystem) buildCpioImage(ctx android.ModuleContext, compressed bool) 
 	f.buildFsverityMetadataFiles(ctx, builder, specs, rootDir, rebasedDir)
 	f.buildEventLogtagsFile(ctx, builder, rebasedDir)
 	f.buildAconfigFlagsFiles(ctx, builder, specs, rebasedDir)
+	f.copyFilesToProductOut(ctx, builder, rebasedDir)
 
 	output := android.PathForModuleOut(ctx, f.installFileName()).OutputPath
 	cmd := builder.Command().

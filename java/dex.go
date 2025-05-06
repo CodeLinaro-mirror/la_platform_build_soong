@@ -108,7 +108,7 @@ type dexer struct {
 	resourcesInput          android.OptionalPath
 	resourcesOutput         android.OptionalPath
 
-	providesTransitiveHeaderJars
+	providesTransitiveHeaderJarsForR8
 }
 
 func (d *dexer) effectiveOptimizeEnabled() bool {
@@ -120,7 +120,7 @@ func (d *DexProperties) resourceShrinkingEnabled(ctx android.ModuleContext) bool
 }
 
 func (d *DexProperties) optimizedResourceShrinkingEnabled(ctx android.ModuleContext) bool {
-	return d.resourceShrinkingEnabled(ctx) && Bool(d.Optimize.Optimized_shrink_resources)
+	return d.resourceShrinkingEnabled(ctx) && BoolDefault(d.Optimize.Optimized_shrink_resources, ctx.Config().UseOptimizedResourceShrinkingByDefault())
 }
 
 func (d *dexer) optimizeOrObfuscateEnabled() bool {
@@ -245,6 +245,16 @@ func (d *dexer) dexCommonFlags(ctx android.ModuleContext,
 	if err != nil {
 		ctx.PropertyErrorf("min_sdk_version", "%s", err)
 	}
+	if !Bool(d.dexProperties.No_dex_container) && effectiveVersion.FinalOrFutureInt() >= 36 {
+		// W is 36, but we have not bumped the SDK version yet, so check for both.
+		if ctx.Config().PlatformSdkVersion().FinalInt() >= 36 ||
+			ctx.Config().PlatformSdkCodename() == "Wear" {
+			// TODO(b/329465418): Skip this module since it causes issue with app DRM
+			if ctx.ModuleName() != "framework-minus-apex" {
+				flags = append([]string{"-JDcom.android.tools.r8.dexContainerExperiment"}, flags...)
+			}
+		}
+	}
 
 	// If the specified SDK level is 10000, then configure the compiler to use the
 	// current platform SDK level and to compile the build as a platform build.
@@ -307,14 +317,14 @@ func (d *dexer) r8Flags(ctx android.ModuleContext, dexParams *compileDexParams) 
 	r8Deps = append(r8Deps, flags.dexClasspath...)
 
 	transitiveStaticLibsLookupMap := map[android.Path]bool{}
-	if d.transitiveStaticLibsHeaderJars != nil {
-		for _, jar := range d.transitiveStaticLibsHeaderJars.ToList() {
+	if d.transitiveStaticLibsHeaderJarsForR8 != nil {
+		for _, jar := range d.transitiveStaticLibsHeaderJarsForR8.ToList() {
 			transitiveStaticLibsLookupMap[jar] = true
 		}
 	}
 	transitiveHeaderJars := android.Paths{}
-	if d.transitiveLibsHeaderJars != nil {
-		for _, jar := range d.transitiveLibsHeaderJars.ToList() {
+	if d.transitiveLibsHeaderJarsForR8 != nil {
+		for _, jar := range d.transitiveLibsHeaderJarsForR8.ToList() {
 			if _, ok := transitiveStaticLibsLookupMap[jar]; ok {
 				// don't include a lib if it is already packaged in the current JAR as a static lib
 				continue
@@ -390,7 +400,7 @@ func (d *dexer) r8Flags(ctx android.ModuleContext, dexParams *compileDexParams) 
 		r8Flags = append(r8Flags, "--resource-input", d.resourcesInput.Path().String())
 		r8Deps = append(r8Deps, d.resourcesInput.Path())
 		r8Flags = append(r8Flags, "--resource-output", d.resourcesOutput.Path().String())
-		if Bool(opt.Optimized_shrink_resources) {
+		if d.dexProperties.optimizedResourceShrinkingEnabled(ctx) {
 			r8Flags = append(r8Flags, "--optimized-resource-shrinking")
 		}
 	}

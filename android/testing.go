@@ -1326,7 +1326,15 @@ func (ctx *panickingConfigAndErrorContext) Config() Config {
 	return ctx.ctx.Config()
 }
 
-func PanickingConfigAndErrorContext(ctx *TestContext) ConfigAndErrorContext {
+func (ctx *panickingConfigAndErrorContext) HasMutatorFinished(mutatorName string) bool {
+	return ctx.ctx.HasMutatorFinished(mutatorName)
+}
+
+func (ctx *panickingConfigAndErrorContext) otherModuleProvider(m blueprint.Module, p blueprint.AnyProviderKey) (any, bool) {
+	return ctx.ctx.otherModuleProvider(m, p)
+}
+
+func PanickingConfigAndErrorContext(ctx *TestContext) ConfigurableEvaluatorContext {
 	return &panickingConfigAndErrorContext{
 		ctx: ctx,
 	}
