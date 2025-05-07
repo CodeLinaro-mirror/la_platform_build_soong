@@ -15,8 +15,9 @@
 package aconfig
 
 import (
-	"android/soong/android"
 	"strconv"
+
+	"android/soong/android"
 )
 
 func ExportedJavaDeclarationsLibraryFactory() android.Singleton {
@@ -30,7 +31,7 @@ type exportedJavaDeclarationsLibrarySingleton struct {
 func (this *exportedJavaDeclarationsLibrarySingleton) GenerateBuildActions(ctx android.SingletonContext) {
 	// Find all of the aconfig_declarations modules
 	var cacheFiles android.Paths
-	ctx.VisitAllModules(func(module android.Module) {
+	ctx.VisitAllModuleProxies(func(module android.ModuleProxy) {
 		decl, ok := android.OtherModuleProvider(ctx, module, android.AconfigDeclarationsProviderKey)
 		if !ok {
 			return
@@ -59,11 +60,9 @@ func (this *exportedJavaDeclarationsLibrarySingleton) GenerateBuildActions(ctx a
 			"cache_files":      android.JoinPathsWithPrefix(cacheFiles, " "),
 			"use_new_storage":  strconv.FormatBool(newStorage),
 			"use_new_exported": strconv.FormatBool(newExported),
+			"check_api_level":  strconv.FormatBool(ctx.Config().ReleaseAconfigCheckApiLevel()),
 		},
 	})
 	ctx.Phony("exported_java_aconfig_library", this.intermediatePath)
-}
-
-func (this *exportedJavaDeclarationsLibrarySingleton) MakeVars(ctx android.MakeVarsContext) {
 	ctx.DistForGoalWithFilename("sdk", this.intermediatePath, "android-flags.jar")
 }

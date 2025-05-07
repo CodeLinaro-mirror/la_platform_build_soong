@@ -28,6 +28,7 @@ import (
 
 func RegisterPrebuiltMutators(ctx RegistrationContext) {
 	ctx.PreArchMutators(RegisterPrebuiltsPreArchMutators)
+	ctx.PreDepsMutators(RegisterPrebuiltsPreDepsMutators)
 	ctx.PostDepsMutators(RegisterPrebuiltsPostDepsMutators)
 }
 
@@ -195,6 +196,10 @@ func (p *Prebuilt) UsePrebuilt() bool {
 	return p.properties.UsePrebuilt
 }
 
+func (p *Prebuilt) SetUsePrebuilt(use bool) {
+	p.properties.UsePrebuilt = use
+}
+
 // Called to provide the srcs value for the prebuilt module.
 //
 // This can be called with a context for any module not just the prebuilt one itself. It can also be
@@ -352,6 +357,17 @@ func IsModulePreferred(module Module) bool {
 	return true
 }
 
+func IsModulePreferredProxy(ctx OtherModuleProviderContext, module ModuleProxy) bool {
+	if OtherModuleProviderOrDefault(ctx, module, CommonModuleInfoKey).ReplacedByPrebuilt {
+		// A source module that has been replaced by a prebuilt counterpart.
+		return false
+	}
+	if p, ok := OtherModuleProvider(ctx, module, PrebuiltModuleInfoProvider); ok {
+		return p.UsePrebuilt
+	}
+	return true
+}
+
 // IsModulePrebuilt returns true if the module implements PrebuiltInterface and
 // has been initialized as a prebuilt and so returns a non-nil value from the
 // PrebuiltInterface.Prebuilt() method.
@@ -422,9 +438,12 @@ func RegisterPrebuiltsPreArchMutators(ctx RegisterMutatorsContext) {
 	ctx.BottomUp("prebuilt_rename", PrebuiltRenameMutator).UsesRename()
 }
 
-func RegisterPrebuiltsPostDepsMutators(ctx RegisterMutatorsContext) {
+func RegisterPrebuiltsPreDepsMutators(ctx RegisterMutatorsContext) {
 	ctx.BottomUp("prebuilt_source", PrebuiltSourceDepsMutator).UsesReverseDependencies()
 	ctx.BottomUp("prebuilt_select", PrebuiltSelectModuleMutator)
+}
+
+func RegisterPrebuiltsPostDepsMutators(ctx RegisterMutatorsContext) {
 	ctx.BottomUp("prebuilt_postdeps", PrebuiltPostDepsMutator).UsesReplaceDependencies()
 }
 
@@ -468,7 +487,7 @@ func PrebuiltSourceDepsMutator(ctx BottomUpMutatorContext) {
 			bmn, _ := m.(baseModuleName)
 			name := bmn.BaseModuleName()
 			if ctx.OtherModuleReverseDependencyVariantExists(name) {
-				ctx.AddReverseDependency(ctx.Module(), PrebuiltDepTag, name)
+				ctx.AddReverseVariationDependency(nil, PrebuiltDepTag, name)
 				p.properties.SourceExists = true
 			}
 		}
@@ -602,6 +621,13 @@ func hideUnflaggedModules(ctx BottomUpMutatorContext, psi PrebuiltSelectionInfoM
 			}
 		}
 	}
+}
+
+func IsDontReplaceSourceWithPrebuiltTag(tag blueprint.DependencyTag) bool {
+	if t, ok := tag.(ReplaceSourceWithPrebuilt); ok {
+		return !t.ReplaceSourceWithPrebuilt()
+	}
+	return false
 }
 
 // PrebuiltPostDepsMutator replaces dependencies on the source module with dependencies on the

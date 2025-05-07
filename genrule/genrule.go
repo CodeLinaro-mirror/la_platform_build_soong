@@ -281,6 +281,7 @@ func isModuleInBuildNumberAllowlist(ctx android.ModuleContext) bool {
 			"hardware/google/camera/common/hal/aidl_service:aidl_camera_build_version",
 			"tools/tradefederation/core:tradefed_zip",
 			"vendor/google/services/LyricCameraHAL/src/apex:com.google.pixel.camera.hal.manifest",
+			"vendor/google_tradefederation/core:gen_google_tradefed_zip",
 			// go/keep-sorted end
 		}
 		allowlistMap := make(map[string]bool, len(allowlist))
@@ -349,7 +350,7 @@ func (g *Module) generateCommonBuildActions(ctx android.ModuleContext) {
 				// replaced the dependency.
 				module := android.PrebuiltGetPreferred(ctx, proxy)
 				tool := ctx.OtherModuleName(module)
-				if h, ok := android.OtherModuleProvider(ctx, module, android.HostToolProviderKey); ok {
+				if h, ok := android.OtherModuleProvider(ctx, module, android.HostToolProviderInfoProvider); ok {
 					// A HostToolProvider provides the path to a tool, which will be copied
 					// into the sandbox.
 					if !android.OtherModuleProviderOrDefault(ctx, module, android.CommonModuleInfoKey).Enabled {
@@ -726,11 +727,8 @@ func (g *Module) AndroidMk() android.AndroidMkData {
 var _ android.ApexModule = (*Module)(nil)
 
 // Implements android.ApexModule
-func (g *Module) ShouldSupportSdkVersion(ctx android.BaseModuleContext,
-	sdkVersion android.ApiLevel) error {
-	// Because generated outputs are checked by client modules(e.g. cc_library, ...)
-	// we can safely ignore the check here.
-	return nil
+func (m *Module) MinSdkVersionSupported(ctx android.BaseModuleContext) android.ApiLevel {
+	return android.MinApiLevel
 }
 
 func generatorFactory(taskGenerator taskFunc, props ...interface{}) *Module {

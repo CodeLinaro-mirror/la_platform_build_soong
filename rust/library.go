@@ -202,6 +202,9 @@ type libraryInterface interface {
 }
 
 func (library *libraryDecorator) nativeCoverage() bool {
+	if library.BuildStubs() {
+		return false
+	}
 	return true
 }
 
@@ -671,7 +674,10 @@ func (library *libraryDecorator) compile(ctx ModuleContext, flags Flags, deps Pa
 
 	flags.RustFlags = append(flags.RustFlags, deps.depFlags...)
 	flags.LinkFlags = append(flags.LinkFlags, deps.depLinkFlags...)
-	flags.LinkFlags = append(flags.LinkFlags, deps.linkObjects...)
+	flags.LinkFlags = append(flags.LinkFlags, deps.rustLibObjects...)
+	flags.LinkFlags = append(flags.LinkFlags, deps.sharedLibObjects...)
+	flags.LinkFlags = append(flags.LinkFlags, deps.staticLibObjects...)
+	flags.LinkFlags = append(flags.LinkFlags, deps.wholeStaticLibObjects...)
 
 	if String(library.Properties.Version_script) != "" {
 		if String(library.Properties.Extra_exported_symbols) != "" {
@@ -708,7 +714,7 @@ func (library *libraryDecorator) compile(ctx ModuleContext, flags Flags, deps Pa
 	if library.stubs() {
 		ccFlags := library.getApiStubsCcFlags(ctx)
 		stubObjs := library.compileModuleLibApiStubs(ctx, ccFlags)
-		cc.BuildRustStubs(ctx, outputFile, deps.CrtBegin, deps.CrtEnd, stubObjs, ccFlags)
+		cc.BuildRustStubs(ctx, outputFile, stubObjs, ccFlags)
 	} else if library.rlib() {
 		ret.kytheFile = TransformSrctoRlib(ctx, crateRootPath, deps, flags, outputFile).kytheFile
 	} else if library.dylib() {
@@ -719,16 +725,33 @@ func (library *libraryDecorator) compile(ctx ModuleContext, flags Flags, deps Pa
 		ret.kytheFile = TransformSrctoShared(ctx, crateRootPath, deps, flags, outputFile).kytheFile
 	}
 
+	// rlibs and dylibs propagate their shared, whole static, and rustlib dependencies
 	if library.rlib() || library.dylib() {
 		library.flagExporter.exportLinkDirs(deps.linkDirs...)
-		library.flagExporter.exportLinkObjects(deps.linkObjects...)
+		library.flagExporter.exportRustLibs(deps.rustLibObjects...)
+		library.flagExporter.exportSharedLibs(deps.sharedLibObjects...)
+		library.flagExporter.exportWholeStaticLibs(deps.wholeStaticLibObjects...)
 	}
 
+	// rlibs also propagate their staticlibs dependencies
+	if library.rlib() {
+		library.flagExporter.exportStaticLibs(deps.staticLibObjects...)
+	}
 	// Since we have FFI rlibs, we need to collect their includes as well
 	if library.static() || library.shared() || library.rlib() || library.stubs() {
-		android.SetProvider(ctx, cc.FlagExporterInfoProvider, cc.FlagExporterInfo{
+		ccExporter := cc.FlagExporterInfo{
 			IncludeDirs: android.FirstUniquePaths(library.includeDirs),
-		})
+		}
+		if library.rlib() {
+			ccExporter.RustRlibDeps = append(ccExporter.RustRlibDeps, deps.reexportedCcRlibDeps...)
+			ccExporter.RustRlibDeps = append(ccExporter.RustRlibDeps, deps.reexportedWholeCcRlibDeps...)
+		}
+		android.SetProvider(ctx, cc.FlagExporterInfoProvider, ccExporter)
+	}
+
+	if library.dylib() {
+		// reexport whole-static'd dependencies for dylibs.
+		library.flagExporter.wholeRustRlibDeps = append(library.flagExporter.wholeRustRlibDeps, deps.reexportedWholeCcRlibDeps...)
 	}
 
 	if library.shared() || library.stubs() {
@@ -756,7 +779,8 @@ func (library *libraryDecorator) compile(ctx ModuleContext, flags Flags, deps Pa
 	}
 	cc.AddStubDependencyProviders(ctx)
 
-	library.flagExporter.setProvider(ctx)
+	// Set our flagexporter provider to export relevant Rust flags
+	library.flagExporter.setRustProvider(ctx)
 
 	return ret
 }
@@ -858,6 +882,20 @@ func (library *libraryDecorator) SetDisabled() {
 	library.MutatedProperties.VariantIsDisabled = true
 }
 
+func (library *libraryDecorator) moduleInfoJSON(ctx ModuleContext, moduleInfoJSON *android.ModuleInfoJSON) {
+	library.baseCompiler.moduleInfoJSON(ctx, moduleInfoJSON)
+
+	if library.rlib() {
+		moduleInfoJSON.Class = []string{"RLIB_LIBRARIES"}
+	} else if library.dylib() {
+		moduleInfoJSON.Class = []string{"DYLIB_LIBRARIES"}
+	} else if library.static() {
+		moduleInfoJSON.Class = []string{"STATIC_LIBRARIES"}
+	} else if library.shared() {
+		moduleInfoJSON.Class = []string{"SHARED_LIBRARIES"}
+	}
+}
+
 var validCrateName = regexp.MustCompile("[^a-zA-Z0-9_]+")
 
 func validateLibraryStem(ctx BaseModuleContext, filename string, crate_name string) {
@@ -916,6 +954,9 @@ func (libraryTransitionMutator) Split(ctx android.BaseModuleContext) []string {
 }
 
 func (libraryTransitionMutator) OutgoingTransition(ctx android.OutgoingTransitionContext, sourceVariation string) string {
+	if ctx.DepTag() == android.PrebuiltDepTag {
+		return sourceVariation
+	}
 	return ""
 }
 
@@ -983,6 +1024,12 @@ func (libraryTransitionMutator) Mutate(ctx android.BottomUpMutatorContext, varia
 			},
 			sourceDepTag, ctx.ModuleName())
 	}
+
+	if prebuilt, ok := m.compiler.(*prebuiltLibraryDecorator); ok {
+		if Bool(prebuilt.Properties.Force_use_prebuilt) && len(prebuilt.prebuiltSrcs()) > 0 {
+			m.Prebuilt().SetUsePrebuilt(true)
+		}
+	}
 }
 
 type libstdTransitionMutator struct{}
@@ -1000,6 +1047,9 @@ func (libstdTransitionMutator) Split(ctx android.BaseModuleContext) []string {
 }
 
 func (libstdTransitionMutator) OutgoingTransition(ctx android.OutgoingTransitionContext, sourceVariation string) string {
+	if ctx.DepTag() == android.PrebuiltDepTag {
+		return sourceVariation
+	}
 	return ""
 }
 

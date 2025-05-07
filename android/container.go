@@ -167,8 +167,8 @@ var productContainerBoundaryFunc containerBoundaryFunc = func(mctx ModuleContext
 }
 
 var apexContainerBoundaryFunc containerBoundaryFunc = func(mctx ModuleContext) bool {
-	_, ok := ModuleProvider(mctx, AllApexInfoProvider)
-	return ok
+	// TODO(b/394955484): a module can't determine the apexes it belongs to any more
+	return false
 }
 
 var ctsContainerBoundaryFunc containerBoundaryFunc = func(mctx ModuleContext) bool {
@@ -198,7 +198,7 @@ func determineUnstableModule(mctx ModuleContext) bool {
 	unstableModule := module.Name() == "framework-minus-apex"
 	if installable, ok := module.(InstallableModule); ok {
 		for _, staticDepTag := range installable.StaticDependencyTags() {
-			mctx.VisitDirectDepsWithTag(staticDepTag, func(dep Module) {
+			mctx.VisitDirectDepsProxyWithTag(staticDepTag, func(dep ModuleProxy) {
 				if unstableInfo, ok := OtherModuleProvider(mctx, dep, unstableInfoProvider); ok {
 					unstableModule = unstableModule || unstableInfo.ContainsPlatformPrivateApis
 				}
@@ -380,7 +380,7 @@ func (c *ContainersInfo) BelongingContainers() []*container {
 
 func (c *ContainersInfo) ApexNames() (ret []string) {
 	for _, apex := range c.belongingApexes {
-		ret = append(ret, apex.InApexVariants...)
+		ret = append(ret, apex.BaseApexName)
 	}
 	slices.Sort(ret)
 	return ret
@@ -441,14 +441,10 @@ func generateContainerInfo(ctx ModuleContext) ContainersInfo {
 		}
 	}
 
-	var belongingApexes []ApexInfo
-	if apexInfo, ok := ModuleProvider(ctx, AllApexInfoProvider); ok {
-		belongingApexes = apexInfo.ApexInfos
-	}
-
 	return ContainersInfo{
 		belongingContainers: containers,
-		belongingApexes:     belongingApexes,
+		// TODO(b/394955484): a module can't determine the apexes it belongs to any more
+		belongingApexes: nil,
 	}
 }
 

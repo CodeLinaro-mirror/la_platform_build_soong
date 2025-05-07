@@ -97,7 +97,7 @@ type ChainedPartitionProperties struct {
 	// Name of the chained partition
 	Name *string
 
-	// Rollback index location of the chained partition. Must be 0, 1, 2, etc. Default is the
+	// Rollback index location of the chained partition. Must be 1, 2, 3, etc. Default is the
 	// index of this partition in the list + 1.
 	Rollback_index_location *int64
 
@@ -148,8 +148,8 @@ var vbmetaPartitionDep = vbmetaDep{}
 var vbmetaChainedPartitionDep = chainedPartitionDep{}
 
 func (v *vbmeta) DepsMutator(ctx android.BottomUpMutatorContext) {
-	ctx.AddDependency(ctx.Module(), vbmetaPartitionDep, v.properties.Partitions.GetOrDefault(ctx, nil)...)
-	ctx.AddDependency(ctx.Module(), vbmetaChainedPartitionDep, v.properties.Chained_partitions...)
+	ctx.AddVariationDependencies(ctx.Config().AndroidFirstDeviceTarget.Variations(), vbmetaPartitionDep, v.properties.Partitions.GetOrDefault(ctx, nil)...)
+	ctx.AddVariationDependencies(ctx.Config().AndroidFirstDeviceTarget.Variations(), vbmetaChainedPartitionDep, v.properties.Chained_partitions...)
 }
 
 func (v *vbmeta) installFileName() string {
@@ -173,13 +173,14 @@ func (v *vbmeta) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	algorithm := proptools.StringDefault(v.properties.Algorithm, "SHA256_RSA4096")
 	cmd.FlagWithArg("--algorithm ", algorithm)
 
+	cmd.FlagWithArg("--padding_size ", "4096")
+
 	cmd.FlagWithArg("--rollback_index ", v.rollbackIndexCommand(ctx))
 	ril := proptools.IntDefault(v.properties.Rollback_index_location, 0)
 	if ril < 0 {
 		ctx.PropertyErrorf("rollback_index_location", "must be 0, 1, 2, ...")
 		return
 	}
-	cmd.FlagWithArg("--rollback_index_location ", strconv.Itoa(ril))
 
 	for _, avb_prop := range v.properties.Avb_properties {
 		key := proptools.String(avb_prop.Key)
@@ -224,8 +225,8 @@ func (v *vbmeta) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		}
 
 		ril := info.RollbackIndexLocation
-		if ril < 0 {
-			ctx.PropertyErrorf("chained_partitions", "rollback index location must be 0, 1, 2, ...")
+		if ril < 1 {
+			ctx.PropertyErrorf("chained_partitions", "rollback index location must be 1, 2, 3, ...")
 			continue
 		} else if seenRils[ril] {
 			ctx.PropertyErrorf("chained_partitions", "Multiple chained partitions with the same rollback index location %d", ril)
@@ -240,13 +241,13 @@ func (v *vbmeta) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	for _, cpm := range v.properties.Chained_partition_metadata {
 		name := proptools.String(cpm.Name)
 		if name == "" {
-			ctx.PropertyErrorf("chained_partitions", "name must be specified")
+			ctx.PropertyErrorf("chained_partition_metadata", "name must be specified")
 			continue
 		}
 
-		ril := proptools.IntDefault(cpm.Rollback_index_location, -1)
-		if ril < 0 {
-			ctx.PropertyErrorf("chained_partition_metadata", "rollback index location must be 0, 1, 2, ...")
+		ril := proptools.IntDefault(cpm.Rollback_index_location, 0)
+		if ril < 1 {
+			ctx.PropertyErrorf("chained_partition_metadata", "rollback index location must be 1, 2, 3, ...")
 			continue
 		} else if seenRils[ril] {
 			ctx.PropertyErrorf("chained_partition_metadata", "Multiple chained partitions with the same rollback index location %d", ril)
@@ -284,10 +285,6 @@ func (v *vbmeta) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		FlagWithArg("-s ", strconv.Itoa(vbmetaMaxSize)).
 		Output(output)
 
-	if !ctx.Config().KatiEnabled() {
-		copyImageFileToProductOut(ctx, builder, v.partitionName(), output)
-	}
-
 	builder.Build("vbmeta", fmt.Sprintf("vbmeta %s", ctx.ModuleName()))
 
 	v.installDir = android.PathForModuleInstall(ctx, "etc")
@@ -309,6 +306,8 @@ func (v *vbmeta) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 
 	ctx.SetOutputFiles([]android.Path{output}, "")
 	v.output = output
+
+	setCommonFilesystemInfo(ctx, v)
 }
 
 // Returns the embedded shell command that prints the rollback index
