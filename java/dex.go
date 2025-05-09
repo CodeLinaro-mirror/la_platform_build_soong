@@ -42,6 +42,10 @@ type DexProperties struct {
 		// True if the module containing this has it set by default.
 		EnabledByDefault bool `blueprint:"mutated"`
 
+		// If true, then `d8` will be used on eng builds instead of `r8`, even though
+		// optimize.enabled is true.
+		D8_on_eng *bool
+
 		// Whether to allow that library classes inherit from program classes.
 		// Defaults to false.
 		Ignore_library_extends_program *bool
@@ -103,6 +107,34 @@ type DexProperties struct {
 		// If true, transitive reverse dependencies of this module will have this
 		// module's proguard spec appended to their optimization action
 		Export_proguard_flags_files *bool
+
+		// Path to a file containing a list of class names that should not be compiled using R8.
+		// These classes will be compiled by D8 similar to when Optimize.Enabled is false.
+		//
+		// Example:
+		//
+		//   r8.exclude:
+		//   com.example.Foo
+		//   com.example.Bar
+		//   com.example.Bar$Baz
+		//
+		// By default all classes are compiled using R8 when Optimize.Enabled is set.
+		Exclude *string `android:"path"`
+
+		// Optional list of downstream (Java) libraries from which to trace and preserve references
+		// when optimizing. Note that this requires that the source reference does *not* have
+		// a strict lib dependency on this target; dependencies should be on intermediate targets
+		// statically linked into this target, e.g., if A references B, and we want to trace and
+		// keep references from A when optimizing B, you would create an intermediate B.impl (
+		// containing all static code), have A depend on `B.impl` via libs, and set
+		// `trace_references_from: ["A"]` on B.
+		//
+		// Also note that these are *not* inherited across targets, they must be specified at the
+		// top-level target that is optimized.
+		//
+		// TODO(b/212737576): Handle this implicitly using bottom-up deps mutation and implicit
+		// creation of a proxy `.impl` library.
+		Trace_references_from proptools.Configurable[[]string] `android:"arch_variant"`
 	}
 
 	// Keep the data uncompressed. We always need uncompressed dex for execution,
@@ -133,7 +165,12 @@ type dexer struct {
 	providesTransitiveHeaderJarsForR8
 }
 
-func (d *dexer) effectiveOptimizeEnabled() bool {
+func (d *dexer) effectiveOptimizeEnabled(ctx android.EarlyModuleContext) bool {
+	// For eng builds, if Optimize.D8_on_eng is true, then disable optimization.
+	if ctx.Config().Eng() && proptools.Bool(d.dexProperties.Optimize.D8_on_eng) {
+		return false
+	}
+	// Otherwise, use the legacy logic of a default value which can be explicitly overridden by the module.
 	return BoolDefault(d.dexProperties.Optimize.Enabled, d.dexProperties.Optimize.EnabledByDefault)
 }
 
@@ -145,8 +182,8 @@ func (d *DexProperties) optimizedResourceShrinkingEnabled(ctx android.ModuleCont
 	return d.resourceShrinkingEnabled(ctx) && BoolDefault(d.Optimize.Optimized_shrink_resources, ctx.Config().UseOptimizedResourceShrinkingByDefault())
 }
 
-func (d *dexer) optimizeOrObfuscateEnabled() bool {
-	return d.effectiveOptimizeEnabled() && (proptools.Bool(d.dexProperties.Optimize.Optimize) || proptools.Bool(d.dexProperties.Optimize.Obfuscate))
+func (d *dexer) optimizeOrObfuscateEnabled(ctx android.EarlyModuleContext) bool {
+	return d.effectiveOptimizeEnabled(ctx) && (proptools.Bool(d.dexProperties.Optimize.Optimize) || proptools.Bool(d.dexProperties.Optimize.Obfuscate))
 }
 
 var d8, d8RE = pctx.MultiCommandRemoteStaticRules("d8",
@@ -325,7 +362,7 @@ func (d *dexer) dexCommonFlags(ctx android.ModuleContext,
 		flags = append(flags, "--release")
 	} else if ctx.Config().Eng() {
 		flags = append(flags, "--debug")
-	} else if !d.effectiveOptimizeEnabled() && d.dexProperties.Optimize.EnabledByDefault {
+	} else if !d.effectiveOptimizeEnabled(ctx) && d.dexProperties.Optimize.EnabledByDefault {
 		// D8 uses --debug by default, whereas R8 uses --release by default.
 		// For targets that default to R8 usage (e.g., apps), but override this default, we still
 		// want D8 to run in release mode, preserving semantics as much as possible between the two.
@@ -445,6 +482,20 @@ func (d *dexer) r8Flags(ctx android.ModuleContext, dexParams *compileDexParams, 
 
 	flagFiles = append(flagFiles, android.PathsForModuleSrc(ctx, opt.Proguard_flags_files)...)
 
+	traceReferencesSources := android.Paths{}
+	ctx.VisitDirectDepsProxyWithTag(traceReferencesTag, func(m android.ModuleProxy) {
+		if dep, ok := android.OtherModuleProvider(ctx, m, JavaInfoProvider); ok {
+			traceReferencesSources = append(traceReferencesSources, dep.ImplementationJars...)
+		}
+	})
+	if len(traceReferencesSources) > 0 {
+		traceTarget := dexParams.classesJar
+		traceLibs := android.FirstUniquePaths(append(flags.bootClasspath.Paths(), flags.dexClasspath.Paths()...))
+		traceReferencesFlags := android.PathForModuleOut(ctx, "proguard", "trace_references.flags")
+		TraceReferences(ctx, traceReferencesSources, traceTarget, traceLibs, traceReferencesFlags)
+		flagFiles = append(flagFiles, traceReferencesFlags)
+	}
+
 	flagFiles = android.FirstUniquePaths(flagFiles)
 
 	r8Flags = append(r8Flags, android.JoinWithPrefix(flagFiles.Strings(), "-include "))
@@ -528,6 +579,11 @@ func (d *dexer) r8Flags(ctx android.ModuleContext, dexParams *compileDexParams, 
 		r8Flags = append(r8Flags, "--store-store-fence-constructor-inlining")
 	}
 
+	if opt.Exclude != nil {
+		r8Flags = append(r8Flags, "--exclude", *opt.Exclude)
+		r8Deps = append(r8Deps, android.PathForModuleSrc(ctx, *opt.Exclude))
+	}
+
 	return r8Flags, r8Deps, artProfileOutput
 }
 
@@ -580,7 +636,7 @@ func (d *dexer) compileDex(ctx android.ModuleContext, dexParams *compileDexParam
 		mergeZipsFlags = "-stripFile META-INF/*.kotlin_module -stripFile **/*.kotlin_builtins"
 	}
 
-	useR8 := d.effectiveOptimizeEnabled()
+	useR8 := d.effectiveOptimizeEnabled(ctx)
 	useD8 := !useR8 || ctx.Config().PartialCompileFlags().Use_d8
 	rbeR8 := ctx.Config().UseRBE() && ctx.Config().IsEnvTrue("RBE_R8")
 	rbeD8 := ctx.Config().UseRBE() && ctx.Config().IsEnvTrue("RBE_D8")
