@@ -34,8 +34,6 @@ type BaseModuleContext interface {
 
 	blueprintBaseModuleContext() blueprint.BaseModuleContext
 
-	EqualModules(m1, m2 Module) bool
-
 	// OtherModuleName returns the name of another Module.  See BaseModuleContext.ModuleName for more information.
 	// It is intended for use inside the visit functions of Visit* and WalkDeps.
 	OtherModuleName(m blueprint.Module) string
@@ -271,8 +269,8 @@ func getWrappedModule(module blueprint.Module) blueprint.Module {
 	return module
 }
 
-func (b *baseModuleContext) EqualModules(m1, m2 Module) bool {
-	return b.bp.EqualModules(getWrappedModule(m1), getWrappedModule(m2))
+func EqualModules(m1, m2 Module) bool {
+	return blueprint.EqualModules(getWrappedModule(m1), getWrappedModule(m2))
 }
 
 func (b *baseModuleContext) OtherModuleName(m blueprint.Module) string {
@@ -412,7 +410,7 @@ func (b *baseModuleContext) validateAndroidModuleProxy(
 		return &aModule
 	}
 
-	if !OtherModuleProviderOrDefault(b, module, CommonModuleInfoKey).Enabled {
+	if !OtherModulePointerProviderOrDefault(b, module, CommonModuleInfoProvider).Enabled {
 		if t, ok := tag.(AllowDisabledModuleDependency); !ok || !t.AllowDisabledModuleDependencyProxy(b, aModule) {
 			if b.Config().AllowMissingDependencies() {
 				b.AddMissingDependencies([]string{b.OtherModuleName(aModule)})
@@ -442,7 +440,7 @@ func (b *baseModuleContext) getDirectDepsInternal(name string, tag blueprint.Dep
 func (b *baseModuleContext) getDirectDepsProxyInternal(name string, tag blueprint.DependencyTag) []ModuleProxy {
 	var deps []ModuleProxy
 	b.VisitDirectDepsProxy(func(module ModuleProxy) {
-		if OtherModuleProviderOrDefault(b, module, CommonModuleInfoKey).BaseModuleName == name {
+		if OtherModulePointerProviderOrDefault(b, module, CommonModuleInfoProvider).BaseModuleName == name {
 			returnedTag := b.OtherModuleDependencyTag(module)
 			if tag == nil || returnedTag == tag {
 				deps = append(deps, module)
