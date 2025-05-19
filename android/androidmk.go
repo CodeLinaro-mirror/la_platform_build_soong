@@ -78,6 +78,12 @@ type AndroidMkData struct {
 	Entries AndroidMkEntries
 }
 
+type AndroidMkDataInfo struct {
+	Class string
+}
+
+var AndroidMkDataInfoProvider = blueprint.NewProvider[AndroidMkDataInfo]()
+
 type AndroidMkExtraFunc func(w io.Writer, outputFile Path)
 
 // Interface for modules to declare their Android.mk outputs. Note that every module needs to
@@ -429,13 +435,18 @@ func getDistContributions(ctx ConfigAndOtherModuleProviderContext, mod Module) *
 				suffix = *dist.Suffix
 			}
 
-			productString := ""
-			if dist.Append_artifact_with_product != nil && *dist.Append_artifact_with_product {
-				productString = fmt.Sprintf("_%s", ctx.Config().DeviceProduct())
+			prependProductString := ""
+			if proptools.Bool(dist.Prepend_artifact_with_product) {
+				prependProductString = fmt.Sprintf("%s-", ctx.Config().DeviceProduct())
 			}
 
-			if suffix != "" || productString != "" {
-				dest = strings.TrimSuffix(dest, ext) + suffix + productString + ext
+			appendProductString := ""
+			if proptools.Bool(dist.Append_artifact_with_product) {
+				appendProductString = fmt.Sprintf("_%s", ctx.Config().DeviceProduct())
+			}
+
+			if suffix != "" || appendProductString != "" || prependProductString != "" {
+				dest = prependProductString + strings.TrimSuffix(dest, ext) + suffix + appendProductString + ext
 			}
 
 			if dist.Dir != nil {
@@ -504,6 +515,9 @@ func (a *AndroidMkEntries) fillInEntries(ctx fillInEntriesContext, mod Module) {
 	a.EntryMap = make(map[string][]string)
 	base := mod.base()
 	name := base.BaseModuleName()
+	if bmn, ok := mod.(baseModuleName); ok {
+		name = bmn.BaseModuleName()
+	}
 	if a.OverrideName != "" {
 		name = a.OverrideName
 	}
@@ -521,6 +535,14 @@ func (a *AndroidMkEntries) fillInEntries(ctx fillInEntriesContext, mod Module) {
 	}
 
 	fmt.Fprintf(&a.header, "\ninclude $(CLEAR_VARS)  # type: %s, name: %s, variant: %s\n", ctx.ModuleType(mod), base.BaseModuleName(), ctx.ModuleSubDir(mod))
+
+	// Add the TestSuites from the provider to LOCAL_SOONG_PROVIDER_TEST_SUITES.
+	// LOCAL_SOONG_PROVIDER_TEST_SUITES will be compared against LOCAL_COMPATIBILITY_SUITES
+	// in make and enforced they're the same, to ensure we've successfully translated all
+	// LOCAL_COMPATIBILITY_SUITES usages to the provider.
+	if testSuiteInfo, ok := OtherModuleProvider(ctx, mod, TestSuiteInfoProvider); ok {
+		a.AddStrings("LOCAL_SOONG_PROVIDER_TEST_SUITES", testSuiteInfo.TestSuites...)
+	}
 
 	// Collect make variable assignment entries.
 	a.SetString("LOCAL_PATH", ctx.ModuleDir(mod))
@@ -874,14 +896,14 @@ func getSoongOnlyDataFromMods(ctx fillInEntriesContext, mods []Module) ([]distCo
 			}
 		}
 
-		commonInfo, _ := OtherModuleProvider(ctx, mod, CommonModuleInfoKey)
+		commonInfo := OtherModulePointerProviderOrDefault(ctx, mod, CommonModuleInfoProvider)
 		if commonInfo.SkipAndroidMkProcessing {
 			continue
 		}
 		if info, ok := OtherModuleProvider(ctx, mod, AndroidMkInfoProvider); ok {
 			// Deep copy the provider info since we need to modify the info later
 			info := deepCopyAndroidMkProviderInfo(info)
-			info.PrimaryInfo.fillInEntries(ctx, mod, &commonInfo)
+			info.PrimaryInfo.fillInEntries(ctx, mod, commonInfo)
 			if info.PrimaryInfo.disabled() {
 				continue
 			}
@@ -1306,7 +1328,7 @@ var AndroidMkInfoProvider = blueprint.NewProvider[*AndroidMkProviderInfo]()
 // Please only access the module's internal data through providers.
 func translateAndroidMkEntriesInfoModule(ctx SingletonContext, w io.Writer, moduleInfoJSONs *[]*ModuleInfoJSON,
 	mod Module, providerInfo *AndroidMkProviderInfo) error {
-	commonInfo, _ := OtherModuleProvider(ctx, mod, CommonModuleInfoKey)
+	commonInfo := OtherModulePointerProviderOrDefault(ctx, mod, CommonModuleInfoProvider)
 	if commonInfo.SkipAndroidMkProcessing {
 		return nil
 	}
@@ -1317,11 +1339,11 @@ func translateAndroidMkEntriesInfoModule(ctx SingletonContext, w io.Writer, modu
 	aconfigUpdateAndroidMkInfos(ctx, mod, &info)
 
 	// Any new or special cases here need review to verify correct propagation of license information.
-	info.PrimaryInfo.fillInEntries(ctx, mod, &commonInfo)
+	info.PrimaryInfo.fillInEntries(ctx, mod, commonInfo)
 	info.PrimaryInfo.write(w)
 	if len(info.ExtraInfo) > 0 {
 		for _, ei := range info.ExtraInfo {
-			ei.fillInEntries(ctx, mod, &commonInfo)
+			ei.fillInEntries(ctx, mod, commonInfo)
 			ei.write(w)
 		}
 	}
@@ -1470,11 +1492,16 @@ func (a *AndroidMkInfo) fillInEntries(ctx fillInEntriesContext, mod Module, comm
 	a.Host_required = append(a.Host_required, commonInfo.HostRequiredModuleNames...)
 	a.Target_required = append(a.Target_required, commonInfo.TargetRequiredModuleNames...)
 
-	for _, distString := range a.GetDistForGoals(ctx, mod, commonInfo) {
-		a.HeaderStrings = append(a.HeaderStrings, distString)
-	}
-
+	a.HeaderStrings = append(a.HeaderStrings, a.GetDistForGoals(ctx, mod, commonInfo)...)
 	a.HeaderStrings = append(a.HeaderStrings, fmt.Sprintf("\ninclude $(CLEAR_VARS)  # type: %s, name: %s, variant: %s", ctx.ModuleType(mod), commonInfo.BaseModuleName, ctx.ModuleSubDir(mod)))
+
+	// Add the TestSuites from the provider to LOCAL_SOONG_PROVIDER_TEST_SUITES.
+	// LOCAL_SOONG_PROVIDER_TEST_SUITES will be compared against LOCAL_COMPATIBILITY_SUITES
+	// in make and enforced they're the same, to ensure we've successfully translated all
+	// LOCAL_COMPATIBILITY_SUITES usages to the provider.
+	if testSuiteInfo, ok := OtherModuleProvider(ctx, mod, TestSuiteInfoProvider); ok {
+		helperInfo.AddStrings("LOCAL_SOONG_PROVIDER_TEST_SUITES", testSuiteInfo.TestSuites...)
+	}
 
 	// Collect make variable assignment entries.
 	helperInfo.SetString("LOCAL_PATH", ctx.ModuleDir(mod))

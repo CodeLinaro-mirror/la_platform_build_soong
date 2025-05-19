@@ -201,7 +201,8 @@ func (b *bootimg) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		return
 	}
 
-	unsignedOutput := b.buildBootImage(ctx, b.getKernelPath(ctx))
+	kernelPath := b.getKernelPath(ctx)
+	unsignedOutput := b.buildBootImage(ctx, kernelPath)
 
 	output := unsignedOutput
 	if proptools.Bool(b.properties.Use_avb) {
@@ -212,7 +213,7 @@ func (b *bootimg) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		case "default":
 			output = b.signImage(ctx, unsignedOutput)
 		case "make_legacy":
-			output = b.addAvbFooter(ctx, unsignedOutput, b.getKernelPath(ctx))
+			output = b.addAvbFooter(ctx, unsignedOutput, kernelPath)
 		default:
 			ctx.PropertyErrorf("avb_mode", `Unknown value for avb_mode, expected "default" or "make_legacy", got: %q`, *b.properties.Avb_mode)
 		}
@@ -235,12 +236,15 @@ func (b *bootimg) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	}
 
 	// Set BootimgInfo for building target_files.zip
+	dtbPath := b.getDtbPath(ctx)
 	android.SetProvider(ctx, BootimgInfoProvider, BootimgInfo{
-		Cmdline:    b.properties.Cmdline,
-		Kernel:     b.getKernelPath(ctx),
-		Dtb:        b.getDtbPath(ctx),
-		Bootconfig: b.getBootconfigPath(ctx),
-		Output:     output,
+		Cmdline:             b.properties.Cmdline,
+		Kernel:              kernelPath,
+		Dtb:                 dtbPath,
+		Bootconfig:          b.getBootconfigPath(ctx),
+		Output:              output,
+		PropFileForMiscInfo: b.buildPropFileForMiscInfo(ctx),
+		HeaderVersion:       proptools.String(b.properties.Header_version),
 	})
 
 	extractedPublicKey := android.PathForModuleOut(ctx, b.partitionName()+".avbpubkey")
@@ -263,16 +267,33 @@ func (b *bootimg) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		PublicKey:             extractedPublicKey,
 		Output:                output,
 	})
+
+	// Dump compliance metadata
+	complianceMetadataInfo := ctx.ComplianceMetadataInfo()
+	prebuiltFilesCopied := make([]string, 0)
+	if kernelPath != nil {
+		prebuiltFilesCopied = append(prebuiltFilesCopied, kernelPath.String()+":kernel")
+	}
+	if dtbPath != nil {
+		prebuiltFilesCopied = append(prebuiltFilesCopied, dtbPath.String()+":dtb.img")
+	}
+	complianceMetadataInfo.SetPrebuiltFilesCopied(prebuiltFilesCopied)
+
+	if ramdisk := proptools.String(b.properties.Ramdisk_module); ramdisk != "" {
+		buildComplianceMetadata(ctx, bootimgRamdiskDep)
+	}
 }
 
 var BootimgInfoProvider = blueprint.NewProvider[BootimgInfo]()
 
 type BootimgInfo struct {
-	Cmdline    []string
-	Kernel     android.Path
-	Dtb        android.Path
-	Bootconfig android.Path
-	Output     android.Path
+	Cmdline             []string
+	Kernel              android.Path
+	Dtb                 android.Path
+	Bootconfig          android.Path
+	Output              android.Path
+	PropFileForMiscInfo android.Path
+	HeaderVersion       string
 }
 
 func (b *bootimg) getKernelPath(ctx android.ModuleContext) android.Path {
@@ -489,6 +510,65 @@ func (b *bootimg) buildPropFile(ctx android.ModuleContext) (android.Path, androi
 	propFile := android.PathForModuleOut(ctx, "prop")
 	android.WriteFileRule(ctx, propFile, sb.String())
 	return propFile, deps
+}
+
+func (b *bootimg) getAvbHashFooterArgs(ctx android.ModuleContext) string {
+	ret := ""
+	if !b.bootImageType.isVendorBoot() {
+		ret += "--prop " + fmt.Sprintf("com.android.build.%s.os_version:%s", b.bootImageType.String(), ctx.Config().PlatformVersionLastStable())
+	}
+
+	fingerprintFile := ctx.Config().BuildFingerprintFile(ctx)
+	ret += " --prop " + fmt.Sprintf("com.android.build.%s.fingerprint:{CONTENTS_OF:%s}", b.bootImageType.String(), fingerprintFile.String())
+
+	if b.properties.Security_patch != nil {
+		ret += " --prop " + fmt.Sprintf("com.android.build.%s.security_patch:%s", b.bootImageType.String(), *b.properties.Security_patch)
+	}
+
+	if b.properties.Avb_rollback_index != nil {
+		ret += " --rollback_index " + strconv.FormatInt(*b.properties.Avb_rollback_index, 10)
+	}
+	return strings.TrimSpace(ret)
+}
+
+func (b *bootimg) buildPropFileForMiscInfo(ctx android.ModuleContext) android.Path {
+	var sb strings.Builder
+	addStr := func(name string, value string) {
+		fmt.Fprintf(&sb, "%s=%s\n", name, value)
+	}
+
+	bootImgType := proptools.String(b.properties.Boot_image_type)
+	addStr("avb_"+bootImgType+"_add_hash_footer_args", b.getAvbHashFooterArgs(ctx))
+	if ramdisk := proptools.String(b.properties.Ramdisk_module); ramdisk != "" {
+		ramdiskModule := ctx.GetDirectDepWithTag(ramdisk, bootimgRamdiskDep)
+		fsInfo, _ := android.OtherModuleProvider(ctx, ramdiskModule, FilesystemProvider)
+		if fsInfo.HasOrIsRecovery {
+			// Create a dup entry for recovery
+			addStr("avb_recovery_add_hash_footer_args", strings.ReplaceAll(b.getAvbHashFooterArgs(ctx), bootImgType, "recovery"))
+		}
+	}
+	if b.properties.Avb_private_key != nil {
+		addStr("avb_"+bootImgType+"_algorithm", proptools.StringDefault(b.properties.Avb_algorithm, "SHA256_RSA4096"))
+		addStr("avb_"+bootImgType+"_key_path", android.PathForModuleSrc(ctx, proptools.String(b.properties.Avb_private_key)).String())
+		addStr("avb_"+bootImgType+"_rollback_index_location", strconv.Itoa(proptools.Int(b.properties.Avb_rollback_index_location)))
+	}
+	if b.properties.Partition_size != nil {
+		addStr(bootImgType+"_size", strconv.FormatInt(*b.properties.Partition_size, 10))
+	}
+	if bootImgType != "boot" {
+		addStr(bootImgType, "true")
+	}
+
+	propFilePreProcessing := android.PathForModuleOut(ctx, "prop_for_misc_info_pre_processing")
+	android.WriteFileRuleVerbatim(ctx, propFilePreProcessing, sb.String())
+	propFile := android.PathForModuleOut(ctx, "prop_file_for_misc_info")
+	ctx.Build(pctx, android.BuildParams{
+		Rule:   textFileProcessorRule,
+		Input:  propFilePreProcessing,
+		Output: propFile,
+	})
+
+	return propFile
 }
 
 var _ android.AndroidMkEntriesProvider = (*bootimg)(nil)

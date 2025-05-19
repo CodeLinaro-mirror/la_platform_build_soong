@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/google/blueprint"
@@ -43,6 +44,14 @@ type Module interface {
 	// but GenerateAndroidBuildActions also has access to Android-specific information.
 	// For more information, see Module.GenerateBuildActions within Blueprint's module_ctx.go
 	GenerateAndroidBuildActions(ModuleContext)
+
+	// CleanupAfterBuildActions is called after ModuleBase.GenerateBuildActions is finished.
+	// If all interactions with this module are handled via providers instead of direct access
+	// to the module then it can free memory attached to the module.
+	// This is a temporary measure to reduce memory usage, eventually blueprint's reference
+	// to the Module should be dropped after GenerateAndroidBuildActions once all accesses
+	// can be done through providers.
+	CleanupAfterBuildActions()
 
 	// Add dependencies to the components of a module, i.e. modules that are created
 	// by the module and which are considered to be part of the creating module.
@@ -128,6 +137,9 @@ type Module interface {
 	// WARNING: This should not be used outside build/soong/fsgen
 	// Overrides returns the list of modules which should not be installed if this module is installed.
 	Overrides() []string
+
+	// If this is true, the module must not read product-specific configurations.
+	UseGenericConfig() bool
 }
 
 // Qualified id for a module
@@ -195,6 +207,12 @@ type Dist struct {
 	// of name foo, then the artifact would be foo_coral.apk. If false, there is
 	// no change to the artifact file name.
 	Append_artifact_with_product *bool `android:"arch_variant"`
+
+	// If true, then the artifact file will be prepended with <product name>-. For
+	// example, if the product is coral and the module is an android_app module
+	// of name foo, then the artifact would be coral-foo.apk. If false, there is
+	// no change to the artifact file name.
+	Prepend_artifact_with_product *bool `android:"arch_variant"`
 
 	// A string tag to select the OutputFiles associated with the tag.
 	//
@@ -507,6 +525,10 @@ type commonProperties struct {
 	// List of module names that are prevented from being installed when this module gets
 	// installed.
 	Overrides []string
+
+	// Set to true if this module must be generic and does not require product-specific information.
+	// To be included in the system image, this property must be set to true.
+	Use_generic_config *bool
 }
 
 // Properties common to all modules inheriting from ModuleBase. Unlike commonProperties, these
@@ -520,6 +542,11 @@ type baseProperties struct {
 
 	// names of other modules to install on target if this module is installed
 	Target_required []string `android:"arch_variant"`
+
+	// If this is a soong config module, this property will be set to the name of the original
+	// module type. This is used by neverallow to ensure you can't bypass a ModuleType() matcher
+	// just by creating a soong config module type.
+	Soong_config_base_module_type *string `blueprint:"mutated"`
 }
 
 type distProperties struct {
@@ -997,8 +1024,16 @@ func (m *ModuleBase) baseDepsMutator(ctx BottomUpMutatorContext) {
 	pv := ctx.Config().productVariables
 	fullManifest := pv.DeviceArch != nil && pv.DeviceName != nil
 	if fullManifest {
-		addRequiredDeps(ctx)
 		addVintfFragmentDeps(ctx)
+	}
+}
+
+// required property can be overridden too; handle it separately
+func (m *ModuleBase) baseOverridablePropertiesDepsMutator(ctx BottomUpMutatorContext) {
+	pv := ctx.Config().productVariables
+	fullManifest := pv.DeviceArch != nil && pv.DeviceName != nil
+	if fullManifest {
+		addRequiredDeps(ctx)
 	}
 }
 
@@ -1483,7 +1518,7 @@ func (m *ModuleBase) computeInstallDeps(ctx ModuleContext) ([]depset.DepSet[Inst
 			// Installation is still handled by Make, so anything hidden from Make is not
 			// installable.
 			info := OtherModuleProviderOrDefault(ctx, dep, InstallFilesProvider)
-			commonInfo := OtherModuleProviderOrDefault(ctx, dep, CommonModuleInfoKey)
+			commonInfo := OtherModulePointerProviderOrDefault(ctx, dep, CommonModuleInfoProvider)
 			if !commonInfo.HideFromMake && !commonInfo.SkipInstall {
 				installDeps = append(installDeps, info.TransitiveInstallFiles)
 			}
@@ -1500,7 +1535,7 @@ func (m *ModuleBase) computeInstallDeps(ctx ModuleContext) ([]depset.DepSet[Inst
 // should also install the output files of the given dependency and dependency tag.
 func isInstallDepNeeded(ctx ModuleContext, dep ModuleProxy) bool {
 	// Don't add a dependency from the platform to a library provided by an apex.
-	if OtherModuleProviderOrDefault(ctx, dep, CommonModuleInfoKey).UninstallableApexPlatformVariant {
+	if OtherModulePointerProviderOrDefault(ctx, dep, CommonModuleInfoProvider).UninstallableApexPlatformVariant {
 		return false
 	}
 	// Only install modules if the dependency tag is an InstallDepNeeded tag.
@@ -1654,38 +1689,10 @@ func (m *ModuleBase) generateVariantTarget(ctx *moduleContext) {
 
 }
 
+// generateModuleTarget generates phony targets so that you can do `m <module-name>`.
+// It will be run on every variant of the module, so it relies on the fact that phony targets
+// are deduped to merge all the deps from different variants together.
 func (m *ModuleBase) generateModuleTarget(ctx *moduleContext) {
-	var allInstalledFiles InstallPaths
-	var allCheckbuildTargets Paths
-	var alloutputFiles Paths
-	ctx.VisitAllModuleVariantProxies(func(module ModuleProxy) {
-		var checkbuildTarget Path
-		var uncheckedModule bool
-		var skipAndroidMkProcessing bool
-		if ctx.EqualModules(m.module, module) {
-			allInstalledFiles = append(allInstalledFiles, ctx.installFiles...)
-			checkbuildTarget = ctx.checkbuildTarget
-			uncheckedModule = ctx.uncheckedModule
-			skipAndroidMkProcessing = shouldSkipAndroidMkProcessing(ctx, m)
-		} else {
-			info := OtherModuleProviderOrDefault(ctx, module, InstallFilesProvider)
-			allInstalledFiles = append(allInstalledFiles, info.InstallFiles...)
-			checkbuildTarget = info.CheckbuildTarget
-			uncheckedModule = info.UncheckedModule
-			skipAndroidMkProcessing = OtherModuleProviderOrDefault(ctx, module, CommonModuleInfoKey).SkipAndroidMkProcessing
-		}
-		if outputFiles, err := outputFilesForModule(ctx, module, ""); err == nil {
-			alloutputFiles = append(alloutputFiles, outputFiles...)
-		}
-		// A module's -checkbuild phony targets should
-		// not be created if the module is not exported to make.
-		// Those could depend on the build target and fail to compile
-		// for the current build target.
-		if (!ctx.Config().KatiEnabled() || !skipAndroidMkProcessing) && !uncheckedModule && checkbuildTarget != nil {
-			allCheckbuildTargets = append(allCheckbuildTargets, checkbuildTarget)
-		}
-	})
-
 	var namespacePrefix string
 	nameSpace := ctx.Namespace().Path
 	if nameSpace != "." {
@@ -1693,25 +1700,30 @@ func (m *ModuleBase) generateModuleTarget(ctx *moduleContext) {
 	}
 
 	var deps Paths
-	var info FinalModuleBuildTargetsInfo
+	var info ModuleBuildTargetsInfo
 
-	if len(allInstalledFiles) > 0 {
+	if len(ctx.installFiles) > 0 {
 		name := namespacePrefix + ctx.ModuleName() + "-install"
-		ctx.Phony(name, allInstalledFiles.Paths()...)
+		installFiles := ctx.installFiles.Paths()
+		ctx.Phony(name, installFiles...)
 		info.InstallTarget = PathForPhony(ctx, name)
-		deps = append(deps, info.InstallTarget)
+		deps = append(deps, installFiles...)
 	}
 
-	if len(allCheckbuildTargets) > 0 {
+	// A module's -checkbuild phony targets should
+	// not be created if the module is not exported to make.
+	// Those could depend on the build target and fail to compile
+	// for the current build target.
+	if (!ctx.Config().KatiEnabled() || !shouldSkipAndroidMkProcessing(ctx, m)) && !ctx.uncheckedModule && ctx.checkbuildTarget != nil {
 		name := namespacePrefix + ctx.ModuleName() + "-checkbuild"
-		ctx.Phony(name, allCheckbuildTargets...)
-		deps = append(deps, PathForPhony(ctx, name))
+		ctx.Phony(name, ctx.checkbuildTarget)
+		deps = append(deps, ctx.checkbuildTarget)
 	}
 
-	if len(alloutputFiles) > 0 {
+	if outputFiles, err := outputFilesForModule(ctx, ctx.Module(), ""); err == nil && len(outputFiles) > 0 {
 		name := namespacePrefix + ctx.ModuleName() + "-outputs"
-		ctx.Phony(name, alloutputFiles...)
-		deps = append(deps, PathForPhony(ctx, name))
+		ctx.Phony(name, outputFiles...)
+		deps = append(deps, outputFiles...)
 	}
 
 	if len(deps) > 0 {
@@ -1734,7 +1746,7 @@ func (m *ModuleBase) generateModuleTarget(ctx *moduleContext) {
 		}
 
 		info.BlueprintDir = ctx.ModuleDir()
-		SetProvider(ctx, FinalModuleBuildTargetsProvider, info)
+		SetProvider(ctx, ModuleBuildTargetsProvider, info)
 	}
 }
 
@@ -1876,15 +1888,15 @@ type SourceFilesInfo struct {
 
 var SourceFilesInfoProvider = blueprint.NewProvider[SourceFilesInfo]()
 
-// FinalModuleBuildTargetsInfo is used by buildTargetSingleton to create checkbuild and
-// per-directory build targets. Only set on the final variant of each module
-type FinalModuleBuildTargetsInfo struct {
+// ModuleBuildTargetsInfo is used by buildTargetSingleton to create checkbuild and
+// per-directory build targets.
+type ModuleBuildTargetsInfo struct {
 	InstallTarget    WritablePath
 	CheckbuildTarget WritablePath
 	BlueprintDir     string
 }
 
-var FinalModuleBuildTargetsProvider = blueprint.NewProvider[FinalModuleBuildTargetsInfo]()
+var ModuleBuildTargetsProvider = blueprint.NewProvider[ModuleBuildTargetsInfo]()
 
 type CommonModuleInfo struct {
 	Enabled bool
@@ -1938,6 +1950,7 @@ type CommonModuleInfo struct {
 	Dists                                        []Dist
 	ExportedToMake                               bool
 	Team                                         string
+	PartitionTag                                 string
 }
 
 type ApiLevelOrPlatform struct {
@@ -1945,7 +1958,7 @@ type ApiLevelOrPlatform struct {
 	IsPlatform bool
 }
 
-var CommonModuleInfoKey = blueprint.NewProvider[CommonModuleInfo]()
+var CommonModuleInfoProvider = blueprint.NewProvider[*CommonModuleInfo]()
 
 type PrebuiltModuleInfo struct {
 	SourceExists bool
@@ -2151,14 +2164,19 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 	}
 
 	if sourceFileProducer, ok := m.module.(SourceFileProducer); ok {
+		srcs := sourceFileProducer.Srcs()
+		for _, src := range srcs {
+			if src == nil {
+				ctx.ModuleErrorf("SourceFileProducer cannot return nil srcs")
+				return
+			}
+		}
 		SetProvider(ctx, SourceFilesInfoProvider, SourceFilesInfo{Srcs: sourceFileProducer.Srcs()})
 	}
 
-	if ctx.IsFinalModule(m.module) {
-		m.generateModuleTarget(ctx)
-		if ctx.Failed() {
-			return
-		}
+	m.generateModuleTarget(ctx)
+	if ctx.Failed() {
+		return
 	}
 
 	ctx.TransitiveInstallFiles = depset.New[InstallPath](depset.TOPOLOGICAL, ctx.installFiles, dependencyInstallFiles)
@@ -2186,6 +2204,7 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 			} else {
 				hostRequired = m.baseProperties.Host_required
 			}
+			hostRequired = append(hostRequired, moduleInfoJSON.ExtraHostRequired...)
 
 			var data []string
 			for _, d := range ctx.testData {
@@ -2299,6 +2318,7 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 		Dists:                                        m.Dists(),
 		ExportedToMake:                               m.ExportedToMake(),
 		Team:                                         m.Team(),
+		PartitionTag:                                 m.PartitionTag(ctx.DeviceConfig()),
 	}
 	if mm, ok := m.module.(interface {
 		MinSdkVersion(ctx EarlyModuleContext) ApiLevel
@@ -2346,7 +2366,7 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 	if mm, ok := m.module.(interface{ BaseModuleName() string }); ok {
 		commonData.BaseModuleName = mm.BaseModuleName()
 	}
-	SetProvider(ctx, CommonModuleInfoKey, commonData)
+	SetProvider(ctx, CommonModuleInfoProvider, &commonData)
 	if p, ok := m.module.(PrebuiltInterface); ok && p.Prebuilt() != nil {
 		SetProvider(ctx, PrebuiltModuleInfoProvider, PrebuiltModuleInfo{
 			SourceExists: p.Prebuilt().SourceExists(),
@@ -2370,10 +2390,22 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 		})
 	}
 
-	if v, ok := m.module.(ModuleMakeVarsProvider); m.Enabled(ctx) && ok {
-		SetProvider(ctx, ModuleMakeVarsInfoProvider, v.MakeVars(ctx))
+	if m.Enabled(ctx) {
+		if v, ok := m.module.(ModuleMakeVarsProvider); ok {
+			SetProvider(ctx, ModuleMakeVarsInfoProvider, v.MakeVars(ctx))
+		}
+
+		if am, ok := m.module.(AndroidMkDataProvider); ok {
+			SetProvider(ctx, AndroidMkDataInfoProvider, AndroidMkDataInfo{
+				Class: am.AndroidMk().Class,
+			})
+		}
 	}
+
+	m.module.CleanupAfterBuildActions()
 }
+
+func (m *ModuleBase) CleanupAfterBuildActions() {}
 
 func SetJarJarPrefixHandler(handler func(ModuleContext)) {
 	if jarJarPrefixHandler != nil {
@@ -2582,6 +2614,10 @@ func (m *ModuleBase) Overrides() []string {
 	return m.commonProperties.Overrides
 }
 
+func (m *ModuleBase) UseGenericConfig() bool {
+	return proptools.Bool(m.commonProperties.Use_generic_config)
+}
+
 type ConfigContext interface {
 	Config() Config
 }
@@ -2656,6 +2692,8 @@ func (e configurationEvalutor) EvaluateConfiguration(condition proptools.Configu
 			return proptools.ConfigurableValueBool(ctx.Config().UseDebugArt())
 		case "selinux_ignore_neverallows":
 			return proptools.ConfigurableValueBool(ctx.Config().SelinuxIgnoreNeverallows())
+		case "always_use_prebuilt_sdks":
+			return proptools.ConfigurableValueBool(ctx.Config().AlwaysUsePrebuiltSdks())
 		default:
 			// TODO(b/323382414): Might add these on a case-by-case basis
 			ctx.OtherModulePropertyErrorf(m, property, fmt.Sprintf("TODO(b/323382414): Product variable %q is not yet supported in selects", variable))
@@ -2680,6 +2718,13 @@ func (e configurationEvalutor) EvaluateConfiguration(condition proptools.Configu
 					return proptools.ConfigurableValueString(v)
 				case "bool":
 					return proptools.ConfigurableValueBool(v == "true")
+				case "int":
+					i, err := strconv.ParseInt(v, 10, 64)
+					if err != nil {
+						ctx.OtherModulePropertyErrorf(m, property, "integer soong_config_variable was not an int: %q", v)
+						return proptools.ConfigurableValueUndefined()
+					}
+					return proptools.ConfigurableValueInt(i)
 				case "string_list":
 					return proptools.ConfigurableValueStringList(strings.Split(v, " "))
 				default:
@@ -2928,7 +2973,6 @@ type OutputFilesProviderModuleContext interface {
 	OtherModuleProviderContext
 	Module() Module
 	GetOutputFiles() OutputFilesInfo
-	EqualModules(m1, m2 Module) bool
 }
 
 // TODO(b/397766191): Change the signature to take ModuleProxy
@@ -2940,7 +2984,7 @@ func outputFilesForModule(ctx PathContext, module Module, tag string) (Paths, er
 	}
 
 	if octx, ok := ctx.(OutputFilesProviderModuleContext); ok {
-		if octx.EqualModules(octx.Module(), module) {
+		if EqualModules(octx.Module(), module) {
 			// It is the current module, we can access the srcs through interface
 			if sourceFileProducer, ok := module.(SourceFileProducer); ok {
 				return sourceFileProducer.Srcs(), nil
@@ -2967,7 +3011,7 @@ func outputFilesForModuleFromProvider(ctx PathContext, module Module, tag string
 	var outputFiles OutputFilesInfo
 
 	if mctx, isMctx := ctx.(OutputFilesProviderModuleContext); isMctx {
-		if !mctx.EqualModules(mctx.Module(), module) {
+		if !EqualModules(mctx.Module(), module) {
 			outputFiles, _ = OtherModuleProvider(mctx, module, OutputFilesProvider)
 		} else {
 			outputFiles = mctx.GetOutputFiles()
@@ -3091,7 +3135,7 @@ func (c *buildTargetSingleton) GenerateBuildActions(ctx SingletonContext) {
 	modulesInDir := make(map[string]Paths)
 
 	ctx.VisitAllModuleProxies(func(module ModuleProxy) {
-		info := OtherModuleProviderOrDefault(ctx, module, FinalModuleBuildTargetsProvider)
+		info := OtherModuleProviderOrDefault(ctx, module, ModuleBuildTargetsProvider)
 
 		if info.CheckbuildTarget != nil {
 			checkbuildDeps = append(checkbuildDeps, info.CheckbuildTarget)
@@ -3171,14 +3215,6 @@ func (c *buildTargetSingleton) GenerateBuildActions(ctx SingletonContext) {
 type IDEInfo interface {
 	IDEInfo(ctx BaseModuleContext, ideInfo *IdeInfo)
 	BaseModuleName() string
-}
-
-// Extract the base module name from the Import name.
-// Often the Import name has a prefix "prebuilt_".
-// Remove the prefix explicitly if needed
-// until we find a better solution to get the Import name.
-type IDECustomizedModuleName interface {
-	IDECustomizedModuleName() string
 }
 
 // Collect information for opening IDE project files in java/jdeps.go.
