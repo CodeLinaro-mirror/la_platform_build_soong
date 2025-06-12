@@ -436,9 +436,12 @@ var (
 	// Flags that must not appear in any command line.
 	IllegalFlags = []string{
 		"-w",
+		"-pedantic",
+		"-pedantic-errors",
+		"-Werror=pedantic",
 	}
 
-	CStdVersion               = "gnu17"
+	CStdVersion               = "gnu23"
 	CppStdVersion             = "gnu++20"
 	ExperimentalCStdVersion   = "gnu2x"
 	ExperimentalCppStdVersion = "gnu++2b"
@@ -449,8 +452,8 @@ var (
 
 	// prebuilts/clang default settings.
 	ClangDefaultBase         = "prebuilts/clang/host"
-	ClangDefaultVersion      = "clang-r530567"
-	ClangDefaultShortVersion = "19"
+	ClangDefaultVersion      = "clang-r547379"
+	ClangDefaultShortVersion = "20"
 
 	// Directories with warnings from Android.bp files.
 	WarningAllowedProjects = []string{

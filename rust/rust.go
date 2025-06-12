@@ -60,6 +60,8 @@ type RustInfo struct {
 	CompilerInfo                  *CompilerInfo
 	SnapshotInfo                  *cc.SnapshotInfo
 	SourceProviderInfo            *SourceProviderInfo
+	XrefRustFiles                 android.Paths
+	DocTimestampFile              android.OptionalPath
 }
 
 var RustInfoProvider = blueprint.NewProvider[*RustInfo]()
@@ -1171,6 +1173,8 @@ func (mod *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 		AndroidMkSuffix:               mod.AndroidMkSuffix(),
 		RustSubName:                   mod.Properties.RustSubName,
 		TransitiveAndroidMkSharedLibs: mod.transitiveAndroidMkSharedLibs,
+		XrefRustFiles:                 mod.XrefRustFiles(),
+		DocTimestampFile:              mod.docTimestampFile,
 	}
 	if mod.compiler != nil {
 		rustInfo.CompilerInfo = &CompilerInfo{
@@ -1476,10 +1480,10 @@ func (mod *Module) depsToPaths(ctx android.ModuleContext) PathDeps {
 		rustInfo, hasRustInfo := android.OtherModuleProvider(ctx, dep, RustInfoProvider)
 		ccInfo, _ := android.OtherModuleProvider(ctx, dep, cc.CcInfoProvider)
 		linkableInfo, hasLinkableInfo := android.OtherModuleProvider(ctx, dep, cc.LinkableInfoProvider)
-		commonInfo := android.OtherModuleProviderOrDefault(ctx, dep, android.CommonModuleInfoKey)
+		commonInfo := android.OtherModulePointerProviderOrDefault(ctx, dep, android.CommonModuleInfoProvider)
 		if hasRustInfo && !linkableInfo.Static && !linkableInfo.Shared {
 			//Handle Rust Modules
-			makeLibName := rustMakeLibName(rustInfo, linkableInfo, &commonInfo, depName+rustInfo.RustSubName)
+			makeLibName := rustMakeLibName(rustInfo, linkableInfo, commonInfo, depName+rustInfo.RustSubName)
 
 			switch {
 			case depTag == dylibDepTag:
@@ -1624,7 +1628,7 @@ func (mod *Module) depsToPaths(ctx android.ModuleContext) PathDeps {
 			}
 		} else if hasLinkableInfo {
 			//Handle C dependencies
-			makeLibName := cc.MakeLibName(ccInfo, linkableInfo, &commonInfo, depName)
+			makeLibName := cc.MakeLibName(ccInfo, linkableInfo, commonInfo, depName)
 			if !hasRustInfo {
 				if commonInfo.Target.Os != ctx.Os() {
 					ctx.ModuleErrorf("OS mismatch between %q and %q", ctx.ModuleName(), depName)
@@ -2236,9 +2240,9 @@ type kytheExtractRustSingleton struct {
 
 func (k kytheExtractRustSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 	var xrefTargets android.Paths
-	ctx.VisitAllModules(func(module android.Module) {
-		if rustModule, ok := module.(xref); ok {
-			xrefTargets = append(xrefTargets, rustModule.XrefRustFiles()...)
+	ctx.VisitAllModuleProxies(func(module android.ModuleProxy) {
+		if rustModule, ok := android.OtherModuleProvider(ctx, module, RustInfoProvider); ok {
+			xrefTargets = append(xrefTargets, rustModule.XrefRustFiles...)
 		}
 	})
 	if len(xrefTargets) > 0 {

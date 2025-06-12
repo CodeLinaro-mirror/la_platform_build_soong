@@ -1337,10 +1337,10 @@ func (module *SdkLibrary) CheckMinSdkVersion(ctx android.ModuleContext) {
 
 func CheckMinSdkVersion(ctx android.ModuleContext, module *Library) {
 	android.CheckMinSdkVersion(ctx, module.MinSdkVersion(ctx), func(c android.BaseModuleContext, do android.PayloadDepsCallback) {
-		ctx.WalkDeps(func(child android.Module, parent android.Module) bool {
+		ctx.WalkDepsProxy(func(child, parent android.ModuleProxy) bool {
 			isExternal := !android.IsDepInSameApex(ctx, module, child)
-			if am, ok := child.(android.ApexModule); ok {
-				if !do(ctx, parent, am, isExternal) {
+			if am, ok := android.OtherModuleProvider(ctx, child, android.CommonModuleInfoProvider); ok && am.IsApexModule {
+				if !do(ctx, parent, child, isExternal) {
 					return false
 				}
 			}
@@ -1580,7 +1580,9 @@ func (module *SdkLibrary) GenerateAndroidBuildActions(ctx android.ModuleContext)
 		setOutputFilesFromJavaInfo(ctx, module.implLibraryInfo)
 	}
 
-	javaInfo := &JavaInfo{}
+	javaInfo := &JavaInfo{
+		JacocoReportClassesFile: module.jacocoReportClassesFile,
+	}
 	setExtraJavaInfo(ctx, ctx.Module(), javaInfo)
 	android.SetProvider(ctx, JavaInfoProvider, javaInfo)
 
@@ -2240,6 +2242,10 @@ func (module *SdkLibraryImport) GenerateAndroidBuildActions(ctx android.ModuleCo
 	}
 
 	javaInfo := &JavaInfo{}
+	if module.implLibraryInfo != nil {
+		javaInfo.JacocoReportClassesFile = module.implLibraryInfo.JacocoReportClassesFile
+	}
+
 	setExtraJavaInfo(ctx, ctx.Module(), javaInfo)
 	android.SetProvider(ctx, JavaInfoProvider, javaInfo)
 
