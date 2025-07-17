@@ -264,3 +264,9 @@ org\.chromium\.arc\..*
 # QC adds
 com.qualcomm.qti
 com.quicinc.tcmiface
+
+###################################################
+# Packages used for wear-sdk in Wear OS
+com\.google\.wear
+com\.google\.wear\..*
+
