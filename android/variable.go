@@ -393,6 +393,7 @@ type ProductVariables struct {
 	BoardSepolicyM4Defs          []string `json:",omitempty"`
 
 	BoardPlatform           *string `json:",omitempty"`
+        ReleasePlatform         *string `json:",omitempty"`
 	BoardSepolicyVers       *string `json:",omitempty"`
 	PlatformSepolicyVersion *string `json:",omitempty"`
 
