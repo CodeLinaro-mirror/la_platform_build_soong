@@ -1655,7 +1655,7 @@ func (c *Module) IsSnapshotPrebuilt() bool {
 
 func isBionic(name string) bool {
 	switch name {
-	case "libc", "libm", "libdl", "libdl_android", "linker":
+	case "libc", "libm", "libdl", "libdl_android", "linker", "linkerconfig":
 		return true
 	}
 	return false
