@@ -203,6 +203,9 @@ com\.google\.i18n\.phonenumbers
 org\.chromium\.arc
 org\.chromium\.arc\..*
 
+# QC adds
+com.qualcomm.qti
+com.quicinc.tcmiface
 ###################################################
 # Packages used for wear-sdk in Wear OS
 com\.google\.wear
