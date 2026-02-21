@@ -132,6 +132,14 @@ var (
 		},
 		"fromPath")
 
+	// A rule that verifies that $in is not a symlink. Touches a stamp file when done.
+	VerifyNotSymlinkRule = pctx.AndroidStaticRule("VerifyNotSymlink",
+		blueprint.RuleParams{
+			Command2: blueprint.NewCommand(
+				Rm, " -rf $out && ( ! ", Test, " -L $in ) && ", Touch, " $out"),
+			Description: "verify not a symlink: $in",
+		})
+
 	// A rule that always fails at execution time with the given error message.
 	// The error message must be passed through proptools.NinjaAndShellEscape() first.
 	// Calling ErrorRule() will do that for you and use this rule.
@@ -180,7 +188,7 @@ var (
 	depfileVerifierRule = pctx.AndroidStaticRule("DepfileVerifierRule",
 		blueprint.RuleParams{
 			Command2: blueprint.NewCommand(
-				Rm, " -f $out && ", depfileVerifier, " $in && ", Touch, " $out"),
+				Rm, " -f $out && ", DepfileVerifier, " $in && ", Touch, " $out"),
 			Description: "verify depfile",
 		})
 
@@ -273,10 +281,11 @@ var (
 	Xargs     = pctx.HostToolFunc(initToyboxTool("xargs"))
 	Xxd       = pctx.HostToolFunc(initToyboxTool("xxd"))
 
-	depfileVerifier = pctx.HostTool("depfile_verifier")
+	DepfileVerifier = pctx.HostTool("depfile_verifier")
 	assembleVintf   = pctx.HostTool("assemble_vintf")
 	SoongZip        = pctx.HostTool("soong_zip")
 	MergeZips       = pctx.HostTool("merge_zips")
+	ZipSync         = pctx.HostTool("zipsync")
 )
 
 var commonToyboxSymlinks = map[string]struct{}{

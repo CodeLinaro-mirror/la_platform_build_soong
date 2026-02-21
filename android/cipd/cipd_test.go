@@ -107,3 +107,183 @@ func TestCipdPackage(t *testing.T) {
 		t.Errorf("module.OutputFiles(..., \".zip\")[0] = %q, want %q", val, wantZipFile)
 	}
 }
+
+func TestNoMatchedSelectCase_Package(t *testing.T) {
+	// Test that the bp is evaluated successfully even if there is no
+	// matching select case for the "package" property.
+	// It should yield an ErrorRule.
+	bp := `
+	cipd_package {
+		name: "cipd_package1",
+		package: select(release_flag("PACKAGE_FLAG"), {
+			"unused": "android/prebuilts/package1",
+		}),
+		version: "version1",
+		files: [
+			"package1_file1",
+			"package1_file2",
+		],
+		resolved_versions_file: "cipd.versions",
+	}
+	`
+
+	result := android.GroupFixturePreparers(
+		android.PrepareForTestWithAndroidBuildComponents,
+		android.FixtureRegisterWithContext(RegisterCipdComponents),
+	).RunTestWithBp(t, bp)
+	module := result.ModuleForTests(t, "cipd_package1", "")
+	ensureFile := module.Output("ensure.txt")
+	if !android.IsErrorRule(ensureFile.Rule) {
+		t.Errorf("Expected ErrorRule, got %q", ensureFile.Rule)
+	}
+}
+
+func TestNoMatchedSelectCase_Version(t *testing.T) {
+	// Test that the bp is evaluated successfully even if there is no
+	// matching select case for the "version" property.
+	bp := `
+	cipd_package {
+		name: "cipd_package1",
+		package: "android/prebuilts/package1",
+		version: select(release_flag("VERSION"), {
+			"unused": "version1",
+		}),
+		files: [
+			"package1_file1",
+			"package1_file2",
+		],
+		resolved_versions_file: "cipd.versions",
+	}
+	`
+
+	result := android.GroupFixturePreparers(
+		android.PrepareForTestWithAndroidBuildComponents,
+		android.FixtureRegisterWithContext(RegisterCipdComponents),
+	).RunTestWithBp(t, bp)
+	module := result.ModuleForTests(t, "cipd_package1", "")
+	ensureFile := module.Output("ensure.txt")
+	if !android.IsErrorRule(ensureFile.Rule) {
+		t.Errorf("Expected ErrorRule, got %q", ensureFile.Rule)
+	}
+}
+
+func TestPackageIsUnset(t *testing.T) {
+	// Don't panic if the package property is unset.
+	bp := `
+	cipd_package {
+		name: "cipd_package1",
+		package: select(release_flag("PACKAGE_FLAG"), {
+			"unused": "android/prebuilts/package1",
+			default: unset,
+		}),
+		version: "version1",
+		files: [
+			"package1_file1",
+			"package1_file2",
+		],
+		resolved_versions_file: "cipd.versions",
+	}
+	`
+
+	result := android.GroupFixturePreparers(
+		android.PrepareForTestWithAndroidBuildComponents,
+		android.FixtureRegisterWithContext(RegisterCipdComponents),
+	).RunTestWithBp(t, bp)
+	module := result.ModuleForTests(t, "cipd_package1", "")
+	ensureFile := module.Output("ensure.txt")
+	if !android.IsErrorRule(ensureFile.Rule) {
+		t.Errorf("Expected ErrorRule, got %q", ensureFile.Rule)
+	}
+}
+
+func TestVersionIsUnset(t *testing.T) {
+	// Don't panic if the version property is unset.
+	bp := `
+	cipd_package {
+		name: "cipd_package1",
+		package: "android/prebuilts/package1",
+		version: select(release_flag("VERSION"), {
+			"unused": "version1",
+			default: unset,
+		}),
+		files: [
+			"package1_file1",
+			"package1_file2",
+		],
+		resolved_versions_file: "cipd.versions",
+	}
+	`
+
+	result := android.GroupFixturePreparers(
+		android.PrepareForTestWithAndroidBuildComponents,
+		android.FixtureRegisterWithContext(RegisterCipdComponents),
+	).RunTestWithBp(t, bp)
+	module := result.ModuleForTests(t, "cipd_package1", "")
+	ensureFile := module.Output("ensure.txt")
+	if !android.IsErrorRule(ensureFile.Rule) {
+		t.Errorf("Expected ErrorRule, got %q", ensureFile.Rule)
+	}
+}
+
+func TestCipdPackage_FilesSelect(t *testing.T) {
+	// Test that select() can be used in the files property.
+	bp := `
+	cipd_package {
+		name: "cipd_package1",
+		package: "android/prebuilts/package1",
+		version: "version1",
+		files: select(soong_config_variable("test", "var"), {
+			any @ v: ["file1-" + v],
+			default: ["file1"],
+		}),
+		resolved_versions_file: "cipd.versions",
+	}
+	`
+
+	result := android.GroupFixturePreparers(
+		android.PrepareForTestWithAndroidBuildComponents,
+		android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
+			variables.VendorVars = map[string]map[string]string{
+				"test": {
+					"var": "debug",
+				},
+			}
+		}),
+		android.FixtureRegisterWithContext(RegisterCipdComponents),
+	).RunTestWithBp(t, bp)
+	module := result.ModuleForTests(t, "cipd_package1", "")
+	export := module.Rule("cipd_export")
+	intermediateDir := "out/soong/.intermediates/cipd_package1"
+	wantEnsureFile := intermediateDir + "/ensure.txt"
+	if export.Input.String() != wantEnsureFile {
+		t.Errorf("export.Input.String() = %v, want %v", export.Input.String(), wantEnsureFile)
+	}
+	if len(export.Inputs) != 0 {
+		t.Errorf("len(export.Inputs) = %v, want 0", len(export.Inputs))
+	}
+	wantRoot := intermediateDir + "/package"
+	wantExportOutputs := []string{
+		wantRoot + "/file1-debug",
+	}
+	wantPackage := "android/prebuilts/package1"
+	wantVersion := "version1"
+	var gotExportOutputs []string
+	for _, output := range export.Outputs {
+		gotExportOutputs = append(gotExportOutputs, output.String())
+	}
+	if !slices.Equal(wantExportOutputs, gotExportOutputs) {
+		t.Errorf("export.Outputs = %v, want %v", gotExportOutputs, wantExportOutputs)
+	}
+	if export.Output != nil {
+		t.Errorf("export.Output = %v, want nil", export.Output)
+	}
+	if export.Args["root"] != wantRoot {
+		t.Errorf("export.Args[\"root\"] = %v, want %v", export.Args["root"], wantRoot)
+	}
+	if export.Args["package"] != wantPackage {
+		t.Errorf("export.Args[\"package\"] = %v, want %v", export.Args["package"], wantPackage)
+	}
+	if export.Args["version"] != wantVersion {
+		t.Errorf("export.Args[\"version\"] = %v, want %v", export.Args["version"], wantVersion)
+	}
+}

@@ -595,6 +595,9 @@ var PrepareForTestWithCcBuildComponents = android.GroupFixturePreparers(
 
 		RegisterLlndkLibraryTxtType(ctx)
 	}),
+	android.PrepareForTestWithBuildFlag("RELEASE_SOONG_SANITIZER_VARIANT_ON_DEMAND", "true"),
+	android.PrepareForTestWithBuildFlag("RELEASE_SOONG_COV_VARIANT_ON_DEMAND", "true"),
+	android.PrepareForTestWithBuildFlag("RELEASE_SOONG_SDK_VARIANT_ON_DEMAND", "true"),
 )
 
 // Preparer that will define default cc modules, e.g. standard prebuilt modules.

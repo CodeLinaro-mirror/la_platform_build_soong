@@ -1,4 +1,5 @@
 load("@builtin//encoding.star", "json")
+load("@builtin//path.star", "path")
 load("@builtin//struct.star", "module")
 load("./clang.star", "clang")
 load("./java.star", "java")
@@ -32,7 +33,16 @@ def __step_config(ctx, vars, step_config):
 
 def __generate(ctx, vars, dir_modules):
     step_config = {
-        "platforms": {
+        "platforms": {},
+        "input_deps": {},
+        "inputs_requiring_clang_scandeps": [],
+        "rules": [],
+    }
+    filegroups = {}
+    handlers = {}
+
+    if vars.use_rbe:
+        step_config["platforms"] = {
             "default": {
                 "OSFamily": "Linux",
                 "container-image": vars.RBE_container_image,
@@ -43,19 +53,24 @@ def __generate(ctx, vars, dir_modules):
                 "container-image": vars.RBE_container_image,
                 "Pool": "java16",
             },
-        },
-        "input_deps": {},
-        "inputs_requiring_clang_scandeps": [],
-        "rules": [],
-    }
-    filegroups = {}
-    handlers = {}
+        }
 
     for m in dir_modules:
         step_config = m.step_config(ctx, vars, step_config)
         filegroups = m.filegroups(ctx, vars, filegroups)
         handlers = m.handlers(ctx, vars, handlers)
 
+    # for action sandboxed build
+    action_sandbox = False
+    if "config" in ctx.flags:
+        action_sandbox = "action_sandbox" in ctx.flags["config"].split(",")
+    if action_sandbox and vars.nsjail_path:
+        step_config["sandbox"] = {
+            "backend": "nsjail",
+            "nsjail_path": vars.nsjail_path,
+            "nsjail_workdir": path.join(vars.OUT_DIR, "soong", ".siso_action_sandboxing_workdir"),
+            "nsjail_outdir": vars.OUT_DIR,
+        }
     return module(
         "config",
         step_config = json.encode(step_config),

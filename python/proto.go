@@ -23,14 +23,13 @@ func genProto(ctx android.ModuleContext, protoFile android.Path, flags android.P
 	srcsZipFile := android.PathForModuleGen(ctx, protoFile.Rel()+".srcszip")
 
 	outDir := srcsZipFile.ReplaceExtension(ctx, "tmp")
-	depFile := srcsZipFile.ReplaceExtension(ctx, "srcszip.d")
 
-	rule := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
+	rule := android.NewRuleBuilder(pctx, ctx)
 
-	rule.Command().Text("rm -rf").Flag(outDir.String())
-	rule.Command().Text("mkdir -p").Flag(outDir.String())
+	rule.Command().BuiltTool("rm").Flag("-rf").Text(outDir.String())
+	rule.Command().BuiltTool("mkdir").Flag("-p").Text(outDir.String())
 
-	android.ProtoRule(rule, protoFile, flags, flags.Deps, outDir, depFile, nil)
+	android.ProtoRule(rule, protoFile, flags, flags.Deps, outDir, nil, nil)
 
 	// Proto generated python files have an unknown package name in the path, so package the entire output directory
 	// into a srcszip.
@@ -40,7 +39,7 @@ func genProto(ctx android.ModuleContext, protoFile android.Path, flags android.P
 	zipCmd.FlagWithArg("-C ", outDir.String()).
 		FlagWithArg("-D ", outDir.String())
 
-	rule.Command().Text("rm -rf").Flag(outDir.String())
+	rule.Command().BuiltTool("rm").Flag("-rf").Text(outDir.String())
 
 	rule.Build("protoc_"+protoFile.Rel(), "protoc "+protoFile.Rel())
 

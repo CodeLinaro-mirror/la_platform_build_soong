@@ -95,16 +95,6 @@ type variableProperties struct {
 			Cflags []string
 		}
 
-		// treble_linker_namespaces is true when the system/vendor linker namespace separation is
-		// enabled.
-		Treble_linker_namespaces struct {
-			Cflags []string
-		}
-		// enforce_vintf_manifest is true when a device is required to have a vintf manifest.
-		Enforce_vintf_manifest struct {
-			Cflags []string
-		}
-
 		Build_from_text_stub struct {
 			Static_libs         []string
 			Exclude_static_libs []string
@@ -147,6 +137,7 @@ type variableProperties struct {
 		Eng struct {
 			Cflags   []string
 			Cppflags []string
+			Flags    []string
 			Lto      struct {
 				Never *bool
 			}
@@ -309,8 +300,6 @@ type ProductVariables struct {
 	RBEContainerImage            *string  `json:",omitempty"`
 	Debuggable                   *bool    `json:",omitempty"`
 	Eng                          *bool    `json:",omitempty"`
-	Treble_linker_namespaces     *bool    `json:",omitempty"`
-	Enforce_vintf_manifest       *bool    `json:",omitempty"`
 	Uml                          *bool    `json:",omitempty"`
 	Arc                          *bool    `json:",omitempty"`
 	MinimizeJavaDebugInfo        *bool    `json:",omitempty"`
@@ -570,6 +559,8 @@ type ProductVariables struct {
 	SELinuxTrebleLabelingTrackingListFile *string `json:",omitempty"`
 
 	BuildOTAPackage *bool `json:",omitempty"`
+
+	RestrictsAshmemUsage bool `json:",omitempty"`
 }
 
 type CompatibilityTestcaseJSON struct {
@@ -593,10 +584,6 @@ type PartitionQualifiedVariablesType struct {
 	BoardJournalSize            string `json:",omitempty"`
 	BoardPartitionReservedSize  string `json:",omitempty"`
 	BoardPartitionSize          string `json:",omitempty"`
-	BoardSquashfsBlockSize      string `json:",omitempty"`
-	BoardSquashfsCompressor     string `json:",omitempty"`
-	BoardSquashfsCompressorOpt  string `json:",omitempty"`
-	BoardSquashfsDisable4kAlign string `json:",omitempty"`
 	ProductBaseFsPath           string `json:",omitempty"`
 	ProductHeadroom             string `json:",omitempty"`
 	ProductVerityPartition      string `json:",omitempty"`
@@ -642,7 +629,6 @@ type PartitionVariables struct {
 
 	TargetUserimagesSparseExtDisabled      bool `json:",omitempty"`
 	TargetUserimagesSparseErofsDisabled    bool `json:",omitempty"`
-	TargetUserimagesSparseSquashfsDisabled bool `json:",omitempty"`
 	TargetUserimagesSparseF2fsDisabled     bool `json:",omitempty"`
 
 	BoardErofsCompressor           string `json:",omitempty"`

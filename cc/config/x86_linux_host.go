@@ -15,9 +15,18 @@
 package config
 
 import (
+	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	"android/soong/android"
+)
+
+const (
+	linuxGccVersion   = "4.8.3"
+	linuxGccTriple    = "x86_64-linux"
+	linuxGlibcVersion = "2.17"
 )
 
 var (
@@ -81,20 +90,6 @@ var (
 		"-m64",
 	}
 
-	linuxX86Ldflags = []string{
-		"-m32",
-		"-B${LinuxGccRoot}/lib/gcc/${LinuxGccTriple}/${LinuxGccVersion}/32",
-		"-L${LinuxGccRoot}/lib/gcc/${LinuxGccTriple}/${LinuxGccVersion}/32",
-		"-L${LinuxGccRoot}/${LinuxGccTriple}/lib32",
-	}
-
-	linuxX8664Ldflags = []string{
-		"-m64",
-		"-B${LinuxGccRoot}/lib/gcc/${LinuxGccTriple}/${LinuxGccVersion}",
-		"-L${LinuxGccRoot}/lib/gcc/${LinuxGccTriple}/${LinuxGccVersion}",
-		"-L${LinuxGccRoot}/${LinuxGccTriple}/lib64",
-	}
-
 	linuxAvailableLibraries = addPrefix([]string{
 		"c",
 		"dl",
@@ -115,26 +110,55 @@ var (
 	MuslDefaultSharedLibraries = []string{"libc_musl"}
 )
 
-const (
-	linuxGccVersion   = "4.8.3"
-	linuxGlibcVersion = "2.17"
-)
+func LinuxX86Ldflags(ctx ToolchainFlagsContext) FlagsWithDeps {
+	linuxGccRoot := LinuxGccRoot()
+	depsPhony := ctx.CreateNinjaPhonyOnce("linuxX86LdFlagsDeps", slices.Concat(
+		android.GlobFilesOutsideModuleDir(ctx, filepath.Join(linuxGccRoot, "lib/gcc", linuxGccTriple, linuxGccVersion, "32", "*"), nil),
+		android.GlobFilesOutsideModuleDir(ctx, filepath.Join(linuxGccRoot, linuxGccTriple, "lib32", "*"), nil),
+	))
+	var deps android.Paths
+	if depsPhony != nil {
+		deps = append(deps, depsPhony)
+	}
+	return FlagsWithDeps{
+		Flags: strings.Join([]string{
+			"-m32",
+			"-B" + linuxGccRoot + "/lib/gcc/" + linuxGccTriple + "/" + linuxGccVersion + "/32",
+			"-L" + linuxGccRoot + "/lib/gcc/" + linuxGccTriple + "/" + linuxGccVersion + "/32",
+			"-L" + linuxGccRoot + "/" + linuxGccTriple + "/lib32",
+		}, " "),
+		Deps: deps,
+	}
+}
+
+func LinuxX8664Ldflags(ctx ToolchainFlagsContext) FlagsWithDeps {
+	linuxGccRoot := LinuxGccRoot()
+	depsPhony := ctx.CreateNinjaPhonyOnce("linuxX8664LdFlagsDeps", slices.Concat(
+		android.GlobFilesOutsideModuleDir(ctx, filepath.Join(linuxGccRoot, "lib/gcc", linuxGccTriple, linuxGccVersion, "*"), nil),
+		android.GlobFilesOutsideModuleDir(ctx, filepath.Join(linuxGccRoot, linuxGccTriple, "lib64", "*"), nil),
+	))
+	var deps android.Paths
+	if depsPhony != nil {
+		deps = append(deps, depsPhony)
+	}
+	return FlagsWithDeps{
+		Flags: strings.Join([]string{
+			"-m64",
+			"-B" + linuxGccRoot + "/lib/gcc/" + linuxGccTriple + "/" + linuxGccVersion,
+			"-L" + linuxGccRoot + "/lib/gcc/" + linuxGccTriple + "/" + linuxGccVersion,
+			"-L" + linuxGccRoot + "/" + linuxGccTriple + "/lib64",
+		}, " "),
+		Deps: deps,
+	}
+}
 
 func init() {
 	pctx.StaticVariable("LinuxGccVersion", linuxGccVersion)
 	pctx.StaticVariable("LinuxGlibcVersion", linuxGlibcVersion)
 
-	// Most places use the full GCC version. A few only use up to the first two numbers.
-	if p := strings.Split(linuxGccVersion, "."); len(p) > 2 {
-		pctx.StaticVariable("ShortLinuxGccVersion", strings.Join(p[:2], "."))
-	} else {
-		pctx.StaticVariable("ShortLinuxGccVersion", linuxGccVersion)
-	}
+	pctx.SourcePathVariable("LinuxGccRoot", LinuxGccRoot())
 
-	pctx.SourcePathVariable("LinuxGccRoot",
-		"prebuilts/gcc/linux-x86/host/x86_64-linux-glibc${LinuxGlibcVersion}-${ShortLinuxGccVersion}")
-
-	pctx.StaticVariable("LinuxGccTriple", "x86_64-linux")
+	pctx.StaticVariable("LinuxGccTriple", linuxGccTriple)
 
 	pctx.StaticVariable("LinuxCflags", strings.Join(linuxCflags, " "))
 	pctx.StaticVariable("LinuxLdflags", strings.Join(linuxLdflags, " "))
@@ -145,8 +169,6 @@ func init() {
 
 	pctx.StaticVariable("LinuxX86Cflags", strings.Join(linuxX86Cflags, " "))
 	pctx.StaticVariable("LinuxX8664Cflags", strings.Join(linuxX8664Cflags, " "))
-	pctx.StaticVariable("LinuxX86Ldflags", strings.Join(linuxX86Ldflags, " "))
-	pctx.StaticVariable("LinuxX8664Ldflags", strings.Join(linuxX8664Ldflags, " "))
 	// Yasm flags
 	pctx.StaticVariable("LinuxX86YasmFlags", "-f elf32 -m x86")
 	pctx.StaticVariable("LinuxX8664YasmFlags", "-f elf64 -m amd64")
@@ -195,12 +217,17 @@ func (t *toolchainLinuxX8664) Cppflags() string {
 	return ""
 }
 
-func (t *toolchainLinuxX86) Ldflags() string {
-	return "${config.LinuxLdflags} ${config.LinuxX86Ldflags}"
+func (t *toolchainLinuxX86) Ldflags(ctx ToolchainFlagsContext) FlagsWithDeps {
+	return FlagsWithDeps{
+		Flags: "${config.LinuxLdflags}",
+	}.Append(LinuxX86Ldflags(ctx))
 }
 
-func (t *toolchainLinuxX8664) Ldflags() string {
-	return "${config.LinuxLdflags} ${config.LinuxX8664Ldflags}"
+func (t *toolchainLinuxX8664) Ldflags(ctx ToolchainFlagsContext) FlagsWithDeps {
+	preflags := FlagsWithDeps{
+		Flags: "${config.LinuxLdflags}",
+	}
+	return preflags.Append(LinuxX8664Ldflags(ctx))
 }
 
 func (t *toolchainLinuxX86) YasmFlags() string {
@@ -243,8 +270,10 @@ func (toolchainGlibc) Cflags() string {
 	return "${config.LinuxGlibcCflags}"
 }
 
-func (toolchainGlibc) Ldflags() string {
-	return "${config.LinuxGlibcLdflags}"
+func (toolchainGlibc) Ldflags(ctx ToolchainFlagsContext) FlagsWithDeps {
+	return FlagsWithDeps{
+		Flags: "${config.LinuxGlibcLdflags}",
+	}
 }
 
 type toolchainLinuxGlibcX86 struct {
@@ -265,8 +294,8 @@ func (t *toolchainLinuxGlibcX86) Cflags() string {
 	return t.toolchainLinuxX86.Cflags() + " " + t.toolchainGlibc.Cflags()
 }
 
-func (t *toolchainLinuxGlibcX86) Ldflags() string {
-	return t.toolchainLinuxX86.Ldflags() + " " + t.toolchainGlibc.Ldflags()
+func (t *toolchainLinuxGlibcX86) Ldflags(ctx ToolchainFlagsContext) FlagsWithDeps {
+	return t.toolchainLinuxX86.Ldflags(ctx).Append(t.toolchainGlibc.Ldflags(ctx))
 }
 
 func (t *toolchainLinuxGlibcX8664) ClangTriple() string {
@@ -277,8 +306,8 @@ func (t *toolchainLinuxGlibcX8664) Cflags() string {
 	return t.toolchainLinuxX8664.Cflags() + " " + t.toolchainGlibc.Cflags()
 }
 
-func (t *toolchainLinuxGlibcX8664) Ldflags() string {
-	return t.toolchainLinuxX8664.Ldflags() + " " + t.toolchainGlibc.Ldflags()
+func (t *toolchainLinuxGlibcX8664) Ldflags(ctx ToolchainFlagsContext) FlagsWithDeps {
+	return t.toolchainLinuxX8664.Ldflags(ctx).Append(t.toolchainGlibc.Ldflags(ctx))
 }
 
 var toolchainLinuxGlibcX86Singleton Toolchain = &toolchainLinuxGlibcX86{}
@@ -313,8 +342,10 @@ func (toolchainMusl) Cflags() string {
 	return "${config.LinuxMuslCflags}"
 }
 
-func (toolchainMusl) Ldflags() string {
-	return "${config.LinuxMuslLdflags}"
+func (toolchainMusl) Ldflags(ctx ToolchainFlagsContext) FlagsWithDeps {
+	return FlagsWithDeps{
+		Flags: "${config.LinuxMuslLdflags}",
+	}
 }
 
 type toolchainLinuxMuslX86 struct {
@@ -335,8 +366,8 @@ func (t *toolchainLinuxMuslX86) Cflags() string {
 	return t.toolchainLinuxX86.Cflags() + " " + t.toolchainMusl.Cflags()
 }
 
-func (t *toolchainLinuxMuslX86) Ldflags() string {
-	return t.toolchainLinuxX86.Ldflags() + " " + t.toolchainMusl.Ldflags()
+func (t *toolchainLinuxMuslX86) Ldflags(ctx ToolchainFlagsContext) FlagsWithDeps {
+	return t.toolchainLinuxX86.Ldflags(ctx).Append(t.toolchainMusl.Ldflags(ctx))
 }
 
 func (t *toolchainLinuxMuslX8664) ClangTriple() string {
@@ -347,8 +378,8 @@ func (t *toolchainLinuxMuslX8664) Cflags() string {
 	return t.toolchainLinuxX8664.Cflags() + " " + t.toolchainMusl.Cflags()
 }
 
-func (t *toolchainLinuxMuslX8664) Ldflags() string {
-	return t.toolchainLinuxX8664.Ldflags() + " " + t.toolchainMusl.Ldflags()
+func (t *toolchainLinuxMuslX8664) Ldflags(ctx ToolchainFlagsContext) FlagsWithDeps {
+	return t.toolchainLinuxX8664.Ldflags(ctx).Append(t.toolchainMusl.Ldflags(ctx))
 }
 
 var toolchainLinuxMuslX86Singleton Toolchain = &toolchainLinuxMuslX86{}
@@ -367,4 +398,20 @@ func init() {
 	registerToolchainFactory(android.Linux, android.X86_64, linuxGlibcX8664ToolchainFactory)
 	registerToolchainFactory(android.LinuxMusl, android.X86, linuxMuslX86ToolchainFactory)
 	registerToolchainFactory(android.LinuxMusl, android.X86_64, linuxMuslX8664ToolchainFactory)
+}
+
+func LinuxGccRoot() string {
+	shortVersion := linuxGlibcVersion
+	if p := strings.Split(linuxGccVersion, "."); len(p) > 2 {
+		shortVersion = strings.Join(p[:2], ".")
+	}
+	return fmt.Sprintf("prebuilts/gcc/linux-x86/host/x86_64-linux-glibc%s-%s", linuxGlibcVersion, shortVersion)
+}
+
+func LinuxGccVersion() string {
+	return linuxGccVersion
+}
+
+func LinuxGccTriple() string {
+	return linuxGccTriple
 }

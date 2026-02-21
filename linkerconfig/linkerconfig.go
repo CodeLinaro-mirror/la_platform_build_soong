@@ -72,6 +72,10 @@ func (l *linkerConfig) OutputFile() android.OutputPath {
 	return l.outputFilePath
 }
 
+func (l *linkerConfig) DepsMutator(ctx android.BottomUpMutatorContext) {
+	ctx.AddHostToolDependencies("conv_linker_config")
+}
+
 func (l *linkerConfig) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	input := android.PathForModuleSrc(ctx, android.String(l.properties.Src))
 	output := android.PathForModuleOut(ctx, "linker.config.pb").OutputPath
@@ -98,16 +102,14 @@ func BuildLinkerConfig(
 	output android.WritablePath,
 ) {
 	// First, convert the input json to protobuf format
-	builder := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
+	builder := android.NewRuleBuilder(pctx, ctx)
 	interimOutput := android.PathForModuleOut(ctx, "temp.pb")
-	cmd := builder.Command().
+	builder.Command().
 		BuiltTool("conv_linker_config").
 		Flag("proto").
-		Flag("--force")
-	for _, input := range inputs {
-		cmd.FlagWithInput("-s ", input)
-	}
-	cmd.FlagWithOutput("-o ", interimOutput)
+		Flag("--force").
+		FlagWithInputList("-s ", inputs, ":").
+		FlagWithOutput("-o ", interimOutput)
 
 	// Secondly, if there's provideLibs gathered from provideModules, append them
 	var provideLibs []string
@@ -172,7 +174,7 @@ func BuildLinkerConfig(
 	}
 
 	// cp to the final output
-	builder.Command().Text("cp").Input(interimOutput).Output(output)
+	builder.Command().BuiltTool("cp").Input(interimOutput).Output(output)
 
 	builder.Temporary(interimOutput)
 	builder.DeleteTemporaryFiles()
