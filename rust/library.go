@@ -662,14 +662,13 @@ func (library *libraryDecorator) compilerFlags(ctx ModuleContext, flags Flags) F
 
 	if library.shared() {
 		if ctx.Darwin() {
-			flags.LinkFlags = append(
-				flags.LinkFlags,
+			flags.LinkFlags = flags.LinkFlags.AppendNoDeps(
 				"-dynamic_lib",
 				"-install_name @rpath/"+library.sharedLibFilename(ctx),
 			)
 		} else {
 			if !ctx.Windows() {
-				flags.LinkFlags = append(flags.LinkFlags, "-Wl,-soname="+library.sharedLibFilename(ctx))
+				flags.LinkFlags = flags.LinkFlags.AppendNoDeps("-Wl,-soname=" + library.sharedLibFilename(ctx))
 			}
 		}
 	}
@@ -692,6 +691,7 @@ func (library *libraryDecorator) compile(ctx ModuleContext, flags Flags, deps Pa
 
 	// Ensure link dirs are not duplicated
 	deps.linkDirs = android.FirstUniqueStrings(deps.linkDirs)
+	deps.linkDirsDeps = android.FirstUniquePaths(deps.linkDirsDeps)
 
 	// Calculate output filename
 	if library.rlib() {
@@ -724,20 +724,20 @@ func (library *libraryDecorator) compile(ctx ModuleContext, flags Flags, deps Pa
 	library.checkJsonFile = android.OptionalPathForPath(checkJsonFile)
 
 	flags.RustFlags = append(flags.RustFlags, deps.depFlags...)
-	flags.LinkFlags = append(flags.LinkFlags, deps.depLinkFlags...)
-	flags.LinkFlags = append(flags.LinkFlags, deps.rustLibObjects...)
-	flags.LinkFlags = append(flags.LinkFlags, deps.staticLibObjects...)
-	flags.LinkFlags = append(flags.LinkFlags, deps.wholeStaticLibObjects...)
+	flags.LinkFlags = flags.LinkFlags.AppendNoDeps(deps.depLinkFlags...)
+	flags.LinkFlags = flags.LinkFlags.AppendNoDeps(deps.rustLibObjects...)
+	flags.LinkFlags = flags.LinkFlags.AppendNoDeps(deps.staticLibObjects...)
+	flags.LinkFlags = flags.LinkFlags.AppendNoDeps(deps.wholeStaticLibObjects...)
 
 	if ctx.Windows() {
 		for _, lib := range deps.sharedLibObjects {
 			// Windows uses the .lib import library at link-time and at runtime
 			// uses the .dll library, so we need to make sure we're passing the
 			// import library to the linker.
-			flags.LinkFlags = append(flags.LinkFlags, pathtools.ReplaceExtension(lib, "lib"))
+			flags.LinkFlags = flags.LinkFlags.AppendNoDeps(pathtools.ReplaceExtension(lib, "lib"))
 		}
 	} else {
-		flags.LinkFlags = append(flags.LinkFlags, deps.sharedLibObjects...)
+		flags.LinkFlags = flags.LinkFlags.AppendNoDeps(deps.sharedLibObjects...)
 	}
 
 	if String(library.Properties.Version_script) != "" {
@@ -760,8 +760,12 @@ func (library *libraryDecorator) compile(ctx ModuleContext, flags Flags, deps Pa
 	if String(library.Properties.Extra_exported_symbols) != "" {
 		// Passing a second version script (rustc calculates and emits a
 		// default version script) will concatenate the first version script.
-		flags.LinkFlags = append(flags.LinkFlags, "-Wl,--version-script="+android.PathForModuleSrc(ctx, String(library.Properties.Extra_exported_symbols)).String())
-		deps.LinkerDeps = append(deps.LinkerDeps, android.PathForModuleSrc(ctx, String(library.Properties.Extra_exported_symbols)))
+		versionScript := android.PathForModuleSrc(ctx, String(library.Properties.Extra_exported_symbols))
+		newFlags := cc_config.FlagsWithDeps{
+			Flags: "-Wl,--version-script=" + versionScript.String(),
+			Deps:  []android.Path{versionScript},
+		}
+		flags.LinkFlags = flags.LinkFlags.Append(newFlags)
 	}
 
 	if library.dylib() {
@@ -789,7 +793,7 @@ func (library *libraryDecorator) compile(ctx ModuleContext, flags Flags, deps Pa
 
 	// rlibs and dylibs propagate their shared, whole static, and rustlib dependencies
 	if library.rlib() || library.dylib() {
-		library.exportLinkDirs(deps.linkDirs...)
+		library.exportLinkDirs(deps.linkDirs, deps.linkDirsDeps)
 		library.exportRustLibs(deps.rustLibObjects...)
 		library.exportSharedLibs(deps.sharedLibObjects...)
 		library.exportWholeStaticLibs(deps.wholeStaticLibObjects...)

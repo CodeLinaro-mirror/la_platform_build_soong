@@ -191,7 +191,7 @@ type FilesystemProperties struct {
 
 	// Type of the filesystem. Currently, ext4, erofs, cpio, and compressed_cpio are supported. Default
 	// is ext4.
-	Type *string
+	Type proptools.Configurable[string]
 
 	// Identifies which partition this is for //visibility:any_system_image (and others) visibility
 	// checks, and will be used in the future for API surface checks.
@@ -319,10 +319,10 @@ type AndroidFilesystemDeps struct {
 type ErofsProperties struct {
 	// Compressor and Compression level passed to mkfs.erofs. e.g. (lz4hc,9)
 	// Please see external/erofs-utils/README for complete documentation.
-	Compressor *string
+	Compressor proptools.Configurable[string]
 
 	// Used as --compress-hints for mkfs.erofs
-	Compress_hints *string `android:"path"`
+	Compress_hints proptools.Configurable[string] `android:"path"`
 
 	Sparse *bool
 
@@ -468,6 +468,7 @@ func (f *filesystem) DepsMutator(ctx android.BottomUpMutatorContext) {
 		ctx.AddDependency(ctx.Module(), android.PrebuiltDepTag, proptools.String(f.properties.Prebuilt_module_name))
 	}
 
+	ctx.AddHostToolDependencies("conv_linker_config")
 }
 
 type fsType int
@@ -633,7 +634,7 @@ func GetFsTypeFromString(ctx android.EarlyModuleContext, typeStr string) fsType 
 }
 
 func (f *filesystem) fsType(ctx android.ModuleContext) fsType {
-	typeStr := proptools.StringDefault(f.properties.Type, "ext4")
+	typeStr := f.properties.Type.GetOrDefault(ctx, "ext4")
 	fsType := GetFsTypeFromString(ctx, typeStr)
 	if fsType == unknown {
 		ctx.PropertyErrorf("type", "%q not supported", typeStr)
@@ -877,8 +878,8 @@ func (f *filesystem) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	}
 
 	var erofsCompressHints android.Path
-	if f.properties.Erofs.Compress_hints != nil {
-		erofsCompressHints = android.PathForModuleSrc(ctx, *f.properties.Erofs.Compress_hints)
+	if v := f.properties.Erofs.Compress_hints.Get(ctx); v.IsPresent() {
+		erofsCompressHints = android.PathForModuleSrc(ctx, v.Get())
 	}
 
 	var installedFilesStructList []InstalledFilesStruct
@@ -1444,9 +1445,9 @@ func (f *filesystem) buildPropFile(ctx android.ModuleContext) (android.Path, and
 	switch fst {
 	case erofsType:
 		// Add erofs properties
-		addStr("erofs_default_compressor", proptools.StringDefault(f.properties.Erofs.Compressor, "lz4hc,9"))
-		if f.properties.Erofs.Compress_hints != nil {
-			src := android.PathForModuleSrc(ctx, *f.properties.Erofs.Compress_hints)
+		addStr("erofs_default_compressor", f.properties.Erofs.Compressor.GetOrDefault(ctx, "lz4hc,9"))
+		if v := f.properties.Erofs.Compress_hints.Get(ctx); v.IsPresent() {
+			src := android.PathForModuleSrc(ctx, v.Get())
 			addPath("erofs_default_compress_hints", src)
 		}
 		if proptools.BoolDefault(f.properties.Erofs.Sparse, true) {
@@ -1571,7 +1572,7 @@ func (f *filesystem) buildPropFileForMiscInfo(ctx android.ModuleContext) android
 	switch fst {
 	case erofsType:
 		// Add erofs properties
-		addStr("erofs_default_compressor", proptools.StringDefault(f.properties.Erofs.Compressor, "lz4hc,9"))
+		addStr("erofs_default_compressor", f.properties.Erofs.Compressor.GetOrDefault(ctx, "lz4hc,9"))
 		if proptools.BoolDefault(f.properties.Erofs.Sparse, true) {
 			// https://source.corp.google.com/h/googleplex-android/platform/build/+/88b1c67239ca545b11580237242774b411f2fed9:core/Makefile;l=2292;bpv=1;bpt=0;drc=ea8f34bc1d6e63656b4ec32f2391e9d54b3ebb6b
 			addStr("erofs_sparse_flag", "-s")
@@ -1651,7 +1652,12 @@ func (f *filesystem) getAvbAddHashtreeFooterArgs(ctx android.ModuleContext) (str
 	// We're not going to add BuildFingerPrintFile as a dep. If it changed, it's likely because
 	// the build number changed, and we don't want to trigger rebuilds solely based on the build
 	// number.
-	if ctx.Module().UseGenericConfig() {
+	if f.partitionName() == "system" {
+		// The system partition has product-agnostic fingerprint.
+		avb_add_hashtree_footer_args += fmt.Sprintf(" --prop com.android.build.%s.fingerprint:{CONTENTS_OF:%s}", f.partitionName(), ctx.Config().BuildSystemFingerprintFile(ctx))
+		deps = append(deps, ctx.Config().BuildSystemFingerprintFile(ctx))
+	} else if ctx.Module().UseGenericConfig() {
+		// If non-system partition wants to use generic config, use thumbprint instead.
 		avb_add_hashtree_footer_args += fmt.Sprintf(" --prop com.android.build.%s.fingerprint:{CONTENTS_OF:%s}", f.partitionName(), ctx.Config().BuildThumbprintFile(ctx))
 		deps = append(deps, ctx.Config().BuildThumbprintFile(ctx))
 	} else {
@@ -1660,6 +1666,8 @@ func (f *filesystem) getAvbAddHashtreeFooterArgs(ctx android.ModuleContext) (str
 	}
 	if f.properties.Security_patch != nil && proptools.String(f.properties.Security_patch) != "" {
 		avb_add_hashtree_footer_args += fmt.Sprintf(" --prop com.android.build.%s.security_patch:%s", f.partitionName(), proptools.String(f.properties.Security_patch))
+	} else if android.InList(f.partitionName(), []string{"system", "system_ext", "product"}) {
+		avb_add_hashtree_footer_args += fmt.Sprintf(" --prop com.android.build.%s.security_patch:%s", f.partitionName(), ctx.Config().PlatformSecurityPatch())
 	}
 	return avb_add_hashtree_footer_args, deps
 }
@@ -1673,7 +1681,9 @@ func (f *filesystem) checkFsTypePropertyError(ctx android.ModuleContext, t fsTyp
 	}
 
 	if t != erofsType {
-		if f.properties.Erofs.Compressor != nil || f.properties.Erofs.Compress_hints != nil || f.properties.Erofs.Sparse != nil {
+		compressor := f.properties.Erofs.Compressor.Get(ctx)
+		compressHints := f.properties.Erofs.Compress_hints.Get(ctx)
+		if compressor.IsPresent() || compressHints.IsPresent() || f.properties.Erofs.Sparse != nil {
 			raiseError("erofs", fs)
 		}
 	}

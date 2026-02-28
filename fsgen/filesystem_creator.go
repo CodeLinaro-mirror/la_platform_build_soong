@@ -304,20 +304,22 @@ func (f *filesystemCreator) createInternalModules(ctx android.LoadHookContext) {
 			f.properties.Unsupported_partition_types = append(f.properties.Unsupported_partition_types, "boot")
 		}
 	}
+	var vendorRamdiskFragmentModules []string
 	if buildingVendorBootImage(partitionVars) {
-		if createVendorBootImage(ctx, dtbImg) {
+		if exists, fragments := createVendorBootImage(ctx, dtbImg); exists {
 			f.properties.Vendor_boot_image = ":" + generatedModuleNameForPartition(ctx.Config(), "vendor_boot")
+			vendorRamdiskFragmentModules = fragments
 		} else {
 			f.properties.Unsupported_partition_types = append(f.properties.Unsupported_partition_types, "vendor_boot")
 		}
 	}
 	if buildingDebugVendorBootImage(partitionVars) {
-		if createVendorBootDebugImage(ctx, dtbImg) {
+		if createVendorBootDebugImage(ctx, dtbImg, vendorRamdiskFragmentModules) {
 			f.properties.Vendor_boot_debug_image = ":" + generatedModuleNameForPartition(ctx.Config(), "vendor_boot-debug")
 		} else {
 			f.properties.Unsupported_partition_types = append(f.properties.Unsupported_partition_types, "vendor_boot-debug")
 		}
-		if createVendorBootTestHarnessImage(ctx, dtbImg) {
+		if createVendorBootTestHarnessImage(ctx, dtbImg, vendorRamdiskFragmentModules) {
 			f.properties.Vendor_boot_test_harness_image = ":" + generatedModuleNameForPartition(ctx.Config(), "vendor_boot-test-harness")
 		} else {
 			f.properties.Unsupported_partition_types = append(f.properties.Unsupported_partition_types, "vendor_boot-test-harness")
@@ -1042,22 +1044,34 @@ func partitionSpecificFsProps(ctx android.EarlyModuleContext, partitions allGene
 		}
 		fsProps.Stem = proptools.StringPtr("vendor_ramdisk.img")
 	case "vendor_ramdisk-debug":
-		if recoveryName := partitions.nameForType("recovery"); recoveryName != "" {
-			fsProps.Include_files_of = []string{recoveryName}
-		}
 		fsProps.Include_files_of = append(
 			fsProps.Include_files_of,
 			generatedModuleNameForPartition(ctx.Config(), "vendor_ramdisk"),
+		)
+		if recoveryName := partitions.nameForType("recovery"); recoveryName != "" {
+			fsProps.Include_files_of = append(
+				fsProps.Include_files_of,
+				recoveryName,
+			)
+		}
+		fsProps.Include_files_of = append(
+			fsProps.Include_files_of,
 			generatedModuleNameForPartition(ctx.Config(), "debug_ramdisk"),
 		)
 		fsProps.Stem = proptools.StringPtr("vendor_ramdisk-debug.img")
 	case "vendor_ramdisk-test-harness":
-		if recoveryName := partitions.nameForType("recovery"); recoveryName != "" {
-			fsProps.Include_files_of = []string{recoveryName}
-		}
 		fsProps.Include_files_of = append(
 			fsProps.Include_files_of,
 			generatedModuleNameForPartition(ctx.Config(), "vendor_ramdisk"),
+		)
+		if recoveryName := partitions.nameForType("recovery"); recoveryName != "" {
+			fsProps.Include_files_of = append(
+				fsProps.Include_files_of,
+				recoveryName,
+			)
+		}
+		fsProps.Include_files_of = append(
+			fsProps.Include_files_of,
 			generatedModuleNameForPartition(ctx.Config(), "debug_ramdisk"),
 			generatedModuleNameForPartition(ctx.Config(), "test_harness_ramdisk"),
 		)
@@ -1593,19 +1607,19 @@ func generateFsProps(ctx android.EarlyModuleContext, partitions allGeneratedPart
 		}
 	}
 
-	fsProps.Type = proptools.StringPtr(fsType)
-	if filesystem.GetFsTypeFromString(ctx, *fsProps.Type).IsUnknown() {
+	fsProps.Type = proptools.NewSimpleConfigurable(fsType)
+	if filesystem.GetFsTypeFromString(ctx, fsType).IsUnknown() {
 		// Currently the android_filesystem module type only supports a handful of FS types like ext4, erofs
 		return nil, false
 	}
 
-	switch *fsProps.Type {
+	switch fsType {
 	case "erofs":
 		if partitionVars.BoardErofsCompressor != "" {
-			fsProps.Erofs.Compressor = proptools.StringPtr(partitionVars.BoardErofsCompressor)
+			fsProps.Erofs.Compressor = proptools.NewSimpleConfigurable(partitionVars.BoardErofsCompressor)
 		}
 		if partitionVars.BoardErofsCompressorHints != "" {
-			fsProps.Erofs.Compress_hints = proptools.StringPtr(":soong_generated_board_erofs_compress_hints_filegroup")
+			fsProps.Erofs.Compress_hints = proptools.NewSimpleConfigurable(":soong_generated_board_erofs_compress_hints_filegroup")
 		}
 		if s, err := strconv.ParseBool(partitionVars.BoardErofsShareDupBlocks); err == nil {
 			fsProps.Share_dup_blocks = proptools.BoolPtr(s)

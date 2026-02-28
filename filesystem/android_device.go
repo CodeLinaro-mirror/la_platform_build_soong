@@ -188,6 +188,7 @@ type androidDevice struct {
 	rootDirForFsConfigTimestamp android.Path
 	apkCertsInfo                android.Path
 	targetFilesZip              android.Path
+	superImgFromTargetFilesZip  android.Path
 	updatePackage               android.Path
 	otaFilesZip                 android.Path
 	otaMetadata                 android.Path
@@ -736,7 +737,7 @@ func (a *androidDevice) distInstalledFiles(ctx android.ModuleContext) {
 func (a *androidDevice) distFiles(ctx android.ModuleContext) {
 	if !ctx.Config().KatiEnabled() && proptools.Bool(a.deviceProps.Main_device) {
 		if a.superImageInfo.SuperImage != nil && !a.superImageInfo.SuperImageInUpdatePackage {
-			ctx.DistForGoal("dist_files", a.superImageInfo.SuperImage)
+			ctx.DistForGoal("dist_files", a.superImgFromTargetFilesZip)
 		}
 		if a.superImageInfo.SuperEmptyImage != nil {
 			ctx.DistForGoal("dist_files", a.superImageInfo.SuperEmptyImage)
@@ -1087,6 +1088,18 @@ func (a *androidDevice) buildTargetFilesZip(ctx android.ModuleContext, allInstal
 		Implicit(targetFilesDirStamp)
 	zipBuilder.Build("target_files", "Build target_files.zip")
 	a.targetFilesZip = targetFilesZip
+
+	// super.img built from target_files directory
+	superImgFromTargetFilesZip := android.PathForModuleOut(ctx, "super.img")
+	superImgBuilder := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
+	superImgBuilder.Command().
+		Textf("PATH=%s:$PATH", ctx.Config().HostToolDir()).
+		BuiltTool("build_super_image").
+		FlagWithArg("-v ", targetFilesDir.String()).
+		Output(superImgFromTargetFilesZip).
+		Implicit(targetFilesDirStamp)
+	superImgBuilder.Build("target_files_super_image", "Build super.img from the subpartitions in target_files.zip")
+	a.superImgFromTargetFilesZip = superImgFromTargetFilesZip
 
 	if ctx.Config().BuildOTAPackage() {
 		otaBuilder := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
@@ -1578,9 +1591,7 @@ func (a *androidDevice) addMiscInfo(ctx android.ModuleContext) android.Path {
 	builder.Command().Textf("echo recovery_mount_options=%s >> %s", defaultTargetRecoveryFstypeMountOptions, miscInfo)
 
 	// vintf information
-	if proptools.Bool(ctx.Config().ProductVariables().Enforce_vintf_manifest) {
-		builder.Command().Textf("echo vintf_enforce=true >> %s", miscInfo)
-	}
+	builder.Command().Textf("echo vintf_enforce=true >> %s", miscInfo)
 	if len(ctx.Config().DeviceManifestFiles()) > 0 {
 		builder.Command().Textf("echo vintf_include_empty_vendor_sku=true >> %s", miscInfo)
 	}
@@ -2133,10 +2144,7 @@ func (a *androidDevice) checkVintf(ctx android.ModuleContext) android.Paths {
 	}
 	var checkVintfLogs android.Paths
 	fsInfoMap := a.getFsInfos(ctx)
-	// https://source.corp.google.com/h/googleplex-android/platform/superproject/main/+/main:build/make/core/Makefile;l=5561-5566?q=PRODUCT_ENFORCE_VINTF_MANIFEST%20f:build%2Fmake&ct=os&sq=repo:googleplex-android%2Fplatform%2Fsuperproject%2Fmain%20b:main
-	if !proptools.Bool(ctx.Config().ProductVariables().Enforce_vintf_manifest) {
-		return nil
-	}
+
 	if _, systemExists := fsInfoMap["system"]; !systemExists {
 		return nil
 	}

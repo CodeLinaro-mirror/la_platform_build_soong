@@ -122,7 +122,8 @@ func TestFileSystemCreatorSystemImageProps(t *testing.T) {
 		}),
 	).RunTest(t)
 
-	fooSystem := result.ModuleForTests(t, "test_product_generated_system_image", "android_common").Module().(interface {
+	module := result.ModuleForTests(t, "test_product_generated_system_image", "android_common").Module()
+	fooSystem := module.(interface {
 		FsProps() filesystem.FilesystemProperties
 	})
 	android.AssertBoolEquals(
@@ -149,11 +150,13 @@ func TestFileSystemCreatorSystemImageProps(t *testing.T) {
 		0,
 		proptools.Int(fooSystem.FsProps().Rollback_index),
 	)
+	evaluator := module.(android.Module).ConfigurableEvaluator(android.PanickingConfigAndErrorContext(result.TestContext))
+	fsProps := fooSystem.FsProps()
 	android.AssertStringEquals(
 		t,
 		"Property expected to match the product variable 'BOARD_SYSTEMIMAGE_FILE_SYSTEM_TYPE'",
 		"ext4",
-		proptools.String(fooSystem.FsProps().Type),
+		fsProps.Type.GetOrDefault(evaluator, ""),
 	)
 }
 
@@ -806,6 +809,7 @@ func TestCrossPartitionRequiredModules(t *testing.T) {
 		android.PrepareForTestWithNamespace,
 		phony.PrepareForTestWithPhony,
 		etc.PrepareForTestWithPrebuiltEtc,
+		android.PrepareForTestWithHostTools("conv_linker_config"),
 		android.FixtureMergeMockFs(android.MockFS{
 			"external/avb/test/data/testkey_rsa4096.pem": nil,
 			"mynamespace/default-permissions.xml":        nil,
@@ -882,6 +886,7 @@ func TestOverriddenDepsAreAddedToFilesystemModuleOverriddenDeps(t *testing.T) {
 		java.PrepareForTestWithJavaBuildComponents,
 		prepareMockRamdiksNodeList,
 		prepareForTestWithDefaultSystemDeps,
+		android.PrepareForTestWithHostTools("conv_linker_config"),
 		android.FixtureMergeMockFs(android.MockFS{
 			"external/avb/test/data/testkey_rsa4096.pem": nil,
 			"build/soong/fsgen/Android.bp": []byte(`

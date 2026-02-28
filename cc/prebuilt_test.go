@@ -267,7 +267,7 @@ func TestPrebuiltLibrarySharedStem(t *testing.T) {
 	assertString(t, shared.OutputFile().Path().Base(), "libbar.so")
 }
 
-func TestPrebuiltSymlinkedHostBinary(t *testing.T) {
+func TestPrebuiltHostBinary(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skipf("Skipping host prebuilt testing that is only supported on linux not %s", runtime.GOOS)
 	}
@@ -300,18 +300,9 @@ func TestPrebuiltSymlinkedHostBinary(t *testing.T) {
 		"foo":       nil,
 	})
 
-	fooRule := ctx.ModuleForTests(t, "foo", "linux_glibc_x86_64").Rule("Symlink")
+	fooRule := ctx.ModuleForTests(t, "foo", "linux_glibc_x86_64").Rule("CpExecutable")
 	assertString(t, fooRule.Output.String(), "out/soong/.intermediates/foo/linux_glibc_x86_64/foo")
-	assertString(t, fooRule.Args["fromPath"], "$$PWD/linux_glibc_x86_64/bin/foo")
-
-	var libfooDep android.Path
-	for _, dep := range fooRule.Implicits {
-		if dep.Base() == "libfoo.so" {
-			libfooDep = dep
-			break
-		}
-	}
-	assertString(t, libfooDep.String(), "out/soong/.intermediates/libfoo/linux_glibc_x86_64_shared/libfoo.so")
+	assertString(t, fooRule.Input.String(), "linux_glibc_x86_64/bin/foo")
 }
 
 func TestPrebuiltLibrarySanitized(t *testing.T) {
@@ -323,14 +314,17 @@ func TestPrebuiltLibrarySanitized(t *testing.T) {
 		shared: {
                         sanitized: { none: { srcs: ["libf.so"], }, hwaddress: { srcs: ["hwasan/libf.so"], }, },
 		},
+		split_all_variants: true,
 	}
 	cc_prebuilt_library_static {
 		name: "libtest_static",
                 sanitized: { none: { srcs: ["libf.a"], }, hwaddress: { srcs: ["libf.hwasan.a"], }, },
+		split_all_variants: true,
 	}
 	cc_prebuilt_library_shared {
 		name: "libtest_shared",
                 sanitized: { none: { srcs: ["libf.so"], }, hwaddress: { srcs: ["hwasan/libf.so"], }, },
+		split_all_variants: true,
 	}`
 
 	fs := map[string][]byte{

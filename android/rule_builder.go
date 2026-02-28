@@ -281,7 +281,7 @@ func (r *RuleBuilder) DeleteTemporaryFiles() {
 		return temporariesList[i].String() < temporariesList[j].String()
 	})
 
-	r.Command().Text("rm").Flag("-f").Outputs(temporariesList)
+	r.Command().BuiltTool("rm").Flag("-f").Outputs(temporariesList)
 }
 
 // Inputs returns the list of paths that were passed to the RuleBuilderCommand methods that take
@@ -1034,6 +1034,18 @@ func (c *RuleBuilderCommand) PathForInput(path Path) string {
 		if inSandbox {
 			rel = filepath.Join(sboxSandboxBaseDir, rel)
 		}
+		return rel
+	} else if c.rule.nsjail {
+		return c.rule.nsjailPathForInputRel(path)
+	}
+	return path.String()
+}
+
+// PathForInputFromFile is like PathForInput but for file paths specified in a file which is used on the command line.
+// If sbox is enabled it doesn't prepend sboxSandboxBaseDir to the returned path.
+func (c *RuleBuilderCommand) PathForInputFromFile(path Path) string {
+	if c.rule.sbox {
+		rel, _ := c.rule._sboxPathForInputRel(path)
 		return rel
 	} else if c.rule.nsjail {
 		return c.rule.nsjailPathForInputRel(path)
