@@ -36,18 +36,18 @@ func RegisterPrebuiltApisBuildComponents(ctx android.RegistrationContext) {
 
 type prebuiltApisProperties struct {
 	// list of api version directories
-	Api_dirs []string
+	Api_dirs proptools.Configurable[[]string]
 
 	// Directory containing finalized api txt files for extension versions.
 	// Extension versions higher than the base sdk extension version will
 	// be assumed to be finalized later than all Api_dirs.
-	Extensions_dir *string
+	Extensions_dir proptools.Configurable[string]
 
 	// The next API directory can optionally point to a directory where
 	// files incompatibility-tracking files are stored for the current
 	// "in progress" API. Each module present in one of the api_dirs will have
 	// a <module>-incompatibilities.api.<scope>.latest module created.
-	Next_api_dir *string
+	Next_api_dir proptools.Configurable[string]
 
 	// The sdk_version of java_import modules generated based on jar files.
 	// Defaults to "current"
@@ -92,28 +92,21 @@ func parsePrebuiltPath(ctx android.LoadHookContext, p string) (module string, ve
 }
 
 // parseFinalizedPrebuiltPath is like parsePrebuiltPath, but verifies the version is numeric (a finalized version).
-func parseFinalizedPrebuiltPath(ctx android.LoadHookContext, p string) (module string, version int, release int, scope string) {
+func parseFinalizedPrebuiltPath(ctx android.LoadHookContext, p string) (module string, apiLevel android.ApiLevel, scope string) {
 	module, v, scope := parsePrebuiltPath(ctx, p)
 
-	// assume a major.minor version code
-	parts := strings.Split(v, ".")
-	if len(parts) == 2 {
-		sdk, sdk_err := strconv.Atoi(parts[0])
-		qpr, qpr_err := strconv.Atoi(parts[1])
-		if sdk_err != nil || qpr_err != nil {
-			ctx.ModuleErrorf("Unable to read major.minor version for prebuilt api '%v'", v)
-			return
-		}
-		version = sdk
-		release = qpr
+	// Hack for 37-prefinalized (b/489350505). This provides a stable reference for
+	// bp4a and mainline-beta builds that cannot use the finalized 37.0 SDK.
+	// TODO(b/491744570): Remove this hack
+	if v == "37-prefinalized" {
+		apiLevel, _ = android.ApiLevelFromUserWithConfig(ctx.Config(), "37")
 		return
 	}
 
-	// assume a legacy integer only api level
-	release = 0
-	version, err := strconv.Atoi(v)
+	var err error
+	apiLevel, err = android.ApiLevelFromUserWithConfig(ctx.Config(), v)
 	if err != nil {
-		ctx.ModuleErrorf("Unable to read API level for prebuilt api '%v'", v)
+		ctx.ModuleErrorf("Unable to read version for prebuilt api '%v': %v", v, err)
 		return
 	}
 	return
@@ -197,7 +190,8 @@ func createEmptyFile(mctx android.LoadHookContext, name string) {
 // <api-dir>/<scope>/<glob> for all api-dir and scope.
 func globApiDirs(mctx android.LoadHookContext, p *prebuiltApis, api_dir_glob string) []string {
 	var files []string
-	for _, apiver := range p.properties.Api_dirs {
+	eval := p.getEvaluator(mctx)
+	for _, apiver := range p.properties.Api_dirs.GetOrDefault(eval, nil) {
 		files = append(files, globScopeDir(mctx, apiver, api_dir_glob)...)
 	}
 	return files
@@ -207,7 +201,12 @@ func globApiDirs(mctx android.LoadHookContext, p *prebuiltApis, api_dir_glob str
 // <extension-dir>/<version>/<scope>/<glob> for all version and scope.
 func globExtensionDirs(mctx android.LoadHookContext, p *prebuiltApis, extension_dir_glob string) []string {
 	// <extensions-dir>/<num>/<extension-dir-glob>
-	return globScopeDir(mctx, *p.properties.Extensions_dir+"/*", extension_dir_glob)
+	eval := p.getEvaluator(mctx)
+	extDir := p.properties.Extensions_dir.GetOrDefault(eval, "")
+	if extDir == "" {
+		return nil
+	}
+	return globScopeDir(mctx, extDir+"/*", extension_dir_glob)
 }
 
 // globScopeDir collects all the files in the given subdir across all scopes that match the given glob, e.g. '*.jar' or 'api/*.txt'.
@@ -238,7 +237,8 @@ func prebuiltSdkStubs(mctx android.LoadHookContext, p *prebuiltApis) {
 
 	for _, f := range files {
 		// create a Import module for each jar file
-		module, version, scope := parsePrebuiltPath(mctx, f)
+		module, apiLevel, scope := parseFinalizedPrebuiltPath(mctx, f)
+		version := apiLevel.GetSdkVersion()
 		createImport(mctx, module, scope, version, f, sdkVersion, compileDex)
 
 		if module == "core-for-system-modules" {
@@ -275,44 +275,40 @@ func prebuiltApiFiles(mctx android.LoadHookContext, p *prebuiltApis) {
 
 	// Create modules for all (<module>, <scope, <version>) triplets,
 	for _, f := range apiLevelFiles {
-		module, version, release, scope := parseFinalizedPrebuiltPath(mctx, f)
-		if release != 0 {
-			majorDotMinorVersion := strconv.Itoa(version) + "." + strconv.Itoa(release)
-			createApiModule(mctx, PrebuiltApiModuleName(module, scope, majorDotMinorVersion), f)
-		} else {
-			createApiModule(mctx, PrebuiltApiModuleName(module, scope, strconv.Itoa(version)), f)
-		}
+		module, apiLevel, scope := parseFinalizedPrebuiltPath(mctx, f)
+		createApiModule(mctx, PrebuiltApiModuleName(module, scope, apiLevel.GetSdkVersion()), f)
 	}
 
 	// Figure out the latest version of each module/scope
 	type latestApiInfo struct {
 		module, scope, path string
-		version, release    int
+		apiLevel            android.ApiLevel
 		isExtensionApiFile  bool
 	}
 
 	getLatest := func(files []string, isExtensionApiFile bool) map[string]latestApiInfo {
 		m := make(map[string]latestApiInfo)
 		for _, f := range files {
-			module, version, release, scope := parseFinalizedPrebuiltPath(mctx, f)
+			module, apiLevel, scope := parseFinalizedPrebuiltPath(mctx, f)
 			if strings.HasSuffix(module, "incompatibilities") {
 				continue
 			}
 			key := module + "." + scope
 			info, exists := m[key]
-			if !exists || version > info.version || (version == info.version && release > info.release) {
-				m[key] = latestApiInfo{module, scope, f, version, release, isExtensionApiFile}
+			if !exists || apiLevel.GreaterThan(info.apiLevel) {
+				m[key] = latestApiInfo{module, scope, f, apiLevel, isExtensionApiFile}
 			}
 		}
 		return m
 	}
 
 	latest := getLatest(apiLevelFiles, false)
-	if p.properties.Extensions_dir != nil {
+	eval := p.getEvaluator(mctx)
+	if extDir := p.properties.Extensions_dir.GetOrDefault(eval, ""); extDir != "" {
 		extensionApiFiles := globExtensionDirs(mctx, p, "api/*.txt")
 		for k, v := range getLatest(extensionApiFiles, true) {
 			if _, exists := latest[k]; !exists {
-				mctx.ModuleErrorf("Module %v finalized for extension %d but never during an API level; likely error", v.module, v.version)
+				mctx.ModuleErrorf("Module %v finalized for extension %s but never during an API level; likely error", v.module, v.apiLevel.GetSdkVersion())
 			}
 			// The extension version is always at least as new as the last sdk int version (potentially identical)
 			latest[k] = v
@@ -327,7 +323,7 @@ func prebuiltApiFiles(mctx android.LoadHookContext, p *prebuiltApis) {
 		name := PrebuiltApiModuleName(info.module, info.scope, "latest")
 		latestExtensionVersionModuleName := PrebuiltApiModuleName(info.module, info.scope, "latest.extension_version")
 		if info.isExtensionApiFile {
-			createLatestApiModuleExtensionVersionFile(mctx, latestExtensionVersionModuleName, strconv.Itoa(info.version))
+			createLatestApiModuleExtensionVersionFile(mctx, latestExtensionVersionModuleName, strconv.Itoa(info.apiLevel.FinalInt()))
 		} else {
 			createLatestApiModuleExtensionVersionFile(mctx, latestExtensionVersionModuleName, "-1")
 		}
@@ -336,7 +332,7 @@ func prebuiltApiFiles(mctx android.LoadHookContext, p *prebuiltApis) {
 
 	// Create incompatibilities tracking files for all modules, if we have a "next" api.
 	incompatibilities := make(map[string]bool)
-	if nextApiDir := String(p.properties.Next_api_dir); nextApiDir != "" {
+	if nextApiDir := p.properties.Next_api_dir.GetOrDefault(eval, ""); nextApiDir != "" {
 		files := globScopeDir(mctx, nextApiDir, "api/*incompatibilities.txt")
 		for _, f := range files {
 			filename, _, scope := parsePrebuiltPath(mctx, f)
@@ -380,6 +376,38 @@ func prebuiltApiFiles(mctx android.LoadHookContext, p *prebuiltApis) {
 		android.ReverseSliceInPlace(srcs)
 		createCombinedApiFilegroupModule(mctx, name, srcs)
 	}
+}
+
+// releaseFlagOnlyEvaluator and configurableEvaluatorContextWrapper are a hack to enable bp4a config to build.
+// TODO(b/491744570): Refactor prebuilt_apis to not require evaluating the flags during module creation.
+func (p *prebuiltApis) getEvaluator(ctx android.LoadHookContext) proptools.ConfigurableEvaluator {
+	return releaseFlagOnlyEvaluator{p.ConfigurableEvaluator(configurableEvaluatorContextWrapper{ctx})}
+}
+
+type releaseFlagOnlyEvaluator struct {
+	proptools.ConfigurableEvaluator
+}
+
+func (e releaseFlagOnlyEvaluator) EvaluateConfiguration(condition proptools.ConfigurableCondition, property string) proptools.ConfigurableValue {
+	if condition.FunctionName() != "release_flag" {
+		e.PropertyErrorf(property, "Only release_flag is supported in selects for prebuilt_apis, found %s", condition.FunctionName())
+		return proptools.ConfigurableValueUndefined()
+	}
+	return e.ConfigurableEvaluator.EvaluateConfiguration(condition, property)
+}
+
+// configurableEvaluatorContextWrapper is a wrapper for android.LoadHookContext
+// that allows evaluating configurable properties during load hooks by overriding
+// HasMutatorFinished("defaults") to return true.
+type configurableEvaluatorContextWrapper struct {
+	android.LoadHookContext
+}
+
+func (c configurableEvaluatorContextWrapper) HasMutatorFinished(mutatorName string) bool {
+	if mutatorName == "defaults" {
+		return true
+	}
+	return c.LoadHookContext.HasMutatorFinished(mutatorName)
 }
 
 func createPrebuiltApiModules(mctx android.LoadHookContext) {

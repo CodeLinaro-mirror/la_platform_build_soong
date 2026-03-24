@@ -332,6 +332,8 @@ var (
 		"-Wno-character-conversion", // http://b/452740154
 		// TODO: Disable this warning in external projects after switching clang.
 		"-Wno-error=uninitialized-const-pointer", // http://b/458489157
+		// New warnings to be fixed after clang-r596125
+		"-Wno-incompatible-pointer-types", // http://b/490481169
 
 		// Allow using VLA CXX extension.
 		"-Wno-vla-cxx-extension",
@@ -387,8 +389,6 @@ var (
 	// that enables -Wall, -Wextra, or a particular warnings explicitly triggers
 	// newly added warnings. See note above noOverrideGlobalCflags.
 	noOverrideExternalGlobalCflags = []string{
-		// http://b/151457797
-		"-fcommon",
 		// http://b/191699019
 		"-Wno-format-insufficient-args",
 		// http://b/296321508
@@ -427,7 +427,7 @@ var (
 	}
 
 	CStdVersion               = "gnu23"
-	CppStdVersion             = "gnu++20"
+	CppDefaultStdVersion      = "gnu++20"
 	ExperimentalCStdVersion   = "gnu2y"
 	ExperimentalCppStdVersion = "gnu++2b"
 
@@ -436,9 +436,6 @@ var (
 	// The Clang version used in the trunk branch.
 	// NOTE: This is deprecated and will be removed in a future version, use the getter function instead.
 	ClangDefaultVersion = "clang-r584948"
-	// The Clang short version used in the trunk branch.
-	// NOTE: This is deprecated and will be removed in a future version, use the getter function instead.
-	ClangDefaultShortVersion = "22"
 
 	RsGlobalIncludes = []string{
 		"external/clang/lib/Headers",
@@ -460,6 +457,9 @@ var (
 func init() {
 	if runtime.GOOS == "linux" {
 		commonGlobalCflags = append(commonGlobalCflags, "-fdebug-prefix-map=/proc/self/cwd=")
+	}
+	if runtime.GOOS == "darwin" {
+		commonGlobalCflags = append(commonGlobalCflags, "-Wno-unguarded-availability")
 	}
 
 	pctx.StaticVariable("CommonGlobalConlyflags", strings.Join(commonGlobalConlyflags, " "))
@@ -529,7 +529,13 @@ func init() {
 
 	pctx.StaticVariable("NoOverride64GlobalCflags", strings.Join(noOverride64GlobalCflags, " "))
 	pctx.StaticVariable("HostGlobalCflags", strings.Join(hostGlobalCflags, " "))
-	pctx.StaticVariable("NoOverrideExternalGlobalCflags", strings.Join(noOverrideExternalGlobalCflags, " "))
+	pctx.VariableFunc("NoOverrideExternalGlobalCflags", func(ctx android.PackageVarContext) string {
+		flags := noOverrideExternalGlobalCflags
+		if !ctx.Config().ReleaseUseFnoCommonFor3pCode() {
+			flags = append(flags, "-fcommon")
+		}
+		return strings.Join(flags, " ")
+	})
 	pctx.StaticVariable("CommonGlobalCppflags", strings.Join(commonGlobalCppflags, " "))
 	pctx.StaticVariable("NoOverrideTestsGlobalCflags", strings.Join(noOverrideTestsGlobalCflags, " "))
 	pctx.StaticVariable("TestsCflags", strings.Join(extraTestsCflags, " "))
@@ -555,18 +561,14 @@ func init() {
 		if override := ctx.Config().Getenv("LLVM_PREBUILTS_VERSION"); override != "" {
 			return override
 		}
-		return ctx.Config().ReleaseBuildClangVersion(ClangDefaultVersion)
+		return ClangVersion(ctx)
 	})
-	pctx.VariableFunc("ClangShortVersion", func(ctx android.PackageVarContext) string {
-		if override := ctx.Config().Getenv("LLVM_RELEASE_VERSION"); override != "" {
-			return override
-		}
-		return ctx.Config().ReleaseBuildClangShortVersion(ClangDefaultShortVersion)
+	pctx.VariableFunc("CppStdVersion", func(ctx android.PackageVarContext) string {
+		return ctx.Config().ReleaseBuildCppStdVersion(CppDefaultStdVersion)
 	})
 
 	pctx.StaticVariable("ClangPath", "${ClangBase}/${HostPrebuiltTag}/${ClangVersion}")
 	pctx.StaticVariable("ClangBin", "${ClangPath}/bin")
-	pctx.StaticVariable("ClangAsanLibDir", "${ClangBase}/linux-x86/${ClangVersion}/lib/clang/${ClangShortVersion}/lib/linux")
 
 	pctx.StaticVariable("WarningAllowedProjects", strings.Join(WarningAllowedProjects, " "))
 
@@ -627,7 +629,7 @@ func clangPathNoOnce(ctx android.PathContext) android.SourcePath {
 	if override := ctx.Config().Getenv("LLVM_PREBUILTS_BASE"); override != "" {
 		clangBase = override
 	}
-	clangVersion := ctx.Config().ReleaseBuildClangVersion(ClangDefaultVersion)
+	clangVersion := ClangVersion(ctx)
 	if override := ctx.Config().Getenv("LLVM_PREBUILTS_VERSION"); override != "" {
 		clangVersion = override
 	}
@@ -638,8 +640,8 @@ func ClangVersion(ctx android.PathContext) string {
 	return ctx.Config().ReleaseBuildClangVersion(ClangDefaultVersion)
 }
 
-func ClangShortVersion(ctx android.PathContext) string {
-	return ctx.Config().ReleaseBuildClangShortVersion(ClangDefaultShortVersion)
+func CppStdVersion(ctx android.PathContext) string {
+	return ctx.Config().ReleaseBuildCppStdVersion(CppDefaultStdVersion)
 }
 
 // Check if the Clang revision is greater or equal to minRev. Returns false if failed to parse.

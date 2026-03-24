@@ -124,7 +124,7 @@ func (p PackageContext) RuleFunc(name string,
 		if len(ctx.errors) > 0 {
 			return params, ctx.errors[0]
 		}
-		if ctx.Config().UseRemoteBuild() && params.Pool == nil {
+		if ctx.Config().REWrapperRemoteBuild() && params.Pool == nil {
 			// When USE_REWRAPPER=true is set and the rule is not supported by
 			// RBE, restrict jobs to the local parallelism value
 			params.Pool = localPool
@@ -322,6 +322,19 @@ func (p PackageContext) HostTool(name string) blueprint.HostTool {
 		return blueprint.HostToolParams{
 			Value: ctx.Config().HostToolPath(ctx, name).String(),
 			Deps:  []string{PathForPhony(ctx, "hostTool-"+name+"-deps").String()},
+		}
+	})
+}
+
+func (p PackageContext) PathInterposerTool(name string) blueprint.HostTool {
+	return p.HostToolFunc(func(ctx PathContext) blueprint.HostToolParams {
+		return blueprint.HostToolParams{
+			Value: PathForArbitraryOutput(ctx, ".path", name).String(),
+			Deps: []string{
+				PathForArbitraryOutput(ctx, ".path", name).String(),
+				PathForArbitraryOutput(ctx, ".path_interposer").String(),
+				PathForArbitraryOutput(ctx, ".path_interposer_origpath").String(),
+			},
 		}
 	})
 }

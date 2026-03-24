@@ -22,8 +22,6 @@ import (
 	"strconv"
 	"strings"
 
-	"android/soong/bloaty"
-
 	"github.com/google/blueprint"
 	"github.com/google/blueprint/depset"
 	"github.com/google/blueprint/proptools"
@@ -85,6 +83,7 @@ type RustInfo struct {
 	ProcMacroInfo                 *ProcMacroInfo
 	XrefRustFiles                 android.Paths
 	DocTimestampFile              android.OptionalPath
+	CollectDoc                    bool
 }
 
 var RustInfoProvider = blueprint.NewProvider[*RustInfo]()
@@ -1110,7 +1109,7 @@ func (mod *Module) toolchain(ctx android.BaseModuleContext) config.Toolchain {
 }
 
 func (mod *Module) ccToolchain(ctx android.BaseModuleContext) cc_config.Toolchain {
-	return cc_config.FindToolchain(ctx.Os(), ctx.Arch())
+	return cc_config.FindToolchain(ctx.Os(), ctx.Arch(), false)
 }
 
 func (d *Defaults) GenerateAndroidBuildActions(ctx android.ModuleContext) {
@@ -1193,14 +1192,8 @@ func (mod *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 		if buildOutput.kytheFile != nil {
 			mod.kytheFiles = append(mod.kytheFiles, buildOutput.kytheFile)
 		}
-		if _, ok := mod.compiler.(*objectDecorator); !ok && !ctx.Windows() {
-			// Bloaty doesn't recognize Windows object files.
-			// Since objects are inputs to other binaries, if there's bloat
-			// in one it should be reflected in the outputs which take them
-			// as inputs, so skipping this check for them should be fine.
-			bloaty.MeasureSizeForPaths(ctx, mod.compiler.strippedOutputFilePath(), android.OptionalPathForPath(mod.compiler.unstrippedOutputFilePath()))
-		}
 
+		deps.SrcFiles = append(deps.SrcFiles, mod.compiler.crateSources(ctx)...)
 		mod.docTimestampFile = mod.compiler.rustdoc(ctx, flags, deps)
 
 		apexInfo, _ := android.ModuleProvider(actx, android.ApexInfoProvider)
@@ -1260,6 +1253,7 @@ func (mod *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 		TransitiveAndroidMkSharedLibs: mod.transitiveAndroidMkSharedLibs,
 		XrefRustFiles:                 mod.XrefRustFiles(),
 		DocTimestampFile:              mod.docTimestampFile,
+		CollectDoc:                    config.DocConfigForDir(ctx.ModuleDir()),
 	}
 	if mod.compiler != nil {
 		rustInfo.CompilerInfo = &CompilerInfo{

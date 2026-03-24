@@ -867,7 +867,7 @@ func (library *libraryDecorator) crateRootPath(ctx ModuleContext) android.Path {
 
 func (library *libraryDecorator) getApiStubsCcFlags(ctx ModuleContext) cc.Flags {
 	ccFlags := cc.Flags{}
-	toolchain := cc_config.FindToolchain(ctx.Os(), ctx.Arch())
+	toolchain := cc_config.FindToolchain(ctx.Os(), ctx.Arch(), false)
 
 	platformSdkVersion := ""
 	if ctx.Device() {
@@ -879,7 +879,8 @@ func (library *libraryDecorator) getApiStubsCcFlags(ctx ModuleContext) cc.Flags 
 	ccFlags = cc.CommonLinkerFlags(ctx, ccFlags, toolchain, false)
 	ccFlags = cc.CommonLibraryLinkerFlags(ctx, ccFlags, toolchain, library.getStem(ctx))
 	ccFlags = cc.AddStubLibraryCompilerFlags(ccFlags)
-	ccFlags = cc.AddTargetFlags(ctx, ccFlags, toolchain, minSdkVersion, false)
+	ccFlags = cc.AddTargetFlags(ctx, ccFlags, toolchain, minSdkVersion, false, false)
+	ccFlags = cc.AddStubLibraryLinkerFlags(ctx, ccFlags)
 
 	return ccFlags
 }
@@ -896,7 +897,7 @@ func (library *libraryDecorator) compileModuleLibApiStubs(ctx ModuleContext, ccF
 		BaseModuleName: mod.BaseModuleName(),
 		ModuleName:     ctx.ModuleName(),
 	}
-	flag := cc.GetApiStubsFlags(apiParams)
+	flag := cc.GetApiStubsFlags(ctx, apiParams)
 
 	nativeAbiResult := cc.ParseNativeAbiDefinition(ctx, symbolFile,
 		android.ApiLevelOrPanic(ctx, library.MutatedProperties.StubsVersion), flag)
@@ -1187,7 +1188,7 @@ func (libstdTransitionMutator) IncomingTransition(ctx android.IncomingTransition
 				if incomingVariation != "" {
 					return incomingVariation
 				}
-				if m.compiler.noStdlibs() {
+				if m.compiler.noStdlibs() || (ctx.Device() && library.buildNoStd()) {
 					return "rlib-core"
 				} else {
 					return "rlib-std"

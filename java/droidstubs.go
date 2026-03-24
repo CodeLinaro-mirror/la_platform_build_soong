@@ -855,10 +855,19 @@ func metalavaCmd(ctx android.ModuleContext, rule *android.RuleBuilder, srcs andr
 
 	cmd.BuiltTool("metalava").ImplicitTool(ctx.Config().HostJavaToolPath(ctx, "metalava.jar")).
 		Flag(config.JavacVmFlags).
+		Flag(config.MetalavaVmFlags).
 		Flag(config.MetalavaAddOpens).
 		FlagWithArg("--java-source ", params.javaVersion.String()).
 		FlagWithRspFileInputList("@", android.PathForModuleOut(ctx, fmt.Sprintf("%s.metalava.rsp", params.stubsType.String())), srcs).
 		FlagWithInput("@", srcJarList)
+
+	// If this is for the host then pass the --jdk-home option to Metalava and
+	// make sure the files necessary to access the JDK class files are available.
+	if ctx.Host() {
+		homeDir := ctx.Config().Getenv("ANDROID_JAVA_HOME")
+		cmd.FlagWithArg("--jdk-home ", homeDir)
+		cmd.Implicits(ctx.GlobFilesOutsideModuleDir(filepath.Join(homeDir, "**/*"), nil))
+	}
 
 	// Metalava does not differentiate between bootclasspath and classpath and has not done so for
 	// years, so it is unlikely to change any time soon.
@@ -869,6 +878,9 @@ func metalavaCmd(ctx android.ModuleContext, rule *android.RuleBuilder, srcs andr
 	}
 
 	cmd.Flag(config.MetalavaFlags)
+
+	providerName := ctx.Config().GetenvWithDefault("SOONG_METALAVA_SOURCE_MODEL_PROVIDER", "psi")
+	cmd.FlagWithArg("--source-model-provider ", providerName)
 
 	addMetalavaConfigFilesToCmd(cmd, configFiles)
 
@@ -1061,6 +1073,10 @@ func (d *Droidstubs) everythingStubCmd(ctx android.ModuleContext, params stubsCo
 	}
 
 	cmd := d.commonMetalavaStubCmd(ctx, rule, commonCmdParams)
+
+	// Add the default Metalava format flags used for producing the signature files that are checked
+	// in and the stub files against which Android itself builds.
+	cmd.Flag(config.DefaultMetalavaEverythingFormatFlags)
 
 	d.everythingOptionalCmd(ctx, cmd, params.doApiLint, params.doCheckReleased)
 
@@ -1284,6 +1300,14 @@ func (d *Droidstubs) optionalStubCmd(ctx android.ModuleContext, params stubsComm
 	}
 
 	cmd := d.commonMetalavaStubCmd(ctx, rule, params)
+
+	// Add the Metalava format specifier used for producing the signature files and stubs that are
+	// finalized and end up in the Android SDK and mainline module drops.
+	formatSpecifier := ctx.Config().GetenvWithDefault(
+		"SOONG_SDK_SNAPSHOT_SIGNATURE_FORMAT_SPECIFIER",
+		config.DefaultMetalavaExportableFormatSpecifier,
+	)
+	cmd.FlagWithArg("--format ", formatSpecifier)
 
 	if params.stubConfig.doApiLint {
 		// Pass the lint baseline file as an input to resolve the lint errors.

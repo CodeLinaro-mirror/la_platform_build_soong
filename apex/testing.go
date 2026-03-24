@@ -21,6 +21,7 @@ const testDefaultUpdatableModuleVersion = "340090000"
 var PrepareForTestWithApexBuildComponents = android.GroupFixturePreparers(
 	android.FixtureRegisterWithContext(registerApexBuildComponents),
 	android.FixtureRegisterWithContext(registerApexKeyBuildComponents),
+	android.PrepareForTestWithHostTools("cp_if_changed"),
 	android.FixtureAddTextFile("all_apex_certs/Android.bp", `
 		all_apex_certs { name: "all_apex_certs" }
 	`),
@@ -34,6 +35,17 @@ var PrepareForTestWithApexBuildComponents = android.GroupFixturePreparers(
 		"build/soong/scripts/unpack-prebuilt-apex.sh": nil,
 		// Needed by all_apex_certs
 		"build/make/target/product/security/testkey.x509.pem": nil,
+		"prebuilts/build-tools/linux-x86/bin/one-true-awk":    nil,
 	}.AddToFixture(),
 	android.PrepareForTestWithBuildFlag("RELEASE_DEFAULT_UPDATABLE_MODULE_VERSION", testDefaultUpdatableModuleVersion),
+	android.PrepareForTestWithHostTools(
+		"apex_compression_tool",
+		"cat",
+		"cp",
+		"find",
+		"echo",
+		"sort",
+		"zipinfo",
+		"zipsync",
+	),
 )

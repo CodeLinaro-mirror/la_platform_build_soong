@@ -16,7 +16,6 @@ package build
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -144,10 +143,20 @@ func SetupPath(ctx Context, config Config) {
 		ctx.Fatalln("Failed to build path interposer:", err)
 	}
 
-	// Save the original $PATH in a file.
-	if err := ioutil.WriteFile(interposer+"_origpath", []byte(origPath), 0777); err != nil {
-		ctx.Fatalln("Failed to write original path:", err)
+	// envsetup.sh can keep prepending paths across consecutive runs, causing
+	// origPath to change slightly. Deduplicate the path list before checking.
+	var cleanPath []string
+	seenPath := make(map[string]bool)
+	for _, p := range filepath.SplitList(origPath) {
+		if p != "" && !seenPath[p] {
+			seenPath[p] = true
+			cleanPath = append(cleanPath, p)
+		}
 	}
+	cleanOrigPath := strings.Join(cleanPath, string(os.PathListSeparator))
+
+	// Save the original $PATH in a file if it has changed.
+	writeValueIfChanged(ctx, interposer+"_origpath", cleanOrigPath)
 
 	// Communication with the path interposer works over log entries. Set up the
 	// listener channel for the log entries here.
@@ -196,11 +205,12 @@ func SetupPath(ctx Context, config Config) {
 	}()
 
 	// Create the .path directory.
-	ensureEmptyDirectoriesExist(ctx, myPath)
+	// Do not wipe out the entire .path directory; only ensure that the directory exists.
+	ensureDirectoriesExist(ctx, myPath)
 
 	// Compute the full list of binaries available in the original $PATH.
 	var execs []string
-	for _, pathEntry := range filepath.SplitList(origPath) {
+	for _, pathEntry := range filepath.SplitList(cleanOrigPath) {
 		if pathEntry == "" {
 			// Ignore the current directory
 			continue
@@ -228,6 +238,11 @@ func SetupPath(ctx Context, config Config) {
 			continue
 		}
 
+		// check if a file already exists and skip if it does
+		if _, err := os.Lstat(filepath.Join(myPath, name)); err == nil {
+			continue
+		}
+
 		err := os.Symlink("../.path_interposer", filepath.Join(myPath, name))
 		// Intentionally ignore existing files -- that means that we
 		// just created it, and the first one should win.
@@ -236,12 +251,25 @@ func SetupPath(ctx Context, config Config) {
 		}
 	}
 
+	myPathWithSrc := myPath
+	// Should be appended with /src if OutDir is not absolute.
+	if !filepath.IsAbs(myPath) {
+		myPathWithSrc = filepath.Join("/src", myPath)
+	}
 	myPath, _ = filepath.Abs(myPath)
 
 	// We put some prebuilts in $PATH, since it's infeasible to add dependencies
 	// for all of them.
-	prebuiltsPath, _ := filepath.Abs("prebuilts/build-tools/path/" + config.PrebuiltOS())
+	prebuiltsPathRel := "prebuilts/build-tools/path/" + config.PrebuiltOS()
+	prebuiltsPath, _ := filepath.Abs(prebuiltsPathRel)
 	myPath = prebuiltsPath + string(os.PathListSeparator) + myPath
+
+	// Add /src/$OUT_DIR/.path to PATH for action sandboxed build.
+	if config.IsActionSandboxedBuild() {
+		myPath = myPath + string(os.PathListSeparator) + myPathWithSrc
+		prebuiltsPathRel = filepath.Join("/src", prebuiltsPathRel)
+		myPath = myPath + string(os.PathListSeparator) + prebuiltsPathRel
+	}
 
 	// Replace the $PATH variable with the path_interposer symlinks, and
 	// checked-in prebuilts.

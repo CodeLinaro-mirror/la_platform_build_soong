@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 
@@ -537,9 +538,21 @@ func (linker *stubDecorator) Name(name string) string {
 	return name + ndkLibrarySuffix
 }
 
+func AddStubLibraryLinkerFlags(ctx android.ModuleContext, flags Flags) Flags {
+	// Undo the global -Wl,-z,bti-report=error for stubs, because there's
+	// no point having BTI in stubs, and it's easier to just undo the
+	// bti-report option than it is to actually add BTI.
+	if ctx.Target().Arch.ArchType == android.Arm64 &&
+		slices.Contains(ctx.Target().Arch.ArchFeatures, "branchprot") {
+		flags.Local.LdFlags = append(flags.Local.LdFlags, "-Wl,-z,bti-report=none")
+	}
+	return flags
+}
+
 func (stub *stubDecorator) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 	stub.libraryDecorator.libName = ctx.baseModuleName()
-	return stub.libraryDecorator.linkerFlags(ctx, flags)
+	flags = stub.libraryDecorator.linkerFlags(ctx, flags)
+	return AddStubLibraryLinkerFlags(ctx, flags)
 }
 
 func (stub *stubDecorator) link(ctx ModuleContext, flags Flags, deps PathDeps,
@@ -615,15 +628,14 @@ func newStubLibrary() *Module {
 	module.SetDefaultableHook(func(ctx android.DefaultableHookContext) {
 		libName := strings.TrimSuffix(ctx.ModuleName(), ndkLibrarySuffix)
 		if proptools.Bool(stub.properties.Bypass_artless_denylist) {
-			// This module opted out of the denylist, but all_artless_denylists
-			// unconditionally add dependencies based on the list of NDK libraries.
-			// Generate an empty cc_library_static target to make it a noop.
+			// Create an empty denylist to satisfy all_artless_denylists, which
+			// unconditionally adds dependencies for all NDK libraries.
 			props := &struct {
 				Name *string
 			}{
 				Name: proptools.StringPtr(libName + "_denylist"),
 			}
-			ctx.CreateModule(LibraryStaticFactory, props)
+			ctx.CreateModule(ArtlessDenylistFactory, props)
 			return
 		}
 		if stub.properties.Symbol_file != nil {

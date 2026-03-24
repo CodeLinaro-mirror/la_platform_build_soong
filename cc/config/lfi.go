@@ -1,4 +1,4 @@
-// Copyright 2022 Google Inc. All rights reserved.
+// Copyright 2015 Google Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,27 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package android
+package config
 
-type ApiSurface int
-
-// TODO(b/246656800): Reconcile with android.SdkKind
-const (
-	// API surface provided by platform and mainline modules to other mainline modules
-	ModuleLibApi ApiSurface = iota
-	PublicApi               // Aka NDK
-	VendorApi               // Aka LLNDK
-)
-
-func (a ApiSurface) String() string {
-	switch a {
-	case ModuleLibApi:
-		return "module-libapi"
-	case PublicApi:
-		return "publicapi"
-	case VendorApi:
-		return "vendorapi"
-	default:
-		return "invalid"
-	}
+type toolchainLFI struct {
+	toolchainBase
+	toolchainNoCrt
 }
+
+func (toolchainLFI) ShlibSuffix() string { return ".so" }
+
+func (toolchainLFI) ExecutableSuffix() string { return "" }
+
+func (toolchainLFI) AvailableLibraries() []string { return nil }
+
+func (toolchainLFI) Lfi() bool { return true }
