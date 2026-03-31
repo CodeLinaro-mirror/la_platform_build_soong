@@ -2683,6 +2683,10 @@ func (r Target) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) error {
 		return err
 	}
 
+	if err = gobtools.EncodeBool(buf, r.LFI); err != nil {
+		return err
+	}
+
 	if err = gobtools.EncodeBool(buf, r.HostCross); err != nil {
 		return err
 	}
@@ -2691,7 +2695,7 @@ func (r Target) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) error {
 
 func (r Target) CustomHash(hasher *proptools.Hasher) error {
 	hasher.WriteString(":android.Target")
-	hasher.WriteInt(6)
+	hasher.WriteInt(7)
 	if err := r.Os.CustomHash(hasher); err != nil {
 		return err
 	}
@@ -2709,6 +2713,12 @@ func (r Target) CustomHash(hasher *proptools.Hasher) error {
 	hasher.WriteString(r.NativeBridgeHostArchName)
 	hasher.WriteString(":.string")
 	hasher.WriteString(r.NativeBridgeRelativePath)
+	hasher.WriteString(":.bool")
+	if r.LFI {
+		hasher.WriteByte(1)
+	} else {
+		hasher.WriteByte(0)
+	}
 	hasher.WriteString(":.bool")
 	if r.HostCross {
 		hasher.WriteByte(1)
@@ -2742,6 +2752,11 @@ func (r *Target) Decode(ctx gobtools.EncContext, buf *bytes.Reader) error {
 	}
 
 	err = gobtools.DecodeString(buf, &r.NativeBridgeRelativePath)
+	if err != nil {
+		return err
+	}
+
+	err = gobtools.DecodeBool(buf, &r.LFI)
 	if err != nil {
 		return err
 	}
@@ -5045,6 +5060,7 @@ func init() {
 	JarJarRenameGobRegId = gobtools.RegisterType(func() gobtools.CustomDec { return new(JarJarRename) })
 	BaseJarJarProviderDataGobRegId = gobtools.RegisterType(func() gobtools.CustomDec { return new(BaseJarJarProviderData) })
 	CommonModuleInfoGobRegId = gobtools.RegisterType(func() gobtools.CustomDec { return new(CommonModuleInfo) })
+	NinjaPhoniesGlobsInfoGobRegId = gobtools.RegisterType(func() gobtools.CustomDec { return new(NinjaPhoniesGlobsInfo) })
 	ApiLevelOrPlatformGobRegId = gobtools.RegisterType(func() gobtools.CustomDec { return new(ApiLevelOrPlatform) })
 	HostToolInfoGobRegId = gobtools.RegisterType(func() gobtools.CustomDec { return new(HostToolInfo) })
 	DistInfoGobRegId = gobtools.RegisterType(func() gobtools.CustomDec { return new(DistInfo) })
@@ -6696,6 +6712,10 @@ func (r CommonModuleInfo) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) err
 		return err
 	}
 
+	if err = gobtools.EncodeString(buf, r.BaseModuleType); err != nil {
+		return err
+	}
+
 	if err = gobtools.EncodeBool(buf, r.CanHaveApexVariants); err != nil {
 		return err
 	}
@@ -7166,19 +7186,8 @@ func (r CommonModuleInfo) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) err
 			if err = gobtools.EncodeString(buf, val32); err != nil {
 				return err
 			}
-			if val33 == nil {
-				if err = gobtools.EncodeInt(buf, -1); err != nil {
-					return err
-				}
-			} else {
-				if err = gobtools.EncodeInt(buf, len(val33)); err != nil {
-					return err
-				}
-				for val34 := 0; val34 < len(val33); val34++ {
-					if err = gobtools.EncodeInterface(ctx, buf, val33[val34]); err != nil {
-						return err
-					}
-				}
+			if err = val33.Encode(ctx, buf); err != nil {
+				return err
 			}
 		}
 	}
@@ -7187,7 +7196,7 @@ func (r CommonModuleInfo) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) err
 
 func (r CommonModuleInfo) CustomHash(hasher *proptools.Hasher) error {
 	hasher.WriteString(":android.CommonModuleInfo")
-	hasher.WriteInt(63)
+	hasher.WriteInt(64)
 	hasher.WriteString(":.bool")
 	if r.Enabled {
 		hasher.WriteByte(1)
@@ -7205,6 +7214,8 @@ func (r CommonModuleInfo) CustomHash(hasher *proptools.Hasher) error {
 	}
 	hasher.WriteString(":.string")
 	hasher.WriteString(r.BaseModuleName)
+	hasher.WriteString(":.string")
+	hasher.WriteString(r.BaseModuleType)
 	hasher.WriteString(":.bool")
 	if r.CanHaveApexVariants {
 		hasher.WriteByte(1)
@@ -7744,7 +7755,7 @@ func (r CommonModuleInfo) CustomHash(hasher *proptools.Hasher) error {
 			return err
 		}
 	}
-	hasher.WriteString(":.map[string]Paths")
+	hasher.WriteString(":.map[string]NinjaPhoniesGlobsInfo")
 	hasher.WriteInt(len(r.NinjaPhonies))
 	val55 := make([]string, 0, len(r.NinjaPhonies))
 	for val57 := range r.NinjaPhonies {
@@ -7754,35 +7765,8 @@ func (r CommonModuleInfo) CustomHash(hasher *proptools.Hasher) error {
 	for _, val56 := range val55 {
 		hasher.WriteString(":.string")
 		hasher.WriteString(val56)
-		hasher.WriteString(":android.Paths")
-		hasher.WriteString(":.[]Path")
-		hasher.WriteInt(len(r.NinjaPhonies[val56]))
-		for val58 := 0; val58 < len(r.NinjaPhonies[val56]); val58++ {
-			hasher.WriteString(":android.Path")
-			val59 := r.NinjaPhonies[val56][val58] == nil
-			if val59 {
-				hasher.WriteByte(0)
-			} else {
-				if v := reflect.ValueOf(r.NinjaPhonies[val56][val58]); v.Kind() == reflect.Ptr {
-					if v.IsNil() {
-						panic(fmt.Errorf("nil pointer is not supported in interface"))
-					} else {
-						val60 := r.NinjaPhonies[val56][val58] == nil
-						if val60 {
-							hasher.WriteByte(0)
-						} else {
-							val61 := func(hasher *proptools.Hasher) error {
-								return r.NinjaPhonies[val56][val58].(proptools.CustomHash).CustomHash(hasher)
-							}
-							if err := proptools.HashReference(hasher, uintptr(v.Pointer()), val61); err != nil {
-								return err
-							}
-						}
-					}
-				} else {
-					r.NinjaPhonies[val56][val58].(proptools.CustomHash).CustomHash(hasher)
-				}
-			}
+		if err := r.NinjaPhonies[val56].CustomHash(hasher); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -7806,6 +7790,11 @@ func (r *CommonModuleInfo) Decode(ctx gobtools.EncContext, buf *bytes.Reader) er
 	}
 
 	err = gobtools.DecodeString(buf, &r.BaseModuleName)
+	if err != nil {
+		return err
+	}
+
+	err = gobtools.DecodeString(buf, &r.BaseModuleType)
 	if err != nil {
 		return err
 	}
@@ -7928,75 +7917,75 @@ func (r *CommonModuleInfo) Decode(ctx gobtools.EncContext, buf *bytes.Reader) er
 		return err
 	}
 
-	var val30 int
-	err = gobtools.DecodeInt(buf, &val30)
+	var val31 int
+	err = gobtools.DecodeInt(buf, &val31)
 	if err != nil {
 		return err
 	}
-	if val30 != -1 {
-		r.RequiredModuleNames = make([]string, val30)
-		for val31 := 0; val31 < int(val30); val31++ {
-			err = gobtools.DecodeString(buf, &r.RequiredModuleNames[val31])
+	if val31 != -1 {
+		r.RequiredModuleNames = make([]string, val31)
+		for val32 := 0; val32 < int(val31); val32++ {
+			err = gobtools.DecodeString(buf, &r.RequiredModuleNames[val32])
 			if err != nil {
 				return err
 			}
 		}
 	}
 
-	var val34 int
-	err = gobtools.DecodeInt(buf, &val34)
+	var val35 int
+	err = gobtools.DecodeInt(buf, &val35)
 	if err != nil {
 		return err
 	}
-	if val34 != -1 {
-		r.HostRequiredModuleNames = make([]string, val34)
-		for val35 := 0; val35 < int(val34); val35++ {
-			err = gobtools.DecodeString(buf, &r.HostRequiredModuleNames[val35])
+	if val35 != -1 {
+		r.HostRequiredModuleNames = make([]string, val35)
+		for val36 := 0; val36 < int(val35); val36++ {
+			err = gobtools.DecodeString(buf, &r.HostRequiredModuleNames[val36])
 			if err != nil {
 				return err
 			}
 		}
 	}
 
-	var val38 int
-	err = gobtools.DecodeInt(buf, &val38)
+	var val39 int
+	err = gobtools.DecodeInt(buf, &val39)
 	if err != nil {
 		return err
 	}
-	if val38 != -1 {
-		r.TargetRequiredModuleNames = make([]string, val38)
-		for val39 := 0; val39 < int(val38); val39++ {
-			err = gobtools.DecodeString(buf, &r.TargetRequiredModuleNames[val39])
+	if val39 != -1 {
+		r.TargetRequiredModuleNames = make([]string, val39)
+		for val40 := 0; val40 < int(val39); val40++ {
+			err = gobtools.DecodeString(buf, &r.TargetRequiredModuleNames[val40])
 			if err != nil {
 				return err
 			}
 		}
 	}
 
-	var val42 int
-	err = gobtools.DecodeInt(buf, &val42)
+	var val43 int
+	err = gobtools.DecodeInt(buf, &val43)
 	if err != nil {
 		return err
 	}
-	if val42 != -1 {
-		r.VintfFragmentModuleNames = make([]string, val42)
-		for val43 := 0; val43 < int(val42); val43++ {
-			err = gobtools.DecodeString(buf, &r.VintfFragmentModuleNames[val43])
+	if val43 != -1 {
+		r.VintfFragmentModuleNames = make([]string, val43)
+		for val44 := 0; val44 < int(val43); val44++ {
+			err = gobtools.DecodeString(buf, &r.VintfFragmentModuleNames[val44])
 			if err != nil {
 				return err
 			}
 		}
 	}
 
-	var val46 int
-	err = gobtools.DecodeInt(buf, &val46)
+	var val47 int
+	err = gobtools.DecodeInt(buf, &val47)
 	if err != nil {
 		return err
 	}
-	if val46 != -1 {
-		r.Dists = make([]Dist, val46)
-		for val47 := 0; val47 < int(val46); val47++ {
-			if err = r.Dists[val47].Decode(ctx, buf); err != nil {
+	if val47 != -1 {
+		r.Dists = make([]Dist, val47)
+		for val48 := 0; val48 < int(val47); val48++ {
+			if err = r.Dists[val48].Decode(ctx, buf); err != nil {
 				return err
 			}
 		}
@@ -8017,30 +8006,30 @@ func (r *CommonModuleInfo) Decode(ctx gobtools.EncContext, buf *bytes.Reader) er
 		return err
 	}
 
-	var val53 int
-	err = gobtools.DecodeInt(buf, &val53)
+	var val54 int
+	err = gobtools.DecodeInt(buf, &val54)
 	if err != nil {
 		return err
 	}
-	if val53 != -1 {
-		r.ApexAvailable = make([]string, val53)
-		for val54 := 0; val54 < int(val53); val54++ {
-			err = gobtools.DecodeString(buf, &r.ApexAvailable[val54])
+	if val54 != -1 {
+		r.ApexAvailable = make([]string, val54)
+		for val55 := 0; val55 < int(val54); val55++ {
+			err = gobtools.DecodeString(buf, &r.ApexAvailable[val55])
 			if err != nil {
 				return err
 			}
 		}
 	}
 
-	var val57 int
-	err = gobtools.DecodeInt(buf, &val57)
+	var val58 int
+	err = gobtools.DecodeInt(buf, &val58)
 	if err != nil {
 		return err
 	}
-	if val57 != -1 {
-		r.ApexAvailableFor = make([]string, val57)
-		for val58 := 0; val58 < int(val57); val58++ {
-			err = gobtools.DecodeString(buf, &r.ApexAvailableFor[val58])
+	if val58 != -1 {
+		r.ApexAvailableFor = make([]string, val58)
+		for val59 := 0; val59 < int(val58); val59++ {
+			err = gobtools.DecodeString(buf, &r.ApexAvailableFor[val59])
 			if err != nil {
 				return err
 			}
@@ -8056,320 +8045,306 @@ func (r *CommonModuleInfo) Decode(ctx gobtools.EncContext, buf *bytes.Reader) er
 		return err
 	}
 
-	var val63 bool
-	if err = gobtools.DecodeBool(buf, &val63); err != nil {
+	var val64 bool
+	if err = gobtools.DecodeBool(buf, &val64); err != nil {
 		return err
 	}
-	if !val63 {
-		var val62 ComplianceMetadataInfo
-		if err = val62.Decode(ctx, buf); err != nil {
+	if !val64 {
+		var val63 ComplianceMetadataInfo
+		if err = val63.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.ComplianceMetadata = &val62
+		r.ComplianceMetadata = &val63
 	}
 
-	var val66 bool
-	if err = gobtools.DecodeBool(buf, &val66); err != nil {
+	var val67 bool
+	if err = gobtools.DecodeBool(buf, &val67); err != nil {
 		return err
 	}
-	if !val66 {
-		var val65 ModuleInfoJSONInfo
-		if err = val65.Decode(ctx, buf); err != nil {
+	if !val67 {
+		var val66 ModuleInfoJSONInfo
+		if err = val66.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.ModuleInfoJSON = &val65
+		r.ModuleInfoJSON = &val66
 	}
 
-	var val69 bool
-	if err = gobtools.DecodeBool(buf, &val69); err != nil {
+	var val70 bool
+	if err = gobtools.DecodeBool(buf, &val70); err != nil {
 		return err
 	}
-	if !val69 {
-		var val68 unstableInfo
-		if err = val68.Decode(ctx, buf); err != nil {
+	if !val70 {
+		var val69 unstableInfo
+		if err = val69.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.UnstableInfo = &val68
+		r.UnstableInfo = &val69
 	}
 
-	var val72 bool
-	if err = gobtools.DecodeBool(buf, &val72); err != nil {
+	var val73 bool
+	if err = gobtools.DecodeBool(buf, &val73); err != nil {
 		return err
 	}
-	if !val72 {
-		var val71 LicenseMetadataInfo
-		if err = val71.Decode(ctx, buf); err != nil {
+	if !val73 {
+		var val72 LicenseMetadataInfo
+		if err = val72.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.LicenseMetadata = &val71
+		r.LicenseMetadata = &val72
 	}
 
-	var val75 bool
-	if err = gobtools.DecodeBool(buf, &val75); err != nil {
+	var val76 bool
+	if err = gobtools.DecodeBool(buf, &val76); err != nil {
 		return err
 	}
-	if !val75 {
-		var val74 LicensesInfo
-		if err = val74.Decode(ctx, buf); err != nil {
+	if !val76 {
+		var val75 LicensesInfo
+		if err = val75.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.Licenses = &val74
+		r.Licenses = &val75
 	}
 
-	var val78 bool
-	if err = gobtools.DecodeBool(buf, &val78); err != nil {
+	var val79 bool
+	if err = gobtools.DecodeBool(buf, &val79); err != nil {
 		return err
 	}
-	if !val78 {
-		var val77 PhonyInfo
-		if err = val77.Decode(ctx, buf); err != nil {
+	if !val79 {
+		var val78 PhonyInfo
+		if err = val78.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.Phonies = &val77
+		r.Phonies = &val78
 	}
 
-	var val81 bool
-	if err = gobtools.DecodeBool(buf, &val81); err != nil {
+	var val82 bool
+	if err = gobtools.DecodeBool(buf, &val82); err != nil {
 		return err
 	}
-	if !val81 {
-		var val80 OutputFilesInfo
-		if err = val80.Decode(ctx, buf); err != nil {
+	if !val82 {
+		var val81 OutputFilesInfo
+		if err = val81.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.OutputFiles = &val80
+		r.OutputFiles = &val81
 	}
 
-	var val84 bool
-	if err = gobtools.DecodeBool(buf, &val84); err != nil {
+	var val85 bool
+	if err = gobtools.DecodeBool(buf, &val85); err != nil {
 		return err
 	}
-	if !val84 {
-		var val83 ModuleBuildTargetsInfo
-		if err = val83.Decode(ctx, buf); err != nil {
+	if !val85 {
+		var val84 ModuleBuildTargetsInfo
+		if err = val84.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.ModuleBuildTargets = &val83
+		r.ModuleBuildTargets = &val84
 	}
 
-	var val87 bool
-	if err = gobtools.DecodeBool(buf, &val87); err != nil {
+	var val88 bool
+	if err = gobtools.DecodeBool(buf, &val88); err != nil {
 		return err
 	}
-	if !val87 {
-		var val86 HostToolInfo
-		if err = val86.Decode(ctx, buf); err != nil {
+	if !val88 {
+		var val87 HostToolInfo
+		if err = val87.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.HostToolInfo = &val86
+		r.HostToolInfo = &val87
 	}
 
-	var val90 bool
-	if err = gobtools.DecodeBool(buf, &val90); err != nil {
+	var val91 bool
+	if err = gobtools.DecodeBool(buf, &val91); err != nil {
 		return err
 	}
-	if !val90 {
-		var val89 LogtagsInfo
-		if err = val89.Decode(ctx, buf); err != nil {
+	if !val91 {
+		var val90 LogtagsInfo
+		if err = val90.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.Logtags = &val89
+		r.Logtags = &val90
 	}
 
-	var val93 bool
-	if err = gobtools.DecodeBool(buf, &val93); err != nil {
+	var val94 bool
+	if err = gobtools.DecodeBool(buf, &val94); err != nil {
 		return err
 	}
-	if !val93 {
-		var val92 TestModuleInformation
-		if err = val92.Decode(ctx, buf); err != nil {
+	if !val94 {
+		var val93 TestModuleInformation
+		if err = val93.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.TestModuleInfo = &val92
+		r.TestModuleInfo = &val93
 	}
 
-	var val96 bool
-	if err = gobtools.DecodeBool(buf, &val96); err != nil {
+	var val97 bool
+	if err = gobtools.DecodeBool(buf, &val97); err != nil {
 		return err
 	}
-	if !val96 {
-		var val95 SymbolicOutputInfos
-		var val99 int
-		err = gobtools.DecodeInt(buf, &val99)
+	if !val97 {
+		var val96 SymbolicOutputInfos
+		var val100 int
+		err = gobtools.DecodeInt(buf, &val100)
 		if err != nil {
 			return err
 		}
-		if val99 != -1 {
-			val95 = make([]*SymbolicOutputInfo, val99)
-			for val100 := 0; val100 < int(val99); val100++ {
-				var val102 bool
-				if err = gobtools.DecodeBool(buf, &val102); err != nil {
+		if val100 != -1 {
+			val96 = make([]*SymbolicOutputInfo, val100)
+			for val101 := 0; val101 < int(val100); val101++ {
+				var val103 bool
+				if err = gobtools.DecodeBool(buf, &val103); err != nil {
 					return err
 				}
-				if !val102 {
-					var val101 SymbolicOutputInfo
-					if err = val101.Decode(ctx, buf); err != nil {
+				if !val103 {
+					var val102 SymbolicOutputInfo
+					if err = val102.Decode(ctx, buf); err != nil {
 						return err
 					}
-					val95[val100] = &val101
+					val96[val101] = &val102
 				}
 			}
 		}
-		r.SymbolicOutput = &val95
+		r.SymbolicOutput = &val96
 	}
 
-	var val105 bool
-	if err = gobtools.DecodeBool(buf, &val105); err != nil {
+	var val106 bool
+	if err = gobtools.DecodeBool(buf, &val106); err != nil {
 		return err
 	}
-	if !val105 {
-		var val104 IdeInfo
-		if err = val104.Decode(ctx, buf); err != nil {
+	if !val106 {
+		var val105 IdeInfo
+		if err = val105.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.IdeInfo = &val104
+		r.IdeInfo = &val105
 	}
 
-	var val108 bool
-	if err = gobtools.DecodeBool(buf, &val108); err != nil {
+	var val109 bool
+	if err = gobtools.DecodeBool(buf, &val109); err != nil {
 		return err
 	}
-	if !val108 {
-		var val107 aconfigPropagatingDeclarationsInfo
-		if err = val107.Decode(ctx, buf); err != nil {
+	if !val109 {
+		var val108 aconfigPropagatingDeclarationsInfo
+		if err = val108.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.AconfigPropagatingDeclarations = &val107
+		r.AconfigPropagatingDeclarations = &val108
 	}
 
-	var val111 bool
-	if err = gobtools.DecodeBool(buf, &val111); err != nil {
+	var val112 bool
+	if err = gobtools.DecodeBool(buf, &val112); err != nil {
 		return err
 	}
-	if !val111 {
-		var val110 MakeNamesInfo
-		if err = val110.Decode(ctx, buf); err != nil {
+	if !val112 {
+		var val111 MakeNamesInfo
+		if err = val111.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.MakeNames = &val110
+		r.MakeNames = &val111
 	}
 
-	var val114 bool
-	if err = gobtools.DecodeBool(buf, &val114); err != nil {
+	var val115 bool
+	if err = gobtools.DecodeBool(buf, &val115); err != nil {
 		return err
 	}
-	if !val114 {
-		var val113 SourceFilesInfo
-		if err = val113.Decode(ctx, buf); err != nil {
+	if !val115 {
+		var val114 SourceFilesInfo
+		if err = val114.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.SourceFiles = &val113
+		r.SourceFiles = &val114
 	}
 
-	var val117 bool
-	if err = gobtools.DecodeBool(buf, &val117); err != nil {
+	var val118 bool
+	if err = gobtools.DecodeBool(buf, &val118); err != nil {
 		return err
 	}
-	if !val117 {
-		var val116 GeneratedSourceInfo
-		if err = val116.Decode(ctx, buf); err != nil {
+	if !val118 {
+		var val117 GeneratedSourceInfo
+		if err = val117.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.GeneratedSource = &val116
+		r.GeneratedSource = &val117
 	}
 
-	var val120 bool
-	if err = gobtools.DecodeBool(buf, &val120); err != nil {
+	var val121 bool
+	if err = gobtools.DecodeBool(buf, &val121); err != nil {
 		return err
 	}
-	if !val120 {
-		var val119 ContainersInfo
-		if err = val119.Decode(ctx, buf); err != nil {
+	if !val121 {
+		var val120 ContainersInfo
+		if err = val120.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.Containers = &val119
+		r.Containers = &val120
 	}
 
-	var val123 bool
-	if err = gobtools.DecodeBool(buf, &val123); err != nil {
+	var val124 bool
+	if err = gobtools.DecodeBool(buf, &val124); err != nil {
 		return err
 	}
-	if !val123 {
-		var val122 PackageInfo
-		if err = val122.Decode(ctx, buf); err != nil {
+	if !val124 {
+		var val123 PackageInfo
+		if err = val123.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.PackageInfo = &val122
+		r.PackageInfo = &val123
 	}
 
-	var val126 bool
-	if err = gobtools.DecodeBool(buf, &val126); err != nil {
+	var val127 bool
+	if err = gobtools.DecodeBool(buf, &val127); err != nil {
 		return err
 	}
-	if !val126 {
-		var val125 AndroidMkDataInfo
-		if err = val125.Decode(ctx, buf); err != nil {
+	if !val127 {
+		var val126 AndroidMkDataInfo
+		if err = val126.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.AndroidMkData = &val125
+		r.AndroidMkData = &val126
 	}
 
-	var val129 bool
-	if err = gobtools.DecodeBool(buf, &val129); err != nil {
+	var val130 bool
+	if err = gobtools.DecodeBool(buf, &val130); err != nil {
 		return err
 	}
-	if !val129 {
-		var val128 BaseJarJarProviderData
-		if err = val128.Decode(ctx, buf); err != nil {
+	if !val130 {
+		var val129 BaseJarJarProviderData
+		if err = val129.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.BaseJarJarProviderData = &val128
+		r.BaseJarJarProviderData = &val129
 	}
 
-	var val132 bool
-	if err = gobtools.DecodeBool(buf, &val132); err != nil {
+	var val133 bool
+	if err = gobtools.DecodeBool(buf, &val133); err != nil {
 		return err
 	}
-	if !val132 {
-		var val131 InstallFilesInfo
-		if err = val131.Decode(ctx, buf); err != nil {
+	if !val133 {
+		var val132 InstallFilesInfo
+		if err = val132.Decode(ctx, buf); err != nil {
 			return err
 		}
-		r.InstallFiles = &val131
+		r.InstallFiles = &val132
 	}
 
-	var val134 int
-	err = gobtools.DecodeInt(buf, &val134)
+	var val135 int
+	err = gobtools.DecodeInt(buf, &val135)
 	if err != nil {
 		return err
 	}
-	if val134 != -1 {
-		r.NinjaPhonies = make(map[string]Paths, val134)
-		for val135 := 0; val135 < int(val134); val135++ {
-			var val136 string
-			var val137 Paths
-			err = gobtools.DecodeString(buf, &val136)
+	if val135 != -1 {
+		r.NinjaPhonies = make(map[string]NinjaPhoniesGlobsInfo, val135)
+		for val136 := 0; val136 < int(val135); val136++ {
+			var val137 string
+			var val138 NinjaPhoniesGlobsInfo
+			err = gobtools.DecodeString(buf, &val137)
 			if err != nil {
 				return err
 			}
-			var val141 int
-			err = gobtools.DecodeInt(buf, &val141)
-			if err != nil {
+			if err = val138.Decode(ctx, buf); err != nil {
 				return err
 			}
-			if val141 != -1 {
-				val137 = make([]Path, val141)
-				for val142 := 0; val142 < int(val141); val142++ {
-					if val144, err := gobtools.DecodeInterface(ctx, buf); err != nil {
-						return err
-					} else if val144 == nil {
-						val137[val142] = nil
-					} else {
-						val137[val142] = val144.(Path)
-					}
-				}
-			}
-			r.NinjaPhonies[val136] = val137
+			r.NinjaPhonies[val137] = val138
 		}
 	}
 
@@ -8380,6 +8355,95 @@ var CommonModuleInfoGobRegId int16
 
 func (r CommonModuleInfo) GetTypeId() int16 {
 	return CommonModuleInfoGobRegId
+}
+
+func (r NinjaPhoniesGlobsInfo) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) error {
+	var err error
+
+	val1 := r.Globs.Len() == 0
+	if err = gobtools.EncodeBool(buf, val1); err != nil {
+		return err
+	}
+	if !val1 {
+		if err = gobtools.EncodeReference(ctx, r.Globs, buf, func(v uniquelist.UniqueList[string], buf *bytes.Buffer) error {
+			val2 := v.ToSlice()
+			if val2 == nil {
+				if err = gobtools.EncodeInt(buf, -1); err != nil {
+					return err
+				}
+			} else {
+				if err = gobtools.EncodeInt(buf, len(val2)); err != nil {
+					return err
+				}
+				for val3 := 0; val3 < len(val2); val3++ {
+					if err = gobtools.EncodeString(buf, val2[val3]); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return err
+}
+
+func (r NinjaPhoniesGlobsInfo) CustomHash(hasher *proptools.Hasher) error {
+	hasher.WriteString(":android.NinjaPhoniesGlobsInfo")
+	hasher.WriteInt(1)
+	hasher.WriteString(":.uniquelist.UniqueList[string]")
+	val2 := func(hasher *proptools.Hasher, val1 string) error {
+		hasher.WriteString(":.string")
+		hasher.WriteString(val1)
+		return nil
+	}
+	if err := r.Globs.Hash(hasher, "string", val2); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *NinjaPhoniesGlobsInfo) Decode(ctx gobtools.EncContext, buf *bytes.Reader) error {
+	var err error
+
+	var val2 bool
+	if err = gobtools.DecodeBool(buf, &val2); err != nil {
+		return err
+	}
+	if !val2 {
+		tmp, err := gobtools.DecodeReference(ctx, &r.Globs, buf, func(value *uniquelist.UniqueList[string], buf *bytes.Reader) error {
+			var val3 []string
+			var val4 int
+			err = gobtools.DecodeInt(buf, &val4)
+			if err != nil {
+				return err
+			}
+			if val4 != -1 {
+				val3 = make([]string, val4)
+				for val5 := 0; val5 < int(val4); val5++ {
+					err = gobtools.DecodeString(buf, &val3[val5])
+					if err != nil {
+						return err
+					}
+				}
+			}
+			*value = uniquelist.Make(val3)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		r.Globs = *tmp
+	}
+
+	return err
+}
+
+var NinjaPhoniesGlobsInfoGobRegId int16
+
+func (r NinjaPhoniesGlobsInfo) GetTypeId() int16 {
+	return NinjaPhoniesGlobsInfoGobRegId
 }
 
 func (r ApiLevelOrPlatform) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) error {
@@ -9601,6 +9665,21 @@ func (r IdeInfo) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) error {
 		}
 	}
 
+	if r.Javacflags == nil {
+		if err = gobtools.EncodeInt(buf, -1); err != nil {
+			return err
+		}
+	} else {
+		if err = gobtools.EncodeInt(buf, len(r.Javacflags)); err != nil {
+			return err
+		}
+		for val21 := 0; val21 < len(r.Javacflags); val21++ {
+			if err = gobtools.EncodeString(buf, r.Javacflags[val21]); err != nil {
+				return err
+			}
+		}
+	}
+
 	if r.Annotation_processor_flags == nil {
 		if err = gobtools.EncodeInt(buf, -1); err != nil {
 			return err
@@ -9609,8 +9688,8 @@ func (r IdeInfo) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) error {
 		if err = gobtools.EncodeInt(buf, len(r.Annotation_processor_flags)); err != nil {
 			return err
 		}
-		for val21 := 0; val21 < len(r.Annotation_processor_flags); val21++ {
-			if err = gobtools.EncodeString(buf, r.Annotation_processor_flags[val21]); err != nil {
+		for val22 := 0; val22 < len(r.Annotation_processor_flags); val22++ {
+			if err = gobtools.EncodeString(buf, r.Annotation_processor_flags[val22]); err != nil {
 				return err
 			}
 		}
@@ -9624,8 +9703,8 @@ func (r IdeInfo) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) error {
 		if err = gobtools.EncodeInt(buf, len(r.Plugins)); err != nil {
 			return err
 		}
-		for val22 := 0; val22 < len(r.Plugins); val22++ {
-			if err = gobtools.EncodeString(buf, r.Plugins[val22]); err != nil {
+		for val23 := 0; val23 < len(r.Plugins); val23++ {
+			if err = gobtools.EncodeString(buf, r.Plugins[val23]); err != nil {
 				return err
 			}
 		}
@@ -9635,7 +9714,7 @@ func (r IdeInfo) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) error {
 
 func (r IdeInfo) CustomHash(hasher *proptools.Hasher) error {
 	hasher.WriteString(":android.IdeInfo")
-	hasher.WriteInt(26)
+	hasher.WriteInt(27)
 	hasher.WriteString(":.string")
 	hasher.WriteString(r.BaseModuleName)
 	hasher.WriteString(":.string")
@@ -9792,16 +9871,22 @@ func (r IdeInfo) CustomHash(hasher *proptools.Hasher) error {
 		hasher.WriteString(r.Kotlincflags[val23])
 	}
 	hasher.WriteString(":.[]string")
-	hasher.WriteInt(len(r.Annotation_processor_flags))
-	for val24 := 0; val24 < len(r.Annotation_processor_flags); val24++ {
+	hasher.WriteInt(len(r.Javacflags))
+	for val24 := 0; val24 < len(r.Javacflags); val24++ {
 		hasher.WriteString(":.string")
-		hasher.WriteString(r.Annotation_processor_flags[val24])
+		hasher.WriteString(r.Javacflags[val24])
+	}
+	hasher.WriteString(":.[]string")
+	hasher.WriteInt(len(r.Annotation_processor_flags))
+	for val25 := 0; val25 < len(r.Annotation_processor_flags); val25++ {
+		hasher.WriteString(":.string")
+		hasher.WriteString(r.Annotation_processor_flags[val25])
 	}
 	hasher.WriteString(":.[]string")
 	hasher.WriteInt(len(r.Plugins))
-	for val25 := 0; val25 < len(r.Plugins); val25++ {
+	for val26 := 0; val26 < len(r.Plugins); val26++ {
 		hasher.WriteString(":.string")
-		hasher.WriteString(r.Plugins[val25])
+		hasher.WriteString(r.Plugins[val26])
 	}
 	return nil
 }
@@ -10126,9 +10211,9 @@ func (r *IdeInfo) Decode(ctx gobtools.EncContext, buf *bytes.Reader) error {
 		return err
 	}
 	if val83 != -1 {
-		r.Annotation_processor_flags = make([]string, val83)
+		r.Javacflags = make([]string, val83)
 		for val84 := 0; val84 < int(val83); val84++ {
-			err = gobtools.DecodeString(buf, &r.Annotation_processor_flags[val84])
+			err = gobtools.DecodeString(buf, &r.Javacflags[val84])
 			if err != nil {
 				return err
 			}
@@ -10141,9 +10226,24 @@ func (r *IdeInfo) Decode(ctx gobtools.EncContext, buf *bytes.Reader) error {
 		return err
 	}
 	if val87 != -1 {
-		r.Plugins = make([]string, val87)
+		r.Annotation_processor_flags = make([]string, val87)
 		for val88 := 0; val88 < int(val87); val88++ {
-			err = gobtools.DecodeString(buf, &r.Plugins[val88])
+			err = gobtools.DecodeString(buf, &r.Annotation_processor_flags[val88])
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	var val91 int
+	err = gobtools.DecodeInt(buf, &val91)
+	if err != nil {
+		return err
+	}
+	if val91 != -1 {
+		r.Plugins = make([]string, val91)
+		for val92 := 0; val92 < int(val91); val92++ {
+			err = gobtools.DecodeString(buf, &r.Plugins[val92])
 			if err != nil {
 				return err
 			}
@@ -12183,19 +12283,30 @@ func (r PackagingSpec) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) error 
 		return err
 	}
 
-	val1 := r.effectiveLicenseFiles.ToSlice()
-	if val1 == nil {
-		if err = gobtools.EncodeInt(buf, -1); err != nil {
-			return err
-		}
-	} else {
-		if err = gobtools.EncodeInt(buf, len(val1)); err != nil {
-			return err
-		}
-		for val2 := 0; val2 < len(val1); val2++ {
-			if err = gobtools.EncodeInterface(ctx, buf, val1[val2]); err != nil {
-				return err
+	val1 := r.effectiveLicenseFiles.Len() == 0
+	if err = gobtools.EncodeBool(buf, val1); err != nil {
+		return err
+	}
+	if !val1 {
+		if err = gobtools.EncodeReference(ctx, r.effectiveLicenseFiles, buf, func(v uniquelist.UniqueList[Path], buf *bytes.Buffer) error {
+			val2 := v.ToSlice()
+			if val2 == nil {
+				if err = gobtools.EncodeInt(buf, -1); err != nil {
+					return err
+				}
+			} else {
+				if err = gobtools.EncodeInt(buf, len(val2)); err != nil {
+					return err
+				}
+				for val3 := 0; val3 < len(val2); val3++ {
+					if err = gobtools.EncodeInterface(ctx, buf, val2[val3]); err != nil {
+						return err
+					}
+				}
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
 	}
 
@@ -12207,19 +12318,30 @@ func (r PackagingSpec) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) error 
 		return err
 	}
 
-	val3 := r.aconfigPaths.ToSlice()
-	if val3 == nil {
-		if err = gobtools.EncodeInt(buf, -1); err != nil {
-			return err
-		}
-	} else {
-		if err = gobtools.EncodeInt(buf, len(val3)); err != nil {
-			return err
-		}
-		for val4 := 0; val4 < len(val3); val4++ {
-			if err = gobtools.EncodeInterface(ctx, buf, val3[val4]); err != nil {
-				return err
+	val4 := r.aconfigPaths.Len() == 0
+	if err = gobtools.EncodeBool(buf, val4); err != nil {
+		return err
+	}
+	if !val4 {
+		if err = gobtools.EncodeReference(ctx, r.aconfigPaths, buf, func(v uniquelist.UniqueList[Path], buf *bytes.Buffer) error {
+			val5 := v.ToSlice()
+			if val5 == nil {
+				if err = gobtools.EncodeInt(buf, -1); err != nil {
+					return err
+				}
+			} else {
+				if err = gobtools.EncodeInt(buf, len(val5)); err != nil {
+					return err
+				}
+				for val6 := 0; val6 < len(val5); val6++ {
+					if err = gobtools.EncodeInterface(ctx, buf, val5[val6]); err != nil {
+						return err
+					}
+				}
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
 	}
 
@@ -12227,19 +12349,30 @@ func (r PackagingSpec) Encode(ctx gobtools.EncContext, buf *bytes.Buffer) error 
 		return err
 	}
 
-	val5 := r.overrides.ToSlice()
-	if val5 == nil {
-		if err = gobtools.EncodeInt(buf, -1); err != nil {
-			return err
-		}
-	} else {
-		if err = gobtools.EncodeInt(buf, len(val5)); err != nil {
-			return err
-		}
-		for val6 := 0; val6 < len(val5); val6++ {
-			if err = gobtools.EncodeString(buf, val5[val6]); err != nil {
-				return err
+	val7 := r.overrides.Len() == 0
+	if err = gobtools.EncodeBool(buf, val7); err != nil {
+		return err
+	}
+	if !val7 {
+		if err = gobtools.EncodeReference(ctx, r.overrides, buf, func(v uniquelist.UniqueList[string], buf *bytes.Buffer) error {
+			val8 := v.ToSlice()
+			if val8 == nil {
+				if err = gobtools.EncodeInt(buf, -1); err != nil {
+					return err
+				}
+			} else {
+				if err = gobtools.EncodeInt(buf, len(val8)); err != nil {
+					return err
+				}
+				for val9 := 0; val9 < len(val8); val9++ {
+					if err = gobtools.EncodeString(buf, val8[val9]); err != nil {
+						return err
+					}
+				}
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
 	}
 
@@ -12446,25 +12579,38 @@ func (r *PackagingSpec) Decode(ctx gobtools.EncContext, buf *bytes.Reader) error
 		return err
 	}
 
-	var val7 []Path
-	var val8 int
-	err = gobtools.DecodeInt(buf, &val8)
-	if err != nil {
+	var val7 bool
+	if err = gobtools.DecodeBool(buf, &val7); err != nil {
 		return err
 	}
-	if val8 != -1 {
-		val7 = make([]Path, val8)
-		for val9 := 0; val9 < int(val8); val9++ {
-			if val11, err := gobtools.DecodeInterface(ctx, buf); err != nil {
+	if !val7 {
+		tmp, err := gobtools.DecodeReference(ctx, &r.effectiveLicenseFiles, buf, func(value *uniquelist.UniqueList[Path], buf *bytes.Reader) error {
+			var val8 []Path
+			var val9 int
+			err = gobtools.DecodeInt(buf, &val9)
+			if err != nil {
 				return err
-			} else if val11 == nil {
-				val7[val9] = nil
-			} else {
-				val7[val9] = val11.(Path)
 			}
+			if val9 != -1 {
+				val8 = make([]Path, val9)
+				for val10 := 0; val10 < int(val9); val10++ {
+					if val12, err := gobtools.DecodeInterface(ctx, buf); err != nil {
+						return err
+					} else if val12 == nil {
+						val8[val10] = nil
+					} else {
+						val8[val10] = val12.(Path)
+					}
+				}
+			}
+			*value = uniquelist.Make(val8)
+			return nil
+		})
+		if err != nil {
+			return err
 		}
+		r.effectiveLicenseFiles = *tmp
 	}
-	r.effectiveLicenseFiles = uniquelist.Make(val7)
 
 	err = gobtools.DecodeString(buf, &r.partition)
 	if err != nil {
@@ -12476,46 +12622,72 @@ func (r *PackagingSpec) Decode(ctx gobtools.EncContext, buf *bytes.Reader) error
 		return err
 	}
 
-	var val15 []Path
-	var val16 int
-	err = gobtools.DecodeInt(buf, &val16)
-	if err != nil {
+	var val16 bool
+	if err = gobtools.DecodeBool(buf, &val16); err != nil {
 		return err
 	}
-	if val16 != -1 {
-		val15 = make([]Path, val16)
-		for val17 := 0; val17 < int(val16); val17++ {
-			if val19, err := gobtools.DecodeInterface(ctx, buf); err != nil {
+	if !val16 {
+		tmp, err := gobtools.DecodeReference(ctx, &r.aconfigPaths, buf, func(value *uniquelist.UniqueList[Path], buf *bytes.Reader) error {
+			var val17 []Path
+			var val18 int
+			err = gobtools.DecodeInt(buf, &val18)
+			if err != nil {
 				return err
-			} else if val19 == nil {
-				val15[val17] = nil
-			} else {
-				val15[val17] = val19.(Path)
 			}
+			if val18 != -1 {
+				val17 = make([]Path, val18)
+				for val19 := 0; val19 < int(val18); val19++ {
+					if val21, err := gobtools.DecodeInterface(ctx, buf); err != nil {
+						return err
+					} else if val21 == nil {
+						val17[val19] = nil
+					} else {
+						val17[val19] = val21.(Path)
+					}
+				}
+			}
+			*value = uniquelist.Make(val17)
+			return nil
+		})
+		if err != nil {
+			return err
 		}
+		r.aconfigPaths = *tmp
 	}
-	r.aconfigPaths = uniquelist.Make(val15)
 
 	if err = r.archType.Decode(ctx, buf); err != nil {
 		return err
 	}
 
-	var val22 []string
-	var val23 int
-	err = gobtools.DecodeInt(buf, &val23)
-	if err != nil {
+	var val24 bool
+	if err = gobtools.DecodeBool(buf, &val24); err != nil {
 		return err
 	}
-	if val23 != -1 {
-		val22 = make([]string, val23)
-		for val24 := 0; val24 < int(val23); val24++ {
-			err = gobtools.DecodeString(buf, &val22[val24])
+	if !val24 {
+		tmp, err := gobtools.DecodeReference(ctx, &r.overrides, buf, func(value *uniquelist.UniqueList[string], buf *bytes.Reader) error {
+			var val25 []string
+			var val26 int
+			err = gobtools.DecodeInt(buf, &val26)
 			if err != nil {
 				return err
 			}
+			if val26 != -1 {
+				val25 = make([]string, val26)
+				for val27 := 0; val27 < int(val26); val27++ {
+					err = gobtools.DecodeString(buf, &val25[val27])
+					if err != nil {
+						return err
+					}
+				}
+			}
+			*value = uniquelist.Make(val25)
+			return nil
+		})
+		if err != nil {
+			return err
 		}
+		r.overrides = *tmp
 	}
-	r.overrides = uniquelist.Make(val22)
 
 	err = gobtools.DecodeString(buf, &r.owner)
 	if err != nil {

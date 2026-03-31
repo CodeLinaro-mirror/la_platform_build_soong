@@ -30,7 +30,8 @@ import (
 )
 
 var (
-	_ = pctx.SourcePathVariable("rustcCmd", "${config.RustBin}/rustc")
+	_            = pctx.SourcePathVariable("rustcCmd", "${config.RustBin}/rustc")
+	rustcWrapper = pctx.HostTool("rustc_wrapper")
 
 	rustc, rustcRbe = pctx.RemoteStaticRules("rustc",
 		blueprint.RuleParams{
@@ -39,10 +40,9 @@ var (
 				"-C link-args=@${out}.clang.rsp " +
 				"--emit ${emitType} -o $out --emit dep-info=$out.d.raw $in ${libFlags} $rustcFlags" +
 				" && ${DepfileVerifier} --check-suffix-only $out.d ${soongSrcsFile}",
-			CommandDeps:     []string{"$rustcCmd", "${RustcLinkerCmd}", "${config.ClangCmd}", "${DepfileVerifier}", "${RustcWrapper}"},
-			Rspfile:         "${out}.clang.rsp",
-			RspfileContent:  "${crtBegin} ${earlyLinkFlags} ${linkFlags} ${crtEnd}",
-			SandboxDisabled: true,
+			CommandDeps:    []string{"$rustcCmd", "${RustcLinkerCmd}", "${config.ClangCmd}", "${DepfileVerifier}", "${RustcWrapper}"},
+			Rspfile:        "${out}.clang.rsp",
+			RspfileContent: "${crtBegin} ${earlyLinkFlags} ${linkFlags} ${crtEnd}",
 		}, &remoteexec.REParams{
 			// Until there's a "rust" tool, use clang. This interprets "-L" flags
 			// to help identify potential build dependencies.
@@ -68,10 +68,10 @@ var (
 	_       = pctx.SourcePathVariable("rustdocCmd", "${config.RustBin}/rustdoc")
 	rustdoc = pctx.AndroidStaticRule("rustdoc",
 		blueprint.RuleParams{
-			Command: "$envVars ${RustcWrapper} $rustdocCmd $rustdocFlags $in -o $outDir && " +
-				"touch $out",
-			CommandDeps:     []string{"$rustdocCmd", "${RustcWrapper}"},
-			SandboxDisabled: true,
+			Command2: blueprint.NewCommand(
+				"$envVars ", rustcWrapper, " $rustdocCmd $rustdocFlags $in -o $outDir && ",
+				android.Touch, " $out"),
+			CommandDeps: []string{"$rustdocCmd"},
 		},
 		"rustdocFlags", "outDir", "envVars")
 
@@ -79,17 +79,16 @@ var (
 	generateClippyRule = func(ruleName string, extraFlags string) blueprint.Rule {
 		return pctx.AndroidStaticRule(ruleName,
 			blueprint.RuleParams{
-				Command: "$envVars ${RustcWrapper} $clippyCmd " +
+				Command2: blueprint.NewCommand(
+					"$envVars ", rustcWrapper, " ${clippyCmd} ",
 					// Because clippy-driver uses rustc as backend, we need to have some output even during the linting.
 					// Use the metadata output as it has the smallest footprint.
-					"--emit metadata -o $out --emit dep-info=$out.d.raw $in ${libFlags} " +
-					"$rustcFlags $clippyFlags " + extraFlags,
-				CommandDeps:     []string{"$clippyCmd", "${RustcWrapper}"},
-				Deps:            blueprint.DepsGCC,
-				Depfile:         "$out.d",
-				SandboxDisabled: true,
+					"--emit metadata -o $out --emit dep-info=$out.d.raw $in ${libFlags} ",
+					"$rustcFlags $clippyFlags ", extraFlags, " && ",
+					android.DepfileVerifier, " --check-suffix-only $out.d ${soongSrcsFile}"),
+				CommandDeps: []string{"$clippyCmd"},
 			},
-			"rustcFlags", "libFlags", "clippyFlags", "envVars")
+			"rustcFlags", "libFlags", "clippyFlags", "envVars", "soongSrcsFile")
 	}
 	clippyDriver = generateClippyRule("clippy", "")
 
@@ -98,21 +97,12 @@ var (
 	// errors and warnings to rust-analyzer.
 	clippyJsonDriver = generateClippyRule("clippyJson", "--error-format=json 2> $out.error")
 
-	zip = pctx.AndroidStaticRule("zip",
-		blueprint.RuleParams{
-			Command:         "cat $out.rsp | tr ' ' '\\n' | tr -d \\' | sort -u > ${out}.tmp && ${SoongZipCmd} -o ${out} -C $$OUT_DIR -l ${out}.tmp",
-			CommandDeps:     []string{"${SoongZipCmd}"},
-			Rspfile:         "$out.rsp",
-			RspfileContent:  "$in",
-			SandboxDisabled: true,
-		})
-
 	cp = pctx.AndroidStaticRule("cp",
 		blueprint.RuleParams{
-			Command:         "cp `cat $outDir.rsp` $outDir",
-			Rspfile:         "${outDir}.rsp",
-			RspfileContent:  "$in",
-			SandboxDisabled: true,
+			Command2: blueprint.NewCommand(
+				android.Cp, " `", android.Cat, " $outDir.rsp` $outDir"),
+			Rspfile:        "${outDir}.rsp",
+			RspfileContent: "$in",
 		},
 		"outDir")
 )
@@ -201,10 +191,11 @@ func TransformRlibstoStaticlib(ctx android.ModuleContext, mainSrc android.Path, 
 
 	var rustPathDeps PathDeps
 	var rustFlags Flags
-
+	IsHwasan := false
 	for _, rlibDep := range deps {
 		rustPathDeps.RLibs = append(rustPathDeps.RLibs, RustLibrary{Path: rlibDep.LibPath, CrateName: rlibDep.CrateName})
 		rustPathDeps.linkDirs = append(rustPathDeps.linkDirs, rlibDep.LinkDirs...)
+		IsHwasan = IsHwasan || rlibDep.IsHwasan
 		rustPathDeps.linkDirsDeps = append(rustPathDeps.linkDirsDeps, rlibDep.LinkDirsDeps...)
 	}
 	rustPathDeps.linkDirs = android.FirstUniqueStrings(rustPathDeps.linkDirs)
@@ -239,6 +230,9 @@ func TransformRlibstoStaticlib(ctx android.ModuleContext, mainSrc android.Path, 
 
 	rustFlags = CommonDefaultFlags(ctx, toolchain, rustFlags)
 	rustFlags = CommonLibraryCompilerFlags(ctx, rustFlags)
+	if IsHwasan {
+		rustFlags.RustFlags = append(rustFlags.RustFlags, "-Zsanitizer=hwaddress")
+	}
 	rustFlags.GlobalRustFlags = rustFlags.GlobalRustFlags.AppendNoDeps("-C lto=thin")
 
 	rustFlags.EmitXrefs = false
@@ -340,6 +334,7 @@ func rustEnvVars(ctx android.ModuleContext, deps PathDeps, crateName string, car
 			envVars["CARGO_BIN_NAME"] = bin.getStem(ctx)
 		}
 		envVars["CARGO_CRATE_NAME"] = crateName
+		envVars["CARGO_MANIFEST_DIR"] = ctx.ModuleDir()
 		envVars["CARGO_PKG_NAME"] = crateName
 		pkgVersion := rustMod.compiler.cargoPkgVersion()
 		if pkgVersion != "" {
@@ -420,9 +415,6 @@ func transformSrctoCrate(ctx android.ModuleContext, main android.Path, deps Path
 	} else {
 		rustcFlags = append(rustcFlags, "-C codegen-units=1")
 	}
-	if config.GetRustVersion(ctx) >= "1.91" {
-		rustcFlags = append(rustcFlags, "-Cunsafe-allow-abi-mismatch=sanitizer")
-	}
 	// Disallow experimental features
 	modulePath := ctx.ModuleDir()
 	if !android.IsThirdPartyPath(modulePath) && !strings.HasPrefix(modulePath, "prebuilts") {
@@ -441,7 +433,12 @@ func transformSrctoCrate(ctx android.ModuleContext, main android.Path, deps Path
 	linkerScriptFlags = append(linkerScriptFlags, flags.LinkerScriptFlags...)
 
 	// Check if this module needs to use the bootstrap linker
-	if t.bootstrap && !t.inRecovery && !t.inRamdisk && !t.inVendorRamdisk {
+	useBootstrap := t.bootstrap && !t.inRecovery && !t.inRamdisk && !t.inVendorRamdisk
+	if ctx.Config().GetBuildFlagBool("RELEASE_DEPRECATE_RUNTIME_APEX") {
+		useBootstrap = false
+	}
+
+	if useBootstrap {
 		dynamicLinker := "-Wl,-dynamic-linker,/system/bin/bootstrap/linker"
 		if t.is64Bit {
 			dynamicLinker += "64"
@@ -521,23 +518,22 @@ func transformSrctoCrate(ctx android.ModuleContext, main android.Path, deps Path
 	implicits = append(implicits, srcInputs...)
 	implicits = append(implicits, libFlagsDeps...)
 
-	toolchainImplicitsPhony := ctx.CreateNinjaPhonyOnce("rustToolchainImplicits", slices.Concat(
-		ctx.GlobFilesOutsideModuleDir(filepath.Join(config.RustPath(ctx), "**/*"), nil),
-		ctx.GlobFilesOutsideModuleDir(cc_config.ClangPathNoOnce(ctx, "lib/**/*").String(), nil),
-		ctx.GlobFilesOutsideModuleDir(cc_config.ClangPathNoOnce(ctx, "bin/**/*").String(), nil),
-	))
-	if toolchainImplicitsPhony != nil {
-		implicits = append(implicits, toolchainImplicitsPhony)
-	}
+	toolchainImplicitsPhony := toolchainImplicitsPhony(ctx)
+	implicits = append(implicits, toolchainImplicitsPhony)
+
+	soongDepsFile := android.PathForModuleOut(ctx, outputFile.Base()+".soong_deps")
+	android.WriteFileRule(ctx, soongDepsFile, strings.Join(srcInputs.Strings(), "\n"))
+	implicits = append(implicits, soongDepsFile)
 
 	if !t.synthetic {
 		// Only worry about clippy for actual Rust modules.
 		// Libraries built from cc use generated source, and don't need to run clippy.
 		args := map[string]string{
-			"rustcFlags":  strings.Join(rustcFlags, " "),
-			"libFlags":    strings.Join(libFlags, " "),
-			"clippyFlags": strings.Join(flags.ClippyFlags, " "),
-			"envVars":     rustStringifyEnvVars(envVars),
+			"rustcFlags":    strings.Join(rustcFlags, " "),
+			"libFlags":      strings.Join(libFlags, " "),
+			"clippyFlags":   strings.Join(flags.ClippyFlags, " "),
+			"envVars":       rustStringifyEnvVars(envVars),
+			"soongSrcsFile": soongDepsFile.String(),
 		}
 		if flags.Clippy {
 			ctx.Build(pctx, android.BuildParams{
@@ -566,10 +562,6 @@ func transformSrctoCrate(ctx android.ModuleContext, main android.Path, deps Path
 			validations = append(validations, clippyFile)
 		}
 	}
-
-	soongDepsFile := android.PathForModuleOut(ctx, outputFile.Base()+".soong_deps")
-	android.WriteFileRule(ctx, soongDepsFile, strings.Join(srcInputs.Strings(), "\n"))
-	implicits = append(implicits, soongDepsFile)
 
 	rule := rustc
 	args := map[string]string{
@@ -661,10 +653,14 @@ func Rustdoc(ctx ModuleContext, main android.Path, deps PathDeps,
 	// https://github.com/rust-lang/rust/blob/master/src/librustdoc/html/render/write_shared.rs#L144-L146
 	docDir := android.PathForOutput(ctx, "rustdoc")
 
+	toolchainImplicitsPhony := toolchainImplicitsPhony(ctx)
+	implicits = append(implicits, toolchainImplicitsPhony)
+
 	implicits = append(implicits, rustLibsToPaths(deps.RLibs)...)
 	implicits = append(implicits, rustLibsToPaths(deps.DyLibs)...)
 	implicits = append(implicits, rustLibsToPaths(deps.ProcMacros)...)
 	implicits = append(implicits, libFlagsDeps...)
+	implicits = append(implicits, deps.SrcFiles...)
 	envVars := rustEnvVars(ctx, deps, crateName, ctx.RustModule().compiler.cargoOutDir(ctx))
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        rustdoc,
@@ -681,4 +677,12 @@ func Rustdoc(ctx ModuleContext, main android.Path, deps PathDeps,
 	})
 
 	return docTimestampFile
+}
+
+func toolchainImplicitsPhony(ctx android.ModuleContext) android.Path {
+	return ctx.CreateNinjaPhonyOnce("rustToolchainImplicits", []string{
+		filepath.Join(config.RustPath(ctx), "**/*"),
+		cc_config.ClangPathNoOnce(ctx, "lib/**/*").String(),
+		cc_config.ClangPathNoOnce(ctx, "bin/**/*").String(),
+	})
 }

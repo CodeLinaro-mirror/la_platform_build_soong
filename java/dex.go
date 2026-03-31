@@ -39,7 +39,7 @@ type DexProperties struct {
 	Compile_dex *bool
 
 	// list of module-specific flags that will be used for dex compiles
-	Dxflags []string `android:"arch_variant"`
+	Dxflags proptools.Configurable[[]string] `android:"arch_variant"`
 
 	// A list of files containing rules that specify the classes to keep in the main dex file.
 	Main_dex_rules []string `android:"path"`
@@ -109,8 +109,12 @@ type DexProperties struct {
 		// True if the module containing this has it set by default.
 		ShrinkByDefault bool `blueprint:"mutated"`
 
-		// If true, optimize bytecode.  Defaults to false.
+		// If true, optimize bytecode.  Defaults to true for apps when
+		// `RELEASE_R8_OPTIMIZE_BY_DEFAULT` is set, otherwise false.
 		Optimize proptools.Configurable[bool] `android:"replace_instead_of_append"`
+
+		// True if the module containing this has it set by default.
+		OptimizeByDefault bool `blueprint:"mutated"`
 
 		// If true, obfuscate bytecode by renaming packages, classes, and members.
 		// Defaults to false.
@@ -277,7 +281,7 @@ func (d *dexer) optimizeOrObfuscateEnabled(ctx android.ModuleContext) bool {
 	if !d.effectiveOptimizeEnabled(ctx) {
 		return false
 	}
-	return d.dexProperties.Optimize.Optimize.GetOrDefault(ctx, false) || d.dexProperties.Optimize.Obfuscate.GetOrDefault(ctx, false)
+	return d.dexProperties.Optimize.Optimize.GetOrDefault(ctx, d.dexProperties.Optimize.OptimizeByDefault) || d.dexProperties.Optimize.Obfuscate.GetOrDefault(ctx, false)
 }
 
 func (d *dexer) shrinkEnabled(ctx android.ModuleContext) bool {
@@ -608,7 +612,7 @@ var proguardDictToProto = pctx.AndroidStaticRule("proguard_dict_to_proto", bluep
 func (d *dexer) dexCommonFlags(ctx android.ModuleContext,
 	dexParams *compileDexParams) (flags []string, deps android.Paths, incD8Compatible bool) {
 
-	flags = d.dexProperties.Dxflags
+	flags = d.dexProperties.Dxflags.GetOrDefault(ctx, nil)
 	// Translate all the DX flags to D8 ones until all the build files have been migrated
 	// to D8 flags. See: b/69377755
 	flags = android.RemoveListFromList(flags,
@@ -845,7 +849,7 @@ func (d *dexer) r8Flags(ctx android.ModuleContext, dexParams *compileDexParams, 
 
 	// Avoid unnecessary stack frame noise by only injecting source map ids for non-debug
 	// optimized or obfuscated targets.
-	optimize := opt.Optimize.GetOrDefault(ctx, false)
+	optimize := opt.Optimize.GetOrDefault(ctx, opt.OptimizeByDefault)
 	if (optimize || opt.Obfuscate.GetOrDefault(ctx, false)) && !debugMode {
 		// TODO(b/213833843): Allow configuration of the prefix via a build variable.
 		var sourceFilePrefix = "go/retraceme "
@@ -870,9 +874,14 @@ func (d *dexer) r8Flags(ctx android.ModuleContext, dexParams *compileDexParams, 
 	// TODO(ccross): if this is an instrumentation test of an obfuscated app, use the
 	// dictionary of the app and move the app from libraryjars to injars.
 
+	// For now, only enable warnings by default if the target is optimized by default.
+	// This ensures at least nominal safety when apps rely on the default setting.
+	// TODO(b/229727645): Enable warnings by default for *any* optimized target.
 	// TODO(b/180878971): missing classes should be added to the relevant builds.
-	// TODO(b/229727645): do not use true as default for Android platform builds.
-	if proptools.BoolDefault(opt.Ignore_warnings, true) {
+	explicitOptimize := opt.Optimize.Get(ctx)
+	optimizingFromDefault := explicitOptimize.IsEmpty() && opt.OptimizeByDefault
+	ignoreWarningsByDefault := !optimizingFromDefault
+	if proptools.BoolDefault(opt.Ignore_warnings, ignoreWarningsByDefault) {
 		r8Flags = append(r8Flags, "-ignorewarnings")
 	}
 

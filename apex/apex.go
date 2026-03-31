@@ -438,6 +438,10 @@ type overridableProperties struct {
 	// Mainline beta namespace. Each mainline module would have a dedicated server side
 	// namespace to support flag based A/B feature testing on mainline beta population.
 	Beta_namespace *string
+
+	// Mark the apex as non-production. Google Play Store will prevent it from being
+	// distributed to production channels.
+	Non_production *bool
 }
 
 // installPair stores a path to a built object and its install location.  It is used for holding
@@ -858,7 +862,7 @@ func addDependenciesForNativeModules(ctx android.BottomUpMutatorContext, nativeM
 		android.RemoveListFromList(nativeModules.Tests, nativeModules.Exclude_tests)...)
 	ctx.AddFarVariationDependencies(libVariations, jniLibTag,
 		android.RemoveListFromList(nativeModules.Jni_libs, nativeModules.Exclude_jni_libs)...)
-	ctx.AddFarVariationDependencies(libVariations, sharedLibTag,
+	ctx.AddVariationDependencies(libVariations, sharedLibTag,
 		android.RemoveListFromList(nativeModules.Native_shared_libs, nativeModules.Exclude_native_shared_libs)...)
 	ctx.AddFarVariationDependencies(rustLibVariations, sharedLibTag,
 		android.RemoveListFromList(nativeModules.Rust_dyn_libs, nativeModules.Exclude_rust_dyn_libs)...)
@@ -1389,6 +1393,10 @@ func (a *apexBundle) dynamic_common_lib_apex() bool {
 	return proptools.BoolDefault(a.properties.Dynamic_common_lib_apex, false)
 }
 
+func (a *apexBundle) nonProduction() bool {
+	return proptools.Bool(a.overridableProperties.Non_production)
+}
+
 // These functions are interfacing with cc/sanitizer.go. The entire APEX (along with all of its
 // members) can be sanitized, either forcibly, or by the global configuration. For some of the
 // sanitizers, extra dependencies can be forcibly added as well.
@@ -1414,6 +1422,9 @@ func (a *apexBundle) IsSanitizerEnabled(config android.Config, sanitizerName str
 }
 
 func (a *apexBundle) AddSanitizerDependencies(ctx android.BottomUpMutatorContext, sanitizerName string) {
+	if ctx.Config().GetBuildFlagBool("RELEASE_DEPRECATE_RUNTIME_APEX") {
+		return
+	}
 	// TODO(jiyong): move this info (the sanitizer name, the lib name, etc.) to cc/sanitize.go
 	// Keep only the mechanism here.
 	if sanitizerName == "hwaddress" && strings.HasPrefix(a.Name(), "com.android.runtime") {
@@ -2204,6 +2215,8 @@ func (a *apexBundle) depVisitor(vctx *visitorContext, ctx android.ModuleContext,
 	} else if depTag == android.DarwinUniversalVariantTag {
 		// nothing
 	} else if depTag == android.RequiredDepTag {
+		// nothing
+	} else if depTag == cc.LFIDepTag {
 		// nothing
 	} else if commonInfo.IsInstallableToApex {
 		ctx.ModuleErrorf("unexpected tag %s for indirect dependency %q", android.PrettyPrintTag(depTag), depName)

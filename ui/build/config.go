@@ -69,7 +69,7 @@ const (
 	NINJA_NINJAGO
 )
 
-var NINJA_DEFAULT ninjaCommandType = NINJA_NINJA
+var NINJA_DEFAULT ninjaCommandType = NINJA_SISO
 
 func (n ninjaCommandType) String() string {
 	switch n {
@@ -397,32 +397,47 @@ func newConfig(ctx Context, isDumpVar bool, args ...string) Config {
 			// Explicitly set USE_RBE env variable to false when we cannot run
 			// an RBE build to avoid ninja local execution pool issues.
 			ret.environ.Set("USE_RBE", "false")
-			ret.environ.Set("USE_REWRAPPER", "false")
 		}
 	}
 
-	// If we are not using Siso, force USE_REWRAPPER to be the same as USE_RBE.
-	// If we are using Siso, force USE_REWRAPPER=false when USE_RBE is not "true".
-	// These are separate only for Siso.
-	rbeValue, ok := ret.environ.Get("USE_RBE")
-	rewrapperValue, rewrapperOk := ret.environ.Get("USE_REWRAPPER")
+	rbeValue, rbeOk := ret.environ.GetBool("USE_RBE")
+	if rbeOk {
+		// Normalize USE_RBE to "true" or "false", because product config and other
+		// makefiles only support those values.
+		ret.environ.SetBool("USE_RBE", rbeValue)
+	}
+	rewrapperValue, rewrapperOk := ret.environ.GetBool("USE_REWRAPPER")
+	if rewrapperOk {
+		// Normalize USE_REWRAPPER to "true" or "false", because product config and
+		// other makefiles only support those values.
+		ret.environ.SetBool("USE_REWRAPPER", rewrapperValue)
+	}
+
 	if ret.ninjaCommand != NINJA_SISO {
+		// If we are not using Siso, force USE_REWRAPPER to be the same as USE_RBE.
 		if rbeValue != rewrapperValue {
-			if ok {
-				ret.environ.Set("USE_REWRAPPER", rbeValue)
+			if rbeOk {
+				ret.environ.SetBool("USE_REWRAPPER", rbeValue)
 			} else {
 				ret.environ.Unset("USE_REWRAPPER")
 			}
 		}
 	} else {
-		if rbeValue != "true" && rewrapperValue == "true" {
+		// If we are using Siso, force USE_REWRAPPER=false when USE_RBE is not "true".
+		// These are separate only for Siso.
+		if !rbeValue && rewrapperValue {
+			// If not using RBE, don't use rewrapper.
 			ret.environ.Set("USE_REWRAPPER", "false")
+		} else if rbeValue && !rewrapperOk {
+			// Always have a value in USE_REWRAPPER when USE_RBE is true.
+			ret.environ.SetBool("USE_REWRAPPER", ret.UseRewrapper())
 		}
-		if rbeValue == "true" && !rewrapperOk {
-			// For now, use rewrapper by default.
-			// TODO: switch false to switch Siso native RBE by default.
-			ret.environ.Set("USE_REWRAPPER", "true")
-		}
+		// Otherwise, rbeValue is true and USE_REWRAPPER was already set.
+	}
+
+	// Siso specific default values.
+	if ret.ninjaCommand == NINJA_SISO {
+		// If SISO_CONFIG_DIR is not set, set it to the default directory.
 		if value, ok := ret.environ.Get("SISO_CONFIG_DIR"); ok {
 			ret.sisoConfigDir = value
 		} else {
@@ -624,6 +639,7 @@ func newConfig(ctx Context, isDumpVar bool, args ...string) Config {
 			ret.environ.Set(k, v)
 		}
 	}
+	ret.updateSisoConfigVars(map[string]string{})
 
 	// BUILD_NUMBER should be set to the source control value that
 	// represents the current state of the source code.  E.g., a
@@ -656,6 +672,27 @@ func newConfig(ctx Context, isDumpVar bool, args ...string) Config {
 	c := Config{ret}
 	storeConfigMetrics(ctx, c)
 	return c
+}
+
+// Update or create the config variables for Siso.
+//
+// This is called in newConfig() to ensure that siso_config parses.
+// It is then called in dumpMakeVars() to set values based on product config.
+func (config *configImpl) updateSisoConfigVars(makeVars map[string]string) {
+	if config.SisoStringVars == nil {
+		config.SisoStringVars = make(map[string]string)
+	}
+	for _, k := range sisoStringVars {
+		// If the variable is not found, we want to set it to the empty string.
+		config.SisoStringVars[k] = makeVars[k]
+	}
+	if config.IsActionSandboxedBuild() {
+		config.SisoStringVars["nsjail_path"] = config.PrebuiltBuildTool("nsjail")
+	}
+	config.SisoBoolVars = map[string]bool{
+		"use_rbe":      config.UseRBE(),
+		"use_reclient": config.UseRewrapper(),
+	}
 }
 
 func ConfigJavaEnvironment(ctx Context, config *configImpl) {
@@ -1635,13 +1672,8 @@ func (c *configImpl) UseRBE() bool {
 		return false
 	}
 
-	if v, ok := c.Environment().Get("USE_RBE"); ok {
-		v = strings.TrimSpace(v)
-		if v != "" && v != "false" {
-			return true
-		}
-	}
-	return false
+	v, _ := c.Environment().GetBool("USE_RBE")
+	return v
 }
 
 func (c *configImpl) UseRewrapper() bool {
@@ -1649,20 +1681,13 @@ func (c *configImpl) UseRewrapper() bool {
 		return false
 	}
 
-	v, ok := c.Environment().Get("USE_REWRAPPER")
-	v = strings.TrimSpace(v)
-	switch {
-	case v == "true":
-		return true
-	case v == "false":
-		return false
-	case !ok, v == "":
-		// TODO(b/450248289): Siso defaults to false, others default to true.
-		// Until the native reapi implementation is the default, use rewrapper.
-		return true
-	default:
-		return true
+	// If specified, return the value.
+	if v, ok := c.Environment().GetBool("USE_REWRAPPER"); ok {
+		return v
 	}
+	// Until the native reapi implementation is the default, use rewrapper.
+	// TODO(b/450248289): Eventually, Siso defaults to false, others default to true.
+	return c.ninjaCommand == NINJA_SISO || true
 }
 
 func (c *configImpl) UseRBEproxy() bool {

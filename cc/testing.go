@@ -37,8 +37,8 @@ func RegisterRequiredBuildComponentsForTest(ctx android.RegistrationContext) {
 	ctx.RegisterModuleType("cc_genrule_defaults", genruleDefaultsFactory)
 	ctx.RegisterModuleType("ndk_library", NdkLibraryFactory)
 	ctx.RegisterModuleType("ndk_headers", NdkHeadersFactory)
-	ctx.RegisterModuleType("artless_denylist_stub", ArtlessDenylistFactory)
 	ctx.RegisterModuleType("all_artless_denylists", AllArtlessDenylistsFactory)
+	ctx.RegisterModuleType("all_artless_blocked_symbol_files", AllArtlessBlockedSymbolFilesFactory)
 }
 
 func GatherRequiredDepsForTest(oses ...android.OsType) string {
@@ -428,6 +428,7 @@ func commonDefaultModules() string {
 
 		cc_library_headers {
 			name: "liblog_headers",
+			sdk_version: "minimum",
 		}
 
 		ndk_library {
@@ -497,6 +498,12 @@ func commonDefaultModules() string {
 			vendor_available: true,
 			product_available: true,
 			cmake_snapshot_supported: true,
+		}
+
+		cc_library_static {
+			name: "libFuzzer_mte_crash_handler",
+			stl: "none",
+			system_shared_libs: [],
 		}
 	`
 }
@@ -610,6 +617,8 @@ var PrepareForTestWithCcBuildComponents = android.GroupFixturePreparers(
 	android.PrepareForTestWithBuildFlag("RELEASE_SOONG_SANITIZER_VARIANT_ON_DEMAND", "true"),
 	android.PrepareForTestWithBuildFlag("RELEASE_SOONG_COV_VARIANT_ON_DEMAND", "true"),
 	android.PrepareForTestWithBuildFlag("RELEASE_SOONG_SDK_VARIANT_ON_DEMAND", "true"),
+	android.PrepareForTestWithBuildFlag("RELEASE_SOONG_LINK_VARIANT_ON_DEMAND", "true"),
+	android.PrepareForTestWithBuildFlag("RELEASE_SOONG_VERSION_VARIANT_ON_DEMAND", "true"),
 )
 
 // Preparer that will define default cc modules, e.g. standard prebuilt modules.

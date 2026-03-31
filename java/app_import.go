@@ -293,6 +293,8 @@ func (a *AndroidAppImport) DepsMutator(ctx android.BottomUpMutatorContext) {
 		}
 	}
 
+	ctx.AddHostToolDependencies("cp_if_changed")
+
 	a.usesLibrary.deps(ctx, true)
 }
 
@@ -564,7 +566,7 @@ func (a *AndroidAppImport) generateAndroidBuildActions(ctx android.ModuleContext
 
 	buildComplianceMetadata(ctx)
 	src := a.prebuilt.SingleSource(ctx)
-	ctx.ComplianceMetadataInfo().SetCipdSrc(ctx, src)
+	ctx.ComplianceMetadataInfo().SetPrebuiltSrc(ctx, src)
 
 	// TODO: androidmk converter jni libs
 }

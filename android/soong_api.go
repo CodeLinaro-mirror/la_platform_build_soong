@@ -18,8 +18,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/google/blueprint"
+	"github.com/google/blueprint/proptools"
 )
 
 func init() {
@@ -33,11 +38,25 @@ var soongApiPctx = NewPackageContext("android/soong/android/soong_api")
 // module's properties intended for database storage (soong_api.db),
 // rather than a functional Soong module object.
 type SoongApiModuleRecord struct {
-	Name         string   `json:"name"`
-	Type         string   `json:"type"`
-	Path         string   `json:"path"`
-	Enabled      bool     `json:"enabled"`
+	// Identity
+	Name string `json:"name"`
+	Type string `json:"type"`
+
+	// Location
+	Path string `json:"path"`
+
+	// Target / Variation Info
+	Os   string `json:"os,omitempty"`
+	Arch string `json:"arch,omitempty"`
+
+	// Status
+	Enabled bool `json:"enabled"`
+
+	// Artifacts
+	TrendyTeamId string   `json:"trendy_team_id,omitempty"`
 	InstallFiles []string `json:"install_files,omitempty"`
+	BuiltFiles   []string `json:"built_files,omitempty"`
+	Licenses     []string `json:"license,omitempty"`
 }
 
 func soongApiSingletonFactory() Singleton {
@@ -63,10 +82,24 @@ func (c *soongApiSingleton) GenerateBuildActions(ctx SingletonContext) {
 			Enabled: commonInfo.Enabled,
 		}
 
+		// Extract OS / Arch
+		record.Os = commonInfo.Target.Os.Name
+		record.Arch = commonInfo.Target.Arch.ArchType.Name
+
+		if team, ok := OtherModuleProvider(ctx, m, TeamInfoProvider); ok {
+			record.TrendyTeamId = proptools.String(team.Properties.Trendy_team_id)
+		}
+
 		if commonInfo.InstallFiles != nil {
-			for _, p := range commonInfo.InstallFiles.InstallFiles {
-				record.InstallFiles = append(record.InstallFiles, p.String())
-			}
+			record.InstallFiles = pathsToStrings(commonInfo.InstallFiles.InstallFiles)
+		}
+
+		if commonInfo.OutputFiles != nil {
+			record.BuiltFiles = pathsToStrings(commonInfo.OutputFiles.DefaultOutputFiles)
+		}
+
+		if commonInfo.Licenses != nil {
+			record.Licenses = commonInfo.Licenses.Licenses
 		}
 
 		records = append(records, record)
@@ -101,17 +134,12 @@ func (c *soongApiSingleton) GenerateBuildActions(ctx SingletonContext) {
 		product = ctx.Config().DeviceProduct()
 	}
 
-	// Write the binary ZIP data to the product-specific output path.
+	// Output path for soong_api.zip
 	// Path: out/soong/soong_api/<product>/soong_api.zip
 	zipPath := PathForOutput(ctx, "soong_api", product, "soong_api.zip")
-	WriteFileRule(ctx, zipPath, zipBuf.String())
+	WriteContentToFile(zipPath, zipBuf.String())
 
-	// Phony target for 'm soong_api.zip'
-	ctx.Build(soongApiPctx, BuildParams{
-		Rule:   blueprint.Phony,
-		Input:  zipPath,
-		Output: PathForPhony(ctx, "soong_api.zip"),
-	})
+	ctx.DistForGoal("droid", zipPath)
 
 	// Generate the soong_api.db using the ZIP file as the input source.
 	// Path: out/soong/soong_api/<product>/soong_api.db
@@ -135,4 +163,41 @@ func (c *soongApiSingleton) GenerateBuildActions(ctx SingletonContext) {
 		Input:  soongApiDbPath,
 		Output: PathForPhony(ctx, "soong_api.db"),
 	})
+}
+
+func pathsToStrings[T Path](paths []T) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	ret := make([]string, len(paths))
+	for i, p := range paths {
+		ret[i] = p.String()
+	}
+	return ret
+}
+
+// WriteContentToFile writes content to the given Path no matter what the file exist.
+func WriteContentToFile(path Path, content string) {
+	// 1. Convert Path to an absolute path string (e.g., "/usr/local/xxx/git_main/out/soong/soong_api/...")
+	filePath := absolutePath(path.String())
+
+	// 2. Get the directory path
+	dir := filepath.Dir(filePath)
+
+	// 3. Create the directory if it doesn't exist
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		panic(fmt.Errorf("failed to create directory %q: %w", dir, err))
+	}
+
+	// 4. Create the file
+	f, err := os.Create(filePath)
+	if err != nil {
+		panic(fmt.Errorf("failed to create file %q: %w", filePath, err))
+	}
+	defer f.Close()
+
+	// 5. Write content
+	if _, err := io.WriteString(f, content); err != nil {
+		panic(fmt.Errorf("failed to write content to %q: %w", filePath, err))
+	}
 }

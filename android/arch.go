@@ -363,6 +363,11 @@ type Target struct {
 	// libraries and binaries.
 	NativeBridgeRelativePath string
 
+	// If this is an LFI (Lightweight Fault Isolation) arch variant. There is also an LFI
+	// transition mutator, but we have separate LFI arch variants as well because toolchain
+	// resolution happens early, based on arch.
+	LFI bool
+
 	// HostCross is true when the target cannot run natively on the current build host.
 	// For example, linux_glibc_x86 returns true on a regular x86/i686/Linux machines, but returns false
 	// on Mac (different OS), or on 64-bit only i686/Linux machines (unsupported arch).
@@ -392,6 +397,8 @@ func (target Target) ArchVariation() string {
 	var variation string
 	if target.NativeBridge {
 		variation = "native_bridge_"
+	} else if target.LFI {
+		variation = "lfi_"
 	}
 	variation += target.Arch.String()
 
@@ -667,6 +674,10 @@ func (a *archTransitionMutator) Split(ctx BaseModuleContext) []string {
 		return []string{""}
 	}
 
+	if os == Android && base.IsLFISupported() {
+		targets = append([]Target{ctx.Config().AndroidLFITarget}, targets...)
+	}
+
 	// If the module is using extraMultilib, decode the extraMultilib selection into
 	// a separate list of Targets.
 	var multiTargets []Target
@@ -774,7 +785,8 @@ func (a *archTransitionMutator) Mutate(ctx BottomUpMutatorContext, variation str
 
 	target, ok := allArchInfo.Targets[variation]
 	if !ok {
-		panic(fmt.Errorf("missing Target for %q", variation))
+		ctx.ModuleErrorf("missing Target for %q", variation)
+		return
 	}
 	primary := variation == allArchInfo.Primary
 	multiTargets := allArchInfo.MultiTargets
@@ -818,20 +830,21 @@ func addTargetProperties(m Module, target Target, multiTargets []Target, primary
 // multilib from the factory's call to InitAndroidArchModule if none was set.  For modules that
 // called InitAndroidMultiTargetsArchModule it always returns "common" for multilib, and returns
 // the actual multilib in extraMultilib.
-func decodeMultilib(ctx ConfigContext, base *ModuleBase) (multilib, extraMultilib string) {
+func decodeMultilib(ctx ConfigurableEvaluatorContext, base *ModuleBase) (multilib, extraMultilib string) {
 	os := base.commonProperties.CompileOS
 	ignorePrefer32OnDevice := ctx.Config().IgnorePrefer32OnDevice()
+	evaluator := base.ConfigurableEvaluator(ctx)
 	// First check the "android.compile_multilib" or "host.compile_multilib" properties.
 	switch os.Class {
 	case Device:
-		multilib = String(base.commonProperties.Target.Android.Compile_multilib)
+		multilib = base.commonProperties.Target.Android.Compile_multilib.GetOrDefault(evaluator, "")
 	case Host:
-		multilib = String(base.commonProperties.Target.Host.Compile_multilib)
+		multilib = base.commonProperties.Target.Host.Compile_multilib.GetOrDefault(evaluator, "")
 	}
 
 	// If those aren't set, try the "compile_multilib" property.
 	if multilib == "" {
-		multilib = String(base.commonProperties.Compile_multilib)
+		multilib = base.commonProperties.Compile_multilib.GetOrDefault(evaluator, "")
 	}
 
 	// If that wasn't set, use the default multilib set by the factory.

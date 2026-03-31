@@ -79,7 +79,7 @@ var (
 		"cpFlags", "extraCmds")
 
 	// A copy rule that only updates the output if it changed.
-	CpIfChanged = pctx.AndroidStaticRule("CpIfChanged",
+	CpIfChangedRule = pctx.AndroidStaticRule("CpIfChanged",
 		blueprint.RuleParams{
 			Command2: blueprint.NewCommand(
 				"if ! ", Cmp, " -s $in $out; then ", Cp, " $in $out; fi"),
@@ -188,7 +188,7 @@ var (
 	depfileVerifierRule = pctx.AndroidStaticRule("DepfileVerifierRule",
 		blueprint.RuleParams{
 			Command2: blueprint.NewCommand(
-				Rm, " -f $out && ", depfileVerifier, " $in && ", Touch, " $out"),
+				Rm, " -f $out && ", DepfileVerifier, " $in && ", Touch, " $out"),
 			Description: "verify depfile",
 		})
 
@@ -281,11 +281,12 @@ var (
 	Xargs     = pctx.HostToolFunc(initToyboxTool("xargs"))
 	Xxd       = pctx.HostToolFunc(initToyboxTool("xxd"))
 
-	depfileVerifier = pctx.HostTool("depfile_verifier")
+	DepfileVerifier = pctx.HostTool("depfile_verifier")
 	assembleVintf   = pctx.HostTool("assemble_vintf")
 	SoongZip        = pctx.HostTool("soong_zip")
 	MergeZips       = pctx.HostTool("merge_zips")
 	ZipSync         = pctx.HostTool("zipsync")
+	CpIfChanged     = pctx.HostTool("cp_if_changed")
 )
 
 var commonToyboxSymlinks = map[string]struct{}{

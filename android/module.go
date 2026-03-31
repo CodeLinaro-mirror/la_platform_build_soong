@@ -29,6 +29,7 @@ import (
 	"github.com/google/blueprint/depset"
 	"github.com/google/blueprint/pathtools"
 	"github.com/google/blueprint/proptools"
+	"github.com/google/blueprint/uniquelist"
 )
 
 //go:generate go run ../../blueprint/gobtools/codegen
@@ -129,7 +130,7 @@ type Module interface {
 
 	// The usage of this method is experimental and should not be used outside of fsgen package.
 	// This will be removed once product packaging migration to Soong is complete.
-	DecodeMultilib(ctx ConfigContext) (string, string)
+	DecodeMultilib(ctx ConfigurableEvaluatorContext) (string, string)
 
 	// WARNING: This should not be used outside build/soong/fsgen
 	// Overrides returns the list of modules which should not be installed if this module is installed.
@@ -356,14 +357,14 @@ type commonProperties struct {
 	// are "32" (compile for 32-bit only), "64" (compile for 64-bit only), "both" (compile for both
 	// architectures), or "first" (compile for 64-bit on a 64-bit platform, and 32-bit on a 32-bit
 	// platform).
-	Compile_multilib *string `android:"arch_variant"`
+	Compile_multilib proptools.Configurable[string] `android:"arch_variant,replace_instead_of_append"`
 
 	Target struct {
 		Host struct {
-			Compile_multilib *string
+			Compile_multilib proptools.Configurable[string] `android:"replace_instead_of_append"`
 		}
 		Android struct {
-			Compile_multilib *string
+			Compile_multilib proptools.Configurable[string] `android:"replace_instead_of_append"`
 			Enabled          *bool
 		}
 	}
@@ -2068,6 +2069,7 @@ type CommonModuleInfo struct {
 	Target                  Target
 	SkipAndroidMkProcessing bool
 	BaseModuleName          string
+	BaseModuleType          string
 	CanHaveApexVariants     bool
 	MinSdkVersion           ApiLevelOrPlatform
 	SdkVersion              string
@@ -2140,7 +2142,14 @@ type CommonModuleInfo struct {
 	AndroidMkData                  *AndroidMkDataInfo
 	BaseJarJarProviderData         *BaseJarJarProviderData
 	InstallFiles                   *InstallFilesInfo
-	NinjaPhonies                   map[string]Paths
+	NinjaPhonies                   map[string]NinjaPhoniesGlobsInfo
+}
+
+// NinjaPhoniesGlobsInfo is only necessary because the gob code doesn't support serializing
+// a map[string]UniqueList[string] directly.
+// @auto-generate: gob
+type NinjaPhoniesGlobsInfo struct {
+	Globs uniquelist.UniqueList[string]
 }
 
 // @auto-generate: gob
@@ -2170,23 +2179,13 @@ type SourceFileGenerator interface {
 	GeneratedDeps() Paths
 }
 
-type HostToolDepTagType interface {
-	isHostToolDepTag() bool
-}
-
-type BaseHostToolDepTag struct {
+type HostToolDepTagType struct {
 	blueprint.BaseDependencyTag
 }
 
-var _ HostToolDepTagType = (*BaseHostToolDepTag)(nil)
+func (HostToolDepTagType) ExcludeFromVisibilityEnforcement() {}
 
-func (BaseHostToolDepTag) isHostToolDepTag() bool { return true }
-
-var _ ExcludeFromVisibilityEnforcementTag = (*BaseHostToolDepTag)(nil)
-
-func (BaseHostToolDepTag) ExcludeFromVisibilityEnforcement() {}
-
-var HostToolDepTag = BaseHostToolDepTag{}
+var HostToolDepTag = HostToolDepTagType{}
 
 // @auto-generate: gob
 type GeneratedSourceInfo struct {
@@ -2609,6 +2608,7 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 	if mm, ok := m.module.(interface{ BaseModuleName() string }); ok {
 		commonData.BaseModuleName = mm.BaseModuleName()
 	}
+	commonData.BaseModuleType = proptools.String(m.module.base().baseProperties.Soong_config_base_module_type)
 
 	commonData.HostToolInfo = computeHostToolInfo(ctx, m.module, installFiles.TransitivePackagingSpecs)
 
@@ -2671,11 +2671,13 @@ func (m *ModuleBase) GenerateBuildActions(blueprintCtx blueprint.ModuleContext) 
 		hostToolPath := htp.HostToolPath()
 		if hostToolPath.Valid() && hostToolPath.String() == expectedPath.String() {
 			// Create the hostTool-<name>-deps phony target that depends on all the installed files.
-			// This will be depended on by static rules that use host tools.
+			// This will be depended on by static rules that use host tools. We depend on the
+			// transitive installed files (not just direct) in order to pick up things like shared
+			// libraries.
 			ctx.Build(pctx, BuildParams{
 				Rule:   blueprint.Phony,
 				Output: PathForPhony(ctx, "hostTool-"+ctx.ModuleName()+"-deps"),
-				Inputs: installFiles.InstallFiles.Paths(),
+				Inputs: InstallPaths(installFiles.TransitiveInstallFiles.ToList()).Paths(),
 			})
 		}
 	}
@@ -3026,7 +3028,12 @@ func (m *ModuleBase) IsNativeBridgeSupported() bool {
 	return proptools.Bool(m.commonProperties.Native_bridge_supported)
 }
 
-func (m *ModuleBase) DecodeMultilib(ctx ConfigContext) (string, string) {
+// IsLFISupported returns true if "lfi_supported" is explicitly set as "true"
+func (m *ModuleBase) IsLFISupported() bool {
+	return proptools.Bool(m.commonProperties.Lfi_supported)
+}
+
+func (m *ModuleBase) DecodeMultilib(ctx ConfigurableEvaluatorContext) (string, string) {
 	return decodeMultilib(ctx, m)
 }
 
@@ -3117,6 +3124,8 @@ func (e configurationEvalutor) EvaluateConfiguration(condition proptools.Configu
 			return proptools.ConfigurableValueBool(ctx.Config().UnbundledBuild())
 		case "always_use_prebuilt_sdks":
 			return proptools.ConfigurableValueBool(ctx.Config().AlwaysUsePrebuiltSdks())
+		case "device_primary_arch":
+			return proptools.ConfigurableValueString(ctx.Config().DevicePrimaryArchType().String())
 		default:
 			// TODO(b/323382414): Might add these on a case-by-case basis
 			ctx.OtherModulePropertyErrorf(m, property, fmt.Sprintf("TODO(b/323382414): Product variable %q is not yet supported in selects", variable))
@@ -3717,6 +3726,7 @@ type IdeInfo struct {
 	Resource_dirs              []string        `json:"resource_dirs,omitempty"`
 	Associates                 []string        `json:"associates,omitempty"`
 	Kotlincflags               []string        `json:"kotlincflags,omitempty"`
+	Javacflags                 []string        `json:"javacflags,omitempty"`
 	Annotation_processor_flags []string        `json:"annotation_processor_flags,omitempty"`
 	Plugins                    []string        `json:"plugins,omitempty"`
 }
@@ -3769,6 +3779,7 @@ func (i IdeInfo) Merge(other *IdeInfo) IdeInfo {
 		Resource_dirs:              mergeStringLists(i.Resource_dirs, other.Resource_dirs),
 		Associates:                 mergeStringLists(i.Associates, other.Associates),
 		Kotlincflags:               mergeStringLists(i.Kotlincflags, other.Kotlincflags),
+		Javacflags:                 mergeStringLists(i.Javacflags, other.Javacflags),
 		Annotation_processor_flags: mergeStringLists(i.Annotation_processor_flags, other.Annotation_processor_flags),
 		Plugins:                    mergeStringLists(i.Plugins, other.Plugins),
 	}

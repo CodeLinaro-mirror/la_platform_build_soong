@@ -259,8 +259,8 @@ func (c Config) ReleaseBuildClangVersion(defaultVersion string) string {
 	return defaultVersion
 }
 
-func (c Config) ReleaseBuildClangShortVersion(defaultVersion string) string {
-	if val, exists := c.GetBuildFlag("RELEASE_BUILD_CLANG_SHORT_VERSION"); exists && val != "" {
+func (c Config) ReleaseBuildCppStdVersion(defaultVersion string) string {
+	if val, exists := c.GetBuildFlag("RELEASE_BUILD_CPP_STD_VERSION"); exists && val != "" {
 		return val
 	}
 	return defaultVersion
@@ -313,16 +313,16 @@ func (c Config) ReleaseUseSystemFeatureXmlForUnavailableFeatures() bool {
 	return c.config.productVariables.GetBuildFlagBool("RELEASE_USE_SYSTEM_FEATURE_XML_FOR_UNAVAILABLE_FEATURES")
 }
 
-func (c Config) ReleaseRustUseArmTargetArchVariant() bool {
-	return c.config.productVariables.GetBuildFlagBool("RELEASE_RUST_USE_ARM_TARGET_ARCH_VARIANT")
-}
-
 func (c Config) ReleaseUseSparseEncoding() bool {
 	return c.config.productVariables.GetBuildFlagBool("RELEASE_SOONG_SPARSE_ENCODING")
 }
 
 func (c Config) ReleaseUseUncompressedFonts() bool {
 	return c.config.productVariables.GetBuildFlagBool("RELEASE_SOONG_UNCOMPRESSED_FONTS")
+}
+
+func (c Config) ReleaseUseFnoCommonFor3pCode() bool {
+	return c.config.productVariables.GetBuildFlagBool("RELEASE_SOONG_FNO_COMMON_FOR_3P_CODE")
 }
 
 func (c Config) ReleaseAconfigStorageVersion() string {
@@ -391,6 +391,7 @@ type config struct {
 	BuildOSCommonTarget      Target // the Target for common (java) tools run on the build machine
 	AndroidCommonTarget      Target // the Target for common modules for the Android device
 	AndroidFirstDeviceTarget Target // the first Target for modules for the Android device
+	AndroidLFITarget         Target
 
 	// Flags for Partial Compile, derived from SOONG_PARTIAL_COMPILE.
 	partialCompileFlags partialCompileFlags
@@ -868,6 +869,8 @@ func initConfig(cmdArgs CmdArgs, availableEnv map[string]string) (*config, error
 	if len(newConfig.Targets[Android]) > 0 {
 		newConfig.AndroidCommonTarget = getCommonTargets(newConfig.Targets[Android])[0]
 		newConfig.AndroidFirstDeviceTarget = FirstTarget(newConfig.Targets[Android], "lib64", "lib32")[0]
+		newConfig.AndroidLFITarget = newConfig.AndroidFirstDeviceTarget
+		newConfig.AndroidLFITarget.LFI = true
 	}
 
 	setBuildMode := func(arg string, mode SoongBuildMode) {
@@ -1037,7 +1040,11 @@ func (c *config) HostCcSharedLibPath(ctx PathContext, lib string) Path {
 	if ctx.Config().BuildArch.Multilib == "lib64" {
 		libDir = "lib64"
 	}
-	return pathForInstall(ctx, ctx.Config().BuildOS, ctx.Config().BuildArch, libDir, lib+".so")
+	ext := ".so"
+	if runtime.GOOS == "darwin" {
+		ext = ".dylib"
+	}
+	return pathForInstall(ctx, ctx.Config().BuildOS, ctx.Config().BuildArch, libDir, lib+ext)
 }
 
 // PrebuiltOS returns the name of the host OS used in prebuilts directories.
@@ -1647,23 +1654,15 @@ func (c *config) UseREWrapper() bool {
 	return Bool(c.productVariables.UseREWrapper)
 }
 
-func (c *config) UseRBEJAVAC() bool {
-	return Bool(c.productVariables.UseRBEJAVAC) && c.UseREWrapper()
-}
-
+// Return the container image used for RBE.
+//
+// This is found in build/make/core/rbe.mk, if not overridden elsewhere.
 func (c *config) RBEContainerImage() string {
 	return String(c.productVariables.RBEContainerImage)
 }
 
-func (c *config) UseRBER8() bool {
-	return Bool(c.productVariables.UseRBER8) && c.UseREWrapper()
-}
-
-func (c *config) UseRBED8() bool {
-	return Bool(c.productVariables.UseRBED8) && c.UseREWrapper()
-}
-
-func (c *config) UseRemoteBuild() bool {
+// Return true if we are using rewrapper **and** RBE.
+func (c *config) REWrapperRemoteBuild() bool {
 	return c.UseRBE() && c.UseREWrapper()
 }
 
@@ -2466,6 +2465,10 @@ func (c *deviceConfig) BuildDebugfsRestrictionsEnabled() bool {
 	return c.config.productVariables.BuildDebugfsRestrictionsEnabled
 }
 
+func (c *deviceConfig) RestrictsAshmemUsage() bool {
+	return c.config.productVariables.RestrictsAshmemUsage
+}
+
 func (c *deviceConfig) BuildBrokenVendorPropertyNamespace() bool {
 	return c.config.productVariables.BuildBrokenVendorPropertyNamespace
 }
@@ -2579,6 +2582,10 @@ func (c *config) GetBuildFlagBool(name string) bool {
 
 func (c *config) UseOptimizedResourceShrinkingByDefault() bool {
 	return c.productVariables.GetBuildFlagBool("RELEASE_USE_OPTIMIZED_RESOURCE_SHRINKING_BY_DEFAULT")
+}
+
+func (c *config) EnableAppOptimizationByDefault() bool {
+	return c.productVariables.GetBuildFlagBool("RELEASE_R8_OPTIMIZE_BY_DEFAULT")
 }
 
 func (c *config) UseR8FullModeByDefault() bool {

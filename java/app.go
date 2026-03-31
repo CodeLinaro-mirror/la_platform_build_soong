@@ -1630,6 +1630,12 @@ func AndroidAppFactory() android.Module {
 	android.AddLoadHook(module, func(ctx android.LoadHookContext) {
 		a := ctx.Module().(*AndroidApp)
 
+		// Normally this would be set alongisde other `Optimize` properties in the outer factory
+		// init, but we require a context to fetch the build flag value. It could also go in
+		// GenerateAndroidBuildActions, but that is shared with other app variants (e.g., test apps)
+		// where we don't necessarily want this default applied.
+		a.dexProperties.Optimize.OptimizeByDefault = ctx.Config().EnableAppOptimizationByDefault()
+
 		characteristics := ctx.Config().ProductAAPTCharacteristics()
 		if characteristics == "default" || characteristics == "" {
 			module.appProperties.Generate_product_characteristics_rro = nil

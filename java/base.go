@@ -1000,6 +1000,8 @@ func (j *Module) deps(ctx android.BottomUpMutatorContext) {
 	}
 
 	j.EmbeddableSdkLibraryComponent.setComponentDependencyInfoProvider(ctx)
+
+	ctx.AddHostToolDependencies("cp_if_changed")
 }
 
 func hasSrcExt(srcs []string, ext string) bool {
@@ -2082,6 +2084,13 @@ func (j *Module) compile(ctx android.ModuleContext) *JavaInfo {
 				classesJar:    outputFile,
 				jarName:       jarName,
 			}
+			if j.GetProfileGuided(ctx) && !j.EnableProfileRewriting(ctx) {
+				// If the app uses profile-guided optimization *without* profile rewriting, avoid
+				// implicitly enabling full dex optimization, as that can easily break the profile.
+				// TODO(b/487652136): Consider requiring apps to explicitly opt in or out of
+				// dex optimization when using profile-guided optimization, avoiding uncertainty.
+				j.dexer.dexProperties.Optimize.OptimizeByDefault = false
+			}
 			if j.GetProfileGuided(ctx) && j.optimizeOrObfuscateEnabled(ctx) && !j.EnableProfileRewriting(ctx) {
 				ctx.PropertyErrorf("enable_profile_rewriting",
 					"Enable_profile_rewriting must be true when profile_guided dexpreopt and R8 optimization/obfuscation is turned on. The attached profile should be sourced from an unoptimized/unobfuscated APK.",
@@ -2605,6 +2614,7 @@ func (j *Module) IDEInfo(ctx android.BaseModuleContext, dpInfo *android.IdeInfo)
 	dpInfo.Libs = append(dpInfo.Libs, j.libs(ctx)...)
 	dpInfo.Associates = append(dpInfo.Associates, j.properties.Associates...)
 	dpInfo.Kotlincflags = append(dpInfo.Kotlincflags, j.properties.Kotlincflags...)
+	dpInfo.Javacflags = append(dpInfo.Javacflags, j.properties.Javacflags...)
 	dpInfo.Annotation_processor_flags = append(dpInfo.Annotation_processor_flags, j.properties.Annotation_processor_flags...)
 	dpInfo.Plugins = append(dpInfo.Plugins, j.properties.Plugins...)
 

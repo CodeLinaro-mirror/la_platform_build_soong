@@ -31,7 +31,7 @@ import (
 // called.  This singleton is enabled only if SOONG_GEN_RUST_PROJECT is set.
 // For example,
 //
-//   $ SOONG_GEN_RUST_PROJECT=1 SOONG_LINK_RUST_PROJECT_TO=${ANDROID_BUILD_TOP} m nothing
+//   $ SOONG_GEN_RUST_PROJECT=1 m nothing
 
 const (
 	// Environment variables used to control the behavior of this singleton.
@@ -55,6 +55,7 @@ type rustProjectCrate struct {
 	Edition        string                 `json:"edition,omitempty"`
 	Deps           []rustProjectDep       `json:"deps"`
 	Cfg            []string               `json:"cfg"`
+	Target         string                 `json:"target"`
 	Env            map[string]string      `json:"env"`
 	ProcMacro      bool                   `json:"is_proc_macro"`
 	ProcMacroDylib *string                `json:"proc_macro_dylib_path"`
@@ -166,6 +167,8 @@ func (singleton *projectGeneratorSingleton) addCrate(ctx android.SingletonContex
 		procMacroDylib = proptools.StringPtr(procMacro.Dylib.String())
 	}
 
+	var toolchain = config.FindToolchain(commonInfo.Target.Os, commonInfo.Target.Arch)
+
 	var rootmodule = rustInfo.CompilerInfo.CrateRootPath.String()
 	include_dir := []string{ctx.ModuleDir(module)}
 	// Aidl generates rust files so we include those files in the include_dir parameter.
@@ -178,6 +181,7 @@ func (singleton *projectGeneratorSingleton) addCrate(ctx android.SingletonContex
 		Edition:        rustInfo.CompilerInfo.Edition,
 		Deps:           make([]rustProjectDep, 0),
 		Cfg:            make([]string, 0),
+		Target:         toolchain.RustTriple(),
 		Env:            make(map[string]string),
 		ProcMacro:      procMacroDylib != nil,
 		ProcMacroDylib: procMacroDylib,

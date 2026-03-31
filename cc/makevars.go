@@ -74,7 +74,6 @@ func (c *notOnHostContext) Host() bool {
 func makeVarsProvider(ctx android.MakeVarsContext) {
 	sdclangMakeVars(ctx)
 
-	ctx.Strict("LLVM_RELEASE_VERSION", "${config.ClangShortVersion}")
 	ctx.Strict("LLVM_PREBUILTS_VERSION", "${config.ClangVersion}")
 	ctx.Strict("LLVM_PREBUILTS_BASE", "${config.ClangBase}")
 	ctx.Strict("LLVM_PREBUILTS_PATH", "${config.ClangBin}")
@@ -133,7 +132,7 @@ func makeVarsProvider(ctx android.MakeVarsContext) {
 	ctx.Strict("INTEGER_OVERFLOW_EXTRA_CFLAGS", strings.Join(intOverflowCflags, " "))
 
 	ctx.Strict("DEFAULT_C_STD_VERSION", config.CStdVersion)
-	ctx.Strict("DEFAULT_CPP_STD_VERSION", config.CppStdVersion)
+	ctx.Strict("DEFAULT_CPP_STD_VERSION", config.CppStdVersion(ctx))
 	ctx.Strict("EXPERIMENTAL_C_STD_VERSION", config.ExperimentalCStdVersion)
 	ctx.Strict("EXPERIMENTAL_CPP_STD_VERSION", config.ExperimentalCppStdVersion)
 
@@ -180,9 +179,9 @@ type FakeToolchainFlagsContext struct {
  android.MakeVarsContext
 }
 
-func (f *FakeToolchainFlagsContext) CreateNinjaPhonyOnce(name string, deps android.Paths) android.Path {
- // Don't do this. Makevars won't read the deps of the flags so it's not needed.
- return nil
+func (f *FakeToolchainFlagsContext) CreateNinjaPhonyOnce(_ string, _ []string) android.Path {
+  // Don't do this. Makevars won't read the deps of the flags so it's not needed.
+  return android.PathForPhony(f, "FakeToolchainFlagsContextPhony")
 }
 
 var _ config.ToolchainFlagsContext = &FakeToolchainFlagsContext{}
@@ -209,7 +208,7 @@ func makeVarsToolchain(ctx android.MakeVarsContext, secondPrefix string,
 	}
 	makePrefix := secondPrefix + typePrefix
 
-	toolchain := config.FindToolchain(target.Os, target.Arch)
+	toolchain := config.FindToolchain(target.Os, target.Arch, false)
 
 	var productExtraCflags string
 	var productExtraLdflags string

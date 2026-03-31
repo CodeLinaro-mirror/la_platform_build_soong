@@ -173,6 +173,7 @@ func TestLtoDisabledButEnabledForArch(t *testing.T) {
 				},
 			},
 		},
+		split_all_variants: true,
 	}`
 	result := LTOPreparer.RunTestWithBp(t, bp)
 
@@ -200,6 +201,7 @@ func TestLtoDoesNotPropagateToRuntimeLibs(t *testing.T) {
 		lto: {
 			thin: true,
 		},
+		split_all_variants: true,
 	}`
 
 	result := LTOPreparer.RunTestWithBp(t, bp)

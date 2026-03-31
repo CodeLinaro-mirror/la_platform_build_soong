@@ -49,6 +49,13 @@ type BaseLinkerProperties struct {
 	// list of modules that should only provide headers for this module.
 	Header_libs proptools.Configurable[[]string] `android:"arch_variant,variant_prepend"`
 
+	// List of lfi libs to statically link into this module. The lfi libs must be cc binaries
+	// with lfi: { enabled: true }.
+	//
+	// Lfi stands for Lightweight Fault Isolation and is a form of in-process sandboxing. The
+	// lfi libs each are run in their own sandbox.
+	Lfi_libs []string
+
 	// list of module-specific flags that will be used for all link steps
 	Ldflags proptools.Configurable[[]string] `android:"arch_variant"`
 
@@ -309,6 +316,10 @@ func (linker *baseLinker) Xom() *bool {
 	return linker.Properties.Xom
 }
 
+func (linker *baseLinker) extraOutputFilePaths() map[string]android.Paths {
+	return nil
+}
+
 func CoalesceLibs(ctx android.BaseModuleContext, props *BaseLinkerProperties, deps Deps) Deps {
 	mod, ok := ctx.Module().(*Module)
 	if !ok {
@@ -320,6 +331,7 @@ func CoalesceLibs(ctx android.BaseModuleContext, props *BaseLinkerProperties, de
 	deps.StaticLibs = append(deps.StaticLibs, props.Static_libs.GetOrDefault(ctx, nil)...)
 	deps.SharedLibs = append(deps.SharedLibs, props.Shared_libs.GetOrDefault(ctx, nil)...)
 	deps.RuntimeLibs = append(deps.RuntimeLibs, props.Runtime_libs...)
+	deps.LfiLibs = props.Lfi_libs
 
 	deps.ReexportHeaderLibHeaders = append(deps.ReexportHeaderLibHeaders, props.Export_header_lib_headers.GetOrDefault(ctx, nil)...)
 	deps.ReexportStaticLibHeaders = append(deps.ReexportStaticLibHeaders, props.Export_static_lib_headers...)
@@ -519,7 +531,7 @@ func CommonLinkerFlags(ctx android.ModuleContext, flags Flags, toolchain config.
 	flags.Global.LdFlags = append(flags.Global.LdFlags, ldFlags.Flags)
 	flags.LdFlagsDeps = append(flags.LdFlagsDeps, ldFlags.Deps...)
 
-	if !toolchain.Bionic() && ctx.Os() != android.LinuxMusl {
+	if !toolchain.Bionic() && ctx.Os() != android.LinuxMusl && !toolchain.Lfi() {
 		if !ctx.Windows() {
 			// Add -ldl, -lpthread, -lm and -lrt to host builds to match the default behavior of device
 			// builds
@@ -552,7 +564,7 @@ func (linker *baseLinker) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 
 	flags = CommonLinkerFlags(ctx, flags, toolchain, allow_undefined_symbols)
 
-	if !toolchain.Bionic() && ctx.Os() != android.LinuxMusl {
+	if toolchain.Glibc() || ctx.Os() == android.Windows || ctx.Os() == android.Darwin {
 		CheckBadHostLdlibs(ctx, "host_ldlibs", linker.Properties.Host_ldlibs)
 		flags.Local.LdFlags = append(flags.Local.LdFlags, linker.Properties.Host_ldlibs...)
 	}

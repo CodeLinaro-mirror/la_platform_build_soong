@@ -20,7 +20,7 @@ var (
 	metalavaFlags = []string{
 		"--color",
 		"--quiet",
-		"--format=v2",
+		"--format=2.0",
 		"--repeat-errors-max 10",
 		"--hide UnresolvedImport",
 
@@ -47,6 +47,12 @@ var (
 	}
 
 	MetalavaAnnotationsWarningsFlags = strings.Join(metalavaAnnotationsWarningsFlags, " ")
+
+	metalavaVmFlags = []string{
+		"-J-XX:ReservedCodeCacheSize=128m",
+	}
+
+	MetalavaVmFlags = strings.Join(metalavaVmFlags, " ")
 )
 
 const (

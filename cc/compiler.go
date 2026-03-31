@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -358,11 +359,11 @@ func maybeReplaceGnuToC(gnuExtensions *bool, cStd string, cppStd string) (string
 	return cStd, cppStd
 }
 
-func parseCppStd(cppStdPtr *string) string {
+func parseCppStd(ctx ModuleContext, cppStdPtr *string) string {
 	cppStd := String(cppStdPtr)
 	switch cppStd {
 	case "":
-		return config.CppStdVersion
+		return config.CppStdVersion(ctx)
 	case "experimental":
 		return config.ExperimentalCppStdVersion
 	default:
@@ -382,9 +383,9 @@ func parseCStd(cStdPtr *string) string {
 	}
 }
 
-func AddTargetFlags(ctx android.ModuleContext, flags Flags, tc config.Toolchain, version string, bpf bool) Flags {
+func AddTargetFlags(ctx android.ModuleContext, flags Flags, tc config.Toolchain, version string, bpf, lfi bool) Flags {
 	target := "-target " + tc.ClangTriple()
-	if ctx.Os().Class == android.Device {
+	if ctx.Os().Class == android.Device && !lfi {
 		if version == "" || version == "current" {
 			target += strconv.Itoa(android.FutureApiLevelInt)
 		} else {
@@ -418,12 +419,20 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 
 	// If a reuseObjTag dependency exists then this module is reusing the objects (generally the shared variant
 	// reusing objects from the static variant), and doesn't need to compile any sources of its own.
-	var srcs []string
 	if !reuseObjs {
-		srcs = compiler.Properties.Srcs.GetOrDefault(ctx, nil)
+		srcs := compiler.Properties.Srcs.GetOrDefault(ctx, nil)
 		exclude_srcs := compiler.Properties.Exclude_srcs.GetOrDefault(ctx, nil)
 		compiler.srcsBeforeGen = android.PathsForModuleSrcExcludes(ctx, srcs, exclude_srcs)
 		compiler.srcsBeforeGen = append(compiler.srcsBeforeGen, deps.GeneratedSources...)
+	}
+
+	for _, lfiDep := range ctx.GetDirectDepsProxyWithTag(LFIDepTag) {
+		lfiInfo, ok := android.OtherModuleProvider(ctx, lfiDep, lfiInfoProvider)
+		if !ok {
+			ctx.ModuleErrorf("Expected lfi dep %s(%s) to provide lfi info", ctx.OtherModuleName(lfiDep), ctx.OtherModuleSubDir(lfiDep))
+			continue
+		}
+		compiler.srcsBeforeGen = append(compiler.srcsBeforeGen, lfiInfo.srcs...)
 	}
 
 	cflags := compiler.Properties.Cflags.GetOrDefault(ctx, nil)
@@ -564,7 +573,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 	flags.Local.ConlyFlags = config.ClangFilterUnknownCflags(flags.Local.ConlyFlags)
 	flags.Local.LdFlags = config.ClangFilterUnknownCflags(flags.Local.LdFlags)
 
-	flags = AddTargetFlags(ctx, flags, tc, ctx.minSdkVersion(), Bool(compiler.Properties.Bpf_target))
+	flags = AddTargetFlags(ctx, flags, tc, ctx.minSdkVersion(), Bool(compiler.Properties.Bpf_target), ctx.isLFIVariation())
 
 	hod := "Host"
 	if ctx.Os().Class == android.Device {
@@ -612,7 +621,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 	}
 
 	cStd := parseCStd(compiler.Properties.C_std)
-	cppStd := parseCppStd(compiler.Properties.Cpp_std)
+	cppStd := parseCppStd(ctx, compiler.Properties.Cpp_std)
 
 	cStd, cppStd = maybeReplaceGnuToC(compiler.Properties.Gnu_extensions, cStd, cppStd)
 
@@ -733,7 +742,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
 			"-I"+android.PathForModuleGen(ctx, "sysprop", "include").String())
 	}
 
-	if len(srcs) > 0 {
+	if len(compiler.srcsBeforeGen) > 0 {
 		module := ctx.ModuleDir() + "/Android.bp:" + ctx.ModuleName()
 		if inList("-Wno-error", flags.Local.CFlags) || inList("-Wno-error", flags.Local.CppFlags) {
 			ctx.getOrCreateMakeVarsInfo().UsingWnoError = module
@@ -827,7 +836,7 @@ func (compiler *baseCompiler) compile(ctx ModuleContext, flags Flags, deps PathD
 
 	buildFlags := flagsToBuilderFlags(flags)
 
-	srcs := append(android.Paths(nil), compiler.srcsBeforeGen...)
+	srcs := slices.Clone(compiler.srcsBeforeGen)
 
 	srcs, genDeps, info := genSources(ctx, deps.AidlLibraryInfos, srcs, buildFlags)
 	pathDeps = append(pathDeps, genDeps...)
