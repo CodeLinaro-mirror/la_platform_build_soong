@@ -127,6 +127,7 @@ type configImpl struct {
 	incrementalBuildActions             bool
 	incrementalBuildActionsSetInEnv     bool
 	incrementalProviderTest             bool
+	partialAnalysisTargets              string
 	ensureAllowlistIntegrity            bool // For CI builds - make sure modules are mixed-built
 	runCIPDProxyServer                  bool
 	runCIPDProxyServerControlledByFlags bool
@@ -139,6 +140,8 @@ type configImpl struct {
 	targetDevice    string
 	targetDeviceDir string
 	sandboxConfig   *SandboxConfig
+
+	enforceNoReanalysis bool
 
 	// Autodetected
 	totalRAM      uint64
@@ -323,6 +326,8 @@ func newConfig(ctx Context, isDumpVar bool, args ...string) Config {
 	ret.parseArgs(ctx, args)
 
 	switch os.Getenv("SOONG_NINJA") {
+	case "ninja":
+		ret.ninjaCommand = NINJA_NINJA
 	case "n2":
 		ret.ninjaCommand = NINJA_N2
 	case "siso":
@@ -330,11 +335,12 @@ func newConfig(ctx Context, isDumpVar bool, args ...string) Config {
 	case "ninjago":
 		ret.ninjaCommand = NINJA_NINJAGO
 	default:
-		if os.Getenv("SOONG_USE_N2") == "true" {
-			ret.ninjaCommand = NINJA_N2
-		} else {
-			ret.ninjaCommand = NINJA_DEFAULT
-		}
+		ret.ninjaCommand = NINJA_DEFAULT
+	}
+
+	// TODO(b/490207582): SISO doesn't work on older versions of mac os that our CI builders use
+	if runtime.GOOS == "darwin" && ret.ninjaCommand == NINJA_SISO {
+		ret.ninjaCommand = NINJA_NINJA
 	}
 
 	if value, ok := ret.environ.Get("SOONG_ONLY"); ok && !ret.skipKatiControlledByFlags {
@@ -356,6 +362,10 @@ func newConfig(ctx Context, isDumpVar bool, args ...string) Config {
 	} else if ret.environ.IsFalse("SOONG_INCREMENTAL_ANALYSIS") {
 		ret.incrementalBuildActions = false
 		ret.incrementalBuildActionsSetInEnv = true
+	}
+
+	if value, ok := ret.environ.Get("SOONG_PARTIAL_ANALYSIS"); ok {
+		ret.partialAnalysisTargets = value
 	}
 
 	if ret.ninjaWeightListSource == HINT_FROM_SOONG {
@@ -547,7 +557,6 @@ func newConfig(ctx Context, isDumpVar bool, args ...string) Config {
 
 		// Use config.ninjaCommand instead.
 		"SOONG_NINJA",
-		"SOONG_USE_N2",
 
 		// Already incorporated into the config object
 		"SOONG_ONLY",
@@ -1143,6 +1152,10 @@ func getTargetsFromDirs(ctx Context, relDir string, dirs []string, targetNamePre
 	return targets
 }
 
+func (c *configImpl) EnforceNoReanalysis() bool {
+	return c.enforceNoReanalysis || c.Environment().IsEnvTrue("SOONG_ENFORCE_NO_REANALYSIS")
+}
+
 func (c *configImpl) parseArgs(ctx Context, args []string) {
 	for i := 0; i < len(args); i++ {
 		arg := strings.TrimSpace(args[i])
@@ -1227,6 +1240,8 @@ func (c *configImpl) parseArgs(ctx Context, args []string) {
 			}
 		} else if arg == "--ensure-allowlist-integrity" {
 			c.ensureAllowlistIntegrity = true
+		} else if arg == "--enforce-no-reanalysis" {
+			c.enforceNoReanalysis = true
 		} else if arg == "--run-cipd-proxy-server" {
 			c.runCIPDProxyServer = true
 			c.runCIPDProxyServerControlledByFlags = true

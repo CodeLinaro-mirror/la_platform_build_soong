@@ -36,31 +36,32 @@ var (
 	extractMatchingApex = pctx.StaticRule(
 		"extractMatchingApex",
 		blueprint.RuleParams{
-			Command: `rm -rf "$out" && ` +
-				`${extract_apks} -o "${out}" -allow-prereleased=${allow-prereleased} ` +
-				`-sdk-version=${sdk-version} -skip-sdk-check=${skip-sdk-check} -abis=${abis} ` +
-				`-screen-densities=all -extract-single ` +
+			Command2: blueprint.NewCommand(
+				android.Rm, ` -rf "$out" && `,
+				extract_apks, ` -o "${out}" -allow-prereleased=${allow-prereleased} `,
+				`-sdk-version=${sdk-version} -skip-sdk-check=${skip-sdk-check} -abis=${abis} `,
+				`-screen-densities=all -extract-single `,
 				`${in}`,
-			CommandDeps:     []string{"${extract_apks}"},
-			SandboxDisabled: true,
+			),
 		},
 		"abis", "allow-prereleased", "sdk-version", "skip-sdk-check")
 	decompressApex = pctx.StaticRule("decompressApex", blueprint.RuleParams{
-		Command:         `rm -rf $out && ${deapexer} decompress --copy-if-uncompressed --input ${in} --output ${out}`,
-		CommandDeps:     []string{"${deapexer}"},
-		Description:     "decompress $out",
-		SandboxDisabled: true,
+		Command2: blueprint.NewCommand(
+			android.Rm, ` -rf $out && `, deapexer, ` decompress --copy-if-uncompressed --input ${in} --output ${out}`,
+		),
+		Description: "decompress $out",
 	})
 	// Compares the declared apps of `prebuilt_apex` with the actual apks
 	validateApkInPrebuiltApex = pctx.StaticRule("validateApkinPrebuiltApex", blueprint.RuleParams{
-		Command: `rm -rf ${out} ${actualApks} &&` +
-			` ${apex_ls} ${in} | grep apk$$ | awk -F '/' '{print $$NF}' | sort -u > ${actualApks} &&` +
-			` cmp -s ${expectedApks} ${actualApks} && touch ${out}` +
-			` || (echo "Found diffs between "apps" property of ${apexName} and actual contents of ${in}.` +
-			` Please ensure that all apk-in-apexes are declared in 'apps' property." && exit 1)`,
-		CommandDeps:     []string{"${apex_ls}"},
-		Description:     "validate apk in prebuilt_apex $out",
-		SandboxDisabled: true,
+		Command2: blueprint.NewCommand(
+			android.Rm, ` -rf ${out} ${actualApks} && `,
+			apex_ls, ` ${in} | `, android.Grep, ` apk$$ | `, android.Awk, ` -F '/' '{print $$NF}' | `,
+			android.Sort, ` -u > ${actualApks} && `,
+			android.Cmp, ` -s ${expectedApks} ${actualApks} && `, android.Touch, ` ${out} `,
+			`|| ( `, android.Echo, ` "Found diffs between "apps" property of ${apexName} and actual contents of ${in}. `,
+			`Please ensure that all apk-in-apexes are declared in 'apps' property." && exit 1)`,
+		),
+		Description: "validate apk in prebuilt_apex $out",
 	}, "expectedApks", "actualApks", "apexName")
 )
 
@@ -211,6 +212,10 @@ func (p *prebuiltCommon) initApexFilesForAndroidMk(ctx android.ModuleContext) {
 	// If this apex contains a system server jar, then the dexpreopt artifacts should be added as required
 	p.systemServerDexpreoptInstalls = append(p.systemServerDexpreoptInstalls, p.Dexpreopter.ApexSystemServerDexpreoptInstalls()...)
 	p.systemServerDexJars = append(p.systemServerDexJars, p.Dexpreopter.ApexSystemServerDexJars()...)
+}
+
+func (p *prebuiltCommon) DepsMutator(ctx android.BottomUpMutatorContext) {
+	p.Dexpreopter.DepsMutator(ctx)
 }
 
 // If this prebuilt has system server jar, create the rules to dexpreopt it and install it alongside the prebuilt apex
@@ -654,10 +659,6 @@ func validateApexClasspathFragments(ctx android.ModuleContext) {
 			ctx.ModuleErrorf("%s in contents of %s must also be declared in PRODUCT_APEX_BOOT_JARS", info.UnknownJars, info.ClasspathFragmentModuleName)
 		}
 	})
-}
-
-func (p *Prebuilt) DepsMutator(ctx android.BottomUpMutatorContext) {
-	ctx.AddHostToolDependencies("cp_if_changed")
 }
 
 func (p *Prebuilt) GenerateAndroidBuildActions(ctx android.ModuleContext) {

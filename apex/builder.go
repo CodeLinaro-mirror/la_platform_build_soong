@@ -85,6 +85,7 @@ func init() {
 	pctx.HostBinToolVariable("apex_elf_checker", "apex_elf_checker")
 	pctx.HostBinToolVariable("aconfig", "aconfig")
 	pctx.HostBinToolVariable("host_apex_verifier", "host_apex_verifier")
+	pctx.SourcePathVariable("openssl", "prebuilts/build-tools/${android.HostPrebuiltTag}/bin/openssl")
 }
 
 type createStorageStruct struct {
@@ -117,13 +118,14 @@ var (
 	deapexer                       = pctx.HostTool("deapexer")
 	debugfs                        = pctx.HostTool("debugfs")
 	fsck_erofs                     = pctx.HostTool("fsck.erofs")
-	aconfigTool                    = pctx.HostTool("aconfig")
+	aconfigTool                    = aconfig.Aconfig
 	apex_ls                        = pctx.HostTool("apex-ls")
 	apex_sepolicy_tests            = pctx.HostTool("apex_sepolicy_tests")
 	zip2zip                        = pctx.HostTool("zip2zip")
 	jsonmodify                     = pctx.HostTool("jsonmodify")
 	conv_apex_manifest             = pctx.HostTool("conv_apex_manifest")
 	conv_linker_config             = pctx.HostTool("conv_linker_config")
+	extract_apks                   = pctx.HostTool("extract_apks")
 
 	apexManifestRule = pctx.StaticRule("apexManifestRule", blueprint.RuleParams{
 		Command2: blueprint.NewCommand(
@@ -497,7 +499,7 @@ func (a *apexBundle) buildFileContexts(ctx android.ModuleContext) android.Path {
 	}
 
 	output := android.PathForModuleOut(ctx, "file_contexts")
-	rule := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
+	rule := android.NewRuleBuilder(pctx, ctx)
 
 	labelForRoot := "u:object_r:system_file:s0"
 	labelForManifest := "u:object_r:system_file:s0"
@@ -507,14 +509,14 @@ func (a *apexBundle) buildFileContexts(ctx android.ModuleContext) android.Path {
 		labelForManifest = "u:object_r:vendor_apex_metadata_file:s0"
 	}
 	// remove old file
-	rule.Command().Text("rm").FlagWithOutput("-f ", output)
+	rule.Command().BuiltTool("rm").FlagWithOutput("-f ", output)
 	// copy file_contexts
-	rule.Command().Text("cat").Input(fileContexts).Text(">>").Output(output)
+	rule.Command().BuiltTool("cat").Input(fileContexts).Text(">>").Output(output)
 	// new line
-	rule.Command().Text("echo").Text(">>").Output(output)
+	rule.Command().BuiltTool("echo").Text(">>").Output(output)
 	// force-label /apex_manifest.pb and /
-	rule.Command().Text("echo").Text("/apex_manifest\\\\.pb").Text(labelForManifest).Text(">>").Output(output)
-	rule.Command().Text("echo").Text("/").Text(labelForRoot).Text(">>").Output(output)
+	rule.Command().BuiltTool("echo").Text("/apex_manifest\\\\.pb").Text(labelForManifest).Text(">>").Output(output)
+	rule.Command().BuiltTool("echo").Text("/").Text(labelForRoot).Text(">>").Output(output)
 
 	rule.Build("file_contexts."+a.Name(), "Generate file_contexts")
 	return output
@@ -523,14 +525,21 @@ func (a *apexBundle) buildFileContexts(ctx android.ModuleContext) android.Path {
 // buildInstalledFilesFile creates a build rule for the installed-files.txt file where the list of
 // files included in this APEX is shown. The text file is dist'ed so that people can see what's
 // included in the APEX without actually downloading and extracting it.
-func (a *apexBundle) buildInstalledFilesFile(ctx android.ModuleContext, builtApex android.Path, imageDir android.Path) android.Path {
+func (a *apexBundle) buildInstalledFilesFile(ctx android.ModuleContext, builtApex android.Path, imageZip android.Path) android.Path {
 	output := android.PathForModuleOut(ctx, "installed-files.txt")
-	rule := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
+	unzippedDir := android.PathForModuleOut(ctx, "installed-files-unzipped")
+	rule := android.NewRuleBuilder(pctx, ctx)
 	rule.Command().
 		Implicit(builtApex).
-		Text("(cd " + imageDir.String() + " ; ").
-		Text("find . \\( -type f -o -type l \\) -printf \"%s %p\\n\") ").
-		Text(" | sort -nr > ").
+		BuiltTool("zipsync").
+		FlagWithArg("-d ", unzippedDir.String()).
+		Input(imageZip)
+	rule.Command().
+		BuiltTool("find").
+		Text(unzippedDir.String()).
+		Text("\\( -type f -o -type l \\) -printf \"%s ./%P\\n\" |").
+		BuiltTool("sort").
+		Text("-nr > ").
 		Output(output)
 	rule.Build("installed-files."+a.Name(), "Installed files")
 	return output
@@ -900,8 +909,8 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 		ctx.ModuleProxy(),
 	)
 	noticeAssetPath := android.PathForModuleOut(ctx, "NOTICE", "NOTICE.html.gz")
-	builder := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
-	builder.Command().Text("cp").
+	builder := android.NewRuleBuilder(pctx, ctx)
+	builder.Command().BuiltTool("cp").
 		Input(htmlGzNotice).
 		Output(noticeAssetPath)
 	builder.Build("notice_dir", "Building notice dir")
@@ -1108,9 +1117,9 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 	if a.isCompressed {
 		unsignedCompressedOutputFile := android.PathForModuleOut(ctx, a.Name()+imageCapexSuffix+".unsigned")
 
-		compressRule := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
+		compressRule := android.NewRuleBuilder(pctx, ctx)
 		compressRule.Command().
-			Text("rm").
+			BuiltTool("rm").
 			FlagWithOutput("-f ", unsignedCompressedOutputFile)
 		compressRule.Command().
 			BuiltTool("apex_compression_tool").
@@ -1145,7 +1154,7 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 	a.installedFile = ctx.InstallFile(a.installDir, a.Name()+installSuffix, a.outputFile, installDeps...)
 
 	// installed-files.txt is dist'ed
-	a.installedFilesFile = a.buildInstalledFilesFile(ctx, a.outputFile, imageDir)
+	a.installedFilesFile = a.buildInstalledFilesFile(ctx, a.outputFile, imageZipOut)
 
 	a.apexKeysPath = writeApexKeys(ctx, a)
 }
@@ -1313,26 +1322,26 @@ func (a *apexBundle) buildCannedFsConfig(ctx android.ModuleContext) android.Path
 	sort.Strings(zipDirs)
 
 	cannedFsConfig := android.PathForModuleOut(ctx, "canned_fs_config")
-	builder := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
+	builder := android.NewRuleBuilder(pctx, ctx)
 	cmd := builder.Command()
 	cmd.Text("(")
-	cmd.Text("echo '/ 1000 1000 0755';")
+	cmd.BuiltTool("echo").Text("'/ 1000 1000 0755';")
 	for _, p := range readOnlyPaths {
-		cmd.Textf("echo '/%s 1000 1000 0644';", p)
+		cmd.BuiltTool("echo").Textf("'/%s 1000 1000 0644';", p)
 	}
 	for _, p := range executablePaths {
-		cmd.Textf("echo '/%s 0 2000 0755';", p)
+		cmd.BuiltTool("echo").Textf("'/%s 0 2000 0755';", p)
 	}
 	for _, dir := range zipDirs {
-		cmd.Textf("echo '/%s 0 2000 0755';", dir)
+		cmd.BuiltTool("echo").Textf("'/%s 0 2000 0755';", dir)
 		file := zipFiles[dir]
-		cmd.Text("zipinfo -1").Input(file).Textf(`| sed "s:\(.*\):/%s/\1 1000 1000 0644:";`, dir)
+		cmd.PrebuiltBuildTool(ctx, "ziptool").Text("zipinfo -1").Input(file).Text(`|`).BuiltTool("sed").Textf(`"s:\(.*\):/%s/\1 1000 1000 0644:";`, dir)
 	}
 	// Custom fs_config is "appended" to the last so that entries from the file are preferred
 	// over default ones set above.
 	customFsConfig := a.properties.Canned_fs_config.GetOrDefault(ctx, "")
 	if customFsConfig != "" {
-		cmd.Text("cat").Input(android.PathForModuleSrc(ctx, customFsConfig))
+		cmd.BuiltTool("cat").Input(android.PathForModuleSrc(ctx, customFsConfig))
 	}
 	cmd.Text(")").FlagWithOutput("> ", cannedFsConfig)
 	builder.Build("generateFsConfig", fmt.Sprintf("Generating canned fs config for %s", a.BaseModuleName()))
