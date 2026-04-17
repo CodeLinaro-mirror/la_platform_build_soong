@@ -68,32 +68,24 @@ func GetProtoFlags(ctx ModuleContext, p *ProtoProperties) ProtoFlags {
 
 	// Create a phony only once for each include dir to save on ninja file size.
 	// (saves ~145 MB at time of writing)
-	createPhonyForIncludeDir := func(deps *Paths, includeDir string, local bool) {
+	createPhonyForIncludeDir := func(deps *Paths, includeDir string) {
 		phonyName := fmt.Sprintf("protoIncDir_%s", strings.ReplaceAll(includeDir, "/", "__"))
-		var files Paths
-		if local {
-			files = ctx.GlobFiles(includeDir+"/**/*.proto", nil)
-		} else {
-			files = ctx.GlobFilesOutsideModuleDir(includeDir+"/**/*.proto", nil)
-		}
-		phonyPath := ctx.CreateNinjaPhonyOnce(phonyName, files)
-		if phonyPath != nil {
-			*deps = append(*deps, phonyPath)
-		}
+		phony := ctx.CreateNinjaPhonyOnce(phonyName, []string{includeDir + "/**/*.proto"})
+		*deps = append(*deps, phony)
 	}
 
 	if len(p.Proto.Local_include_dirs) > 0 {
 		localProtoIncludeDirs := PathsForModuleSrc(ctx, p.Proto.Local_include_dirs).Strings()
 		flags = append(flags, JoinWithPrefix(localProtoIncludeDirs, "-I"))
 		for _, includeDir := range localProtoIncludeDirs {
-			createPhonyForIncludeDir(&deps, includeDir, true)
+			createPhonyForIncludeDir(&deps, includeDir)
 		}
 	}
 	if len(p.Proto.Include_dirs) > 0 {
 		rootProtoIncludeDirs := PathsForSource(ctx, p.Proto.Include_dirs).Strings()
 		flags = append(flags, JoinWithPrefix(rootProtoIncludeDirs, "-I"))
 		for _, includeDir := range rootProtoIncludeDirs {
-			createPhonyForIncludeDir(&deps, includeDir, false)
+			createPhonyForIncludeDir(&deps, includeDir)
 		}
 	}
 

@@ -931,6 +931,7 @@ func (j *Module) useKsp() bool {
 }
 
 func (j *Module) deps(ctx android.BottomUpMutatorContext) {
+	j.dexpreopter.DepsMutator(ctx)
 	j.setOptimizeForceDisabled(proptools.Bool(j.properties.Is_stubs_module))
 	if ctx.Device() {
 		j.linter.deps(ctx)
@@ -1007,6 +1008,8 @@ func (j *Module) deps(ctx android.BottomUpMutatorContext) {
 	}
 
 	j.EmbeddableSdkLibraryComponent.setComponentDependencyInfoProvider(ctx)
+
+	ctx.AddHostToolDependencies("cp_if_changed")
 }
 
 func hasSrcExt(srcs []string, ext string) bool {
@@ -1383,15 +1386,21 @@ func (j *Module) compile(ctx android.ModuleContext) *JavaInfo {
 			j.extraCombinedJars, manifest)
 
 		combinedHeaderJarFile, jarjared := j.jarjarIfNecessary(ctx, preJarjarHeaderJarFile, jarName, "turbine", false)
+		combinedHeaderJarFile, _ = j.repackageFlagsIfNecessary(ctx, combinedHeaderJarFile, jarName, "repackage-turbine")
 		if jarjared {
 			localHeaderJars = android.Paths{combinedHeaderJarFile}
 			transitiveStaticLibsHeaderJars = nil
+		} else {
+			// Repackaging rules (from jarjar_prefix) are strictly renames, making it safe
+			// to process on individual thin jars without pruning or atomicity conflicts
+			// (unlike explicit `jarjar_rules` which can contain `keep`/`zap` rules).
+			for i, jar := range localHeaderJars {
+				distinctName := strings.TrimSuffix(jarName, ".jar") + "." + strconv.Itoa(i) + ".jar"
+				repackagedJar, _ := j.repackageFlagsIfNecessary(ctx, jar, distinctName, "repackage-turbine")
+				localHeaderJars[i] = repackagedJar
+			}
 		}
-		combinedHeaderJarFile, repackaged := j.repackageFlagsIfNecessary(ctx, combinedHeaderJarFile, jarName, "repackage-turbine")
-		if repackaged {
-			localHeaderJars = android.Paths{combinedHeaderJarFile}
-			transitiveStaticLibsHeaderJars = nil
-		}
+
 		if ctx.Failed() {
 			return nil
 		}
@@ -1681,15 +1690,22 @@ func (j *Module) compile(ctx android.ModuleContext) *JavaInfo {
 			localHeaderJars = android.Paths{j.headerJarFile}
 			transitiveStaticLibsHeaderJars = nil
 		}
-		var repackaged bool
-		repackagedHeaderJarFile, repackaged = j.repackageFlagsIfNecessary(ctx, j.headerJarFile, jarName, "turbine")
-		if repackaged {
-			// repackage modifies transitive static dependencies, use the combined header jar and drop the transitive
-			// static libs header jars.
+		repackagedHeaderJarFile, _ = j.repackageFlagsIfNecessary(ctx, j.headerJarFile, jarName, "turbine")
+		updatedLocalHeaderJars := android.Paths{}
+		// Repackaging rules (from jarjar_prefix) are strictly renames, making it safe
+		// to process on individual thin jars without pruning or atomicity conflicts
+		// (unlike explicit `jarjar_rules` which can contain `keep`/`zap` rules).
+		for i, jar := range localHeaderJars {
 			// TODO(b/356688296): this shouldn't export both the unmodified and repackaged header jars
-			localHeaderJars = android.Paths{j.headerJarFile, repackagedHeaderJarFile}
-			transitiveStaticLibsHeaderJars = nil
+			distinctName := strings.TrimSuffix(jarName, ".jar") + "." + strconv.Itoa(i) + ".jar"
+			repackagedJar, repackaged := j.repackageFlagsIfNecessary(ctx, jar, distinctName, "repackage-turbine")
+			if repackaged {
+				updatedLocalHeaderJars = append(updatedLocalHeaderJars, jar, repackagedJar)
+			} else {
+				updatedLocalHeaderJars = append(updatedLocalHeaderJars, jar)
+			}
 		}
+		localHeaderJars = updatedLocalHeaderJars
 	}
 	if len(uniqueJavaFiles) > 0 || len(srcJars) > 0 {
 		// turbine is disabled when API generating APs are present, in which case,
@@ -2088,6 +2104,13 @@ func (j *Module) compile(ctx android.ModuleContext) *JavaInfo {
 				minSdkVersion: j.MinSdkVersion(ctx),
 				classesJar:    outputFile,
 				jarName:       jarName,
+			}
+			if j.GetProfileGuided(ctx) && !j.EnableProfileRewriting(ctx) {
+				// If the app uses profile-guided optimization *without* profile rewriting, avoid
+				// implicitly enabling full dex optimization, as that can easily break the profile.
+				// TODO(b/487652136): Consider requiring apps to explicitly opt in or out of
+				// dex optimization when using profile-guided optimization, avoiding uncertainty.
+				j.dexer.dexProperties.Optimize.OptimizeByDefault = false
 			}
 			if j.GetProfileGuided(ctx) && j.optimizeOrObfuscateEnabled(ctx) && !j.EnableProfileRewriting(ctx) {
 				ctx.PropertyErrorf("enable_profile_rewriting",
@@ -2612,6 +2635,7 @@ func (j *Module) IDEInfo(ctx android.BaseModuleContext, dpInfo *android.IdeInfo)
 	dpInfo.Libs = append(dpInfo.Libs, j.libs(ctx)...)
 	dpInfo.Associates = append(dpInfo.Associates, j.properties.Associates...)
 	dpInfo.Kotlincflags = append(dpInfo.Kotlincflags, j.properties.Kotlincflags...)
+	dpInfo.Javacflags = append(dpInfo.Javacflags, j.properties.Javacflags...)
 	dpInfo.Annotation_processor_flags = append(dpInfo.Annotation_processor_flags, j.properties.Annotation_processor_flags...)
 	dpInfo.Plugins = append(dpInfo.Plugins, j.properties.Plugins...)
 

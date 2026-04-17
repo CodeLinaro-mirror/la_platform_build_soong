@@ -244,7 +244,7 @@ var (
 				`--add-exports=jdk.internal.opt/jdk.internal.opt=ALL-UNNAMED ` +
 				`-jar ${config.JavaKytheExtractorJar} ` +
 				`${config.JavacHeapFlags} ${config.CommonJdkFlags} ` +
-				`$processorpath $processor $javacFlags $bootClasspath $classpath ` +
+				`$processorpath $processor $javacFlags $bootClasspath ` +
 				`-source $javaVersion -target $javaVersion ` +
 				`-d $outDir -s $annoDir @$out.rsp @$srcJarDir/list)`,
 			CommandDeps: []string{
@@ -255,7 +255,7 @@ var (
 			},
 			CommandOrderOnly: []string{"${config.SoongJavacWrapper}"},
 			Rspfile:          "$out.rsp",
-			RspfileContent:   "$in",
+			RspfileContent:   "$classpath\n$in",
 			SandboxDisabled:  true,
 		},
 		"javacFlags", "bootClasspath", "classpath", "processorpath", "processor", "srcJars", "srcJarDir",
@@ -311,10 +311,10 @@ var (
 		&remoteexec.REParams{
 			ExecStrategy: "${config.REJarExecStrategy}",
 			Inputs:       []string{"${config.SoongZipCmd}", "${out}.rsp"},
-			RSPFiles:     []string{"${out}.rsp"},
+			RSPFiles:     []string{"$rspFiles"},
 			OutputFiles:  []string{"$out"},
 			Platform:     map[string]string{remoteexec.PoolKey: "${config.REJavaPool}"},
-		}, []string{"jarArgs"}, nil)
+		}, []string{"jarArgs"}, []string{"rspFiles"})
 
 	zip, zipRE = pctx.RemoteStaticRules("zip",
 		blueprint.RuleParams{
@@ -598,6 +598,8 @@ func emitXrefRule(ctx android.ModuleContext, xrefFile android.WritablePath, idx 
 		intermediatesDir += strconv.Itoa(idx)
 	}
 
+	classpathArg := classpath.FormJavaClassPath("-classpath")
+
 	ctx.Build(pctx,
 		android.BuildParams{
 			Rule:        kytheExtract,
@@ -608,7 +610,7 @@ func emitXrefRule(ctx android.ModuleContext, xrefFile android.WritablePath, idx 
 			Args: map[string]string{
 				"annoDir":       android.PathForModuleOut(ctx, intermediatesDir, "anno").String(),
 				"bootClasspath": bootClasspath,
-				"classpath":     classpath.FormJavaClassPath("-classpath"),
+				"classpath":     classpathArg,
 				"javacFlags":    flags.javacFlags,
 				"javaVersion":   flags.javaVersion.String(),
 				"outDir":        android.PathForModuleOut(ctx, "javac", "classes.xref").String(),
@@ -1021,17 +1023,23 @@ func TransformResourcesToJar(ctx android.ModuleContext, outputFile android.Writa
 	jarArgs []string, deps android.Paths) {
 
 	rule := jar
+	args := map[string]string{
+		"jarArgs": strings.Join(proptools.NinjaAndShellEscapeList(jarArgs), " "),
+	}
 	if ctx.Config().UseREWrapper() && ctx.Config().IsEnvTrue("RBE_JAR") {
 		rule = jarRE
+		// Create an RSP file listing all the inputs for RBE.
+		rbeInputs := android.PathForModuleOut(ctx, "rbe_inputs.rsp")
+		android.WriteFileRule(ctx, rbeInputs, strings.Join(deps.Strings(), " "))
+		args["rspFiles"] = rbeInputs.String()
+		deps = append(deps, rbeInputs)
 	}
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        rule,
 		Description: "jar",
 		Output:      outputFile,
 		Implicits:   deps,
-		Args: map[string]string{
-			"jarArgs": strings.Join(proptools.NinjaAndShellEscapeList(jarArgs), " "),
-		},
+		Args:        args,
 	})
 }
 

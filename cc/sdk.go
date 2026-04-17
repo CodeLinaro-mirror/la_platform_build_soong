@@ -31,6 +31,10 @@ func (sdkTransitionMutator) split(ctx android.BaseModuleContext) []string {
 		return []string{""}
 	}
 
+	if ctx.Target().LFI {
+		return []string{""}
+	}
+
 	switch m := ctx.Module().(type) {
 	case LinkableInterface:
 		if m.AlwaysSdk() {
@@ -51,6 +55,15 @@ func (sdkTransitionMutator) split(ctx android.BaseModuleContext) []string {
 				return []string{""}
 			}
 		}
+	// AllArtlessBlockedSymbolFiles is an arch-variant file group that "wraps" a
+	// list of cc_library targets' tagged outputs. Unlike normal filegroups, it
+	// it is OS and arch-variant, and would otherwise get a sdk:"" split that
+	// prevents usage from CTS (which is always sdk:"sdk").
+	//
+	// The list of symbols is a part of API contract and effectively AlwaysSDK,
+	// so treat it as such here.
+	case *AllArtlessBlockedSymbolFiles:
+		return []string{"sdk"}
 	}
 
 	return []string{""}
@@ -98,6 +111,8 @@ func (sdkTransitionMutator) IncomingTransition(ctx android.IncomingTransitionCon
 				return incomingVariation
 			}
 		}
+	case *AllArtlessBlockedSymbolFiles:
+		return "sdk"
 	}
 	_, usesUnbundledVariantDepTag := ctx.DepTag().(android.UsesUnbundledVariantDepTag)
 	// If we've reached this point, the module doesn't have an sdk variant. If we're adding

@@ -150,7 +150,7 @@ func main() {
 		build.OsEnvironment().IsEnvTrue("ANDROID_QUIET_BUILD"),
 		build.OsEnvironment().IsEnvTrue("SOONG_UI_ANSI_OUTPUT"),
 		build.OsEnvironment().IsEnvTrue("SOONG_UI_SKIP_ACTION_PROGRESS"),
-    )
+	)
 
 	// Create and start a new metric record.
 	met := metrics.New()
@@ -346,6 +346,8 @@ func preProductConfigSetup(buildCtx build.Context, config build.Config) {
 	// if the job is iterating over a large number of lunch targets.
 	if !build.OsEnvironment().IsEnvTrue("_SOONG_INTERNAL_NO_FINDER") {
 		// Create a source finder.
+		e := buildCtx.BeginTrace(metrics.RunSetupTool, "Run finder")
+		defer e.End()
 		f := build.NewSourceFinder(buildCtx, config)
 		defer f.Shutdown()
 		build.FindSources(buildCtx, config, f)

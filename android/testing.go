@@ -67,6 +67,7 @@ var PrepareForTestWithArchMutator = GroupFixturePreparers(
 	FixtureRegisterWithContext(func(ctx RegistrationContext) {
 		ctx.PreDepsMutators(registerArchMutator)
 	}),
+	PrepareForTestWithBuildFlag("RELEASE_SOONG_IMAGE_VARIANT_ON_DEMAND", "true"),
 )
 
 var PrepareForTestWithDefaults = FixtureRegisterWithContext(func(ctx RegistrationContext) {
@@ -175,6 +176,8 @@ var PrepareForTestWithAllowMissingDependencies = GroupFixturePreparers(
 	}),
 	FixtureModifyContext(func(ctx *TestContext) {
 		ctx.SetAllowMissingDependencies(true)
+		// TODO(b/477627661): on-demand variants is not supported with allow missing deps.
+		ctx.SetSplitAllVariants(true)
 	}),
 )
 
@@ -1598,11 +1601,17 @@ func PrepareForTestWithHostTools(hostTools ...string) FixturePreparer {
 	fs := make(MockFS)
 
 	for _, hostTool := range hostTools {
-		fs[fmt.Sprintf("host_tools/%s/Android.bp", hostTool)] = fmt.Appendf(nil, `
-		host_mock_module {
-			name: "%s"
+		if _, ok := commonToyboxSymlinks[hostTool]; ok {
+			prebuiltOS := prebuiltOS()
+			fs["prebuilts/build-tools/"+prebuiltOS+"/bin/toybox"] = []byte{}
+			fs["prebuilts/build-tools/path/"+prebuiltOS+"/"+hostTool] = []byte{}
+		} else {
+			fs[fmt.Sprintf("host_tools/%s/Android.bp", hostTool)] = fmt.Appendf(nil, `
+			host_mock_module {
+				name: "%s"
+			}
+			`, hostTool)
 		}
-		`, hostTool)
 	}
 
 	return GroupFixturePreparers(

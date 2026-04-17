@@ -44,6 +44,10 @@ const (
 var (
 	pctx = android.NewPackageContext("android/soong/cc")
 
+	lfiBindTool    = pctx.HostTool("lfi-bind")
+	lfiVerifyTool  = pctx.HostTool("lfi-verify")
+	symbolsMapTool = pctx.HostTool("symbols_map")
+
 	// Rule to invoke gcc with given command, flags, and dependencies. Outputs a .d depfile.
 	cc = pctx.AndroidRemoteStaticRule("cc", android.RemoteRuleSupports{RBE: true},
 		blueprint.RuleParams{
@@ -107,43 +111,46 @@ var (
 	// Rule to invoke `ar` with given cmd and flags, but no static library depenencies.
 	ar = pctx.AndroidStaticRule("ar",
 		blueprint.RuleParams{
-			Command:         "rm -f ${out} && $arCmd $arFlags $out @${out}.rsp",
-			CommandDeps:     []string{"$arCmd"},
-			Rspfile:         "${out}.rsp",
-			RspfileContent:  "${in}",
-			SandboxDisabled: true,
+			Command2: blueprint.NewCommand(
+				android.Rm, " -f ${out} && ",
+				"${config.ClangBin}/llvm-ar $arFlags $out @${out}.rsp",
+			),
+			CommandDeps:    []string{"${config.ClangBin}/llvm-ar"},
+			Rspfile:        "${out}.rsp",
+			RspfileContent: "${in}",
 		},
-		"arCmd", "arFlags")
+		"arFlags")
 
 	// Rule to invoke `ar` with given cmd, flags, and library dependencies. Generates a .a
 	// (archive) file from .o files.
 	arWithLibs = pctx.AndroidStaticRule("arWithLibs",
 		blueprint.RuleParams{
-			Command:         "rm -f ${out} && $arCmd $arObjFlags $out @${out}.rsp && $arCmd $arLibFlags $out $arLibs",
-			CommandDeps:     []string{"$arCmd"},
-			Rspfile:         "${out}.rsp",
-			RspfileContent:  "${arObjs}",
-			SandboxDisabled: true,
+			Command2: blueprint.NewCommand(
+				android.Rm, " -f ${out} && ",
+				"${config.ClangBin}/llvm-ar $arObjFlags $out @${out}.rsp && ${config.ClangBin}/llvm-ar $arLibFlags $out $arLibs",
+			),
+			CommandDeps:    []string{"${config.ClangBin}/llvm-ar"},
+			Rspfile:        "${out}.rsp",
+			RspfileContent: "${arObjs}",
 		},
-		"arCmd", "arObjFlags", "arObjs", "arLibFlags", "arLibs")
+		"arObjFlags", "arObjs", "arLibFlags", "arLibs")
 
 	// Rule to run objcopy --prefix-symbols (to prefix all symbols in a file with a given string).
 	prefixSymbols = pctx.AndroidStaticRule("prefixSymbols",
 		blueprint.RuleParams{
-			Command:         "$objcopyCmd --prefix-symbols=${prefix} ${in} ${out}",
-			CommandDeps:     []string{"$objcopyCmd"},
-			SandboxDisabled: true,
+			Command:     "${config.ClangBin}/llvm-objcopy --prefix-symbols=${prefix} ${in} ${out}",
+			CommandDeps: []string{"${config.ClangBin}/llvm-objcopy"},
 		},
-		"objcopyCmd", "prefix")
+		"prefix")
 
 	// Rule to run objcopy --remove-section=.llvm_addrsig on a partially linked object
 	noAddrSig = pctx.AndroidStaticRule("noAddrSig",
 		blueprint.RuleParams{
-			Command:         "rm -f ${out} && $objcopyCmd --remove-section=.llvm_addrsig ${in} ${out}",
-			CommandDeps:     []string{"$objcopyCmd"},
-			SandboxDisabled: true,
-		},
-		"objcopyCmd")
+			Command2: blueprint.NewCommand(
+				android.Rm, " -f ${out} && ${config.ClangBin}/llvm-objcopy --remove-section=.llvm_addrsig ${in} ${out}",
+			),
+			CommandDeps: []string{"${config.ClangBin}/llvm-objcopy"},
+		})
 
 	_ = pctx.SourcePathVariable("stripPath", "build/soong/scripts/strip.sh")
 	_ = pctx.SourcePathVariable("xzCmd", "prebuilts/build-tools/${config.HostPrebuiltTag}/bin/xz")
@@ -365,11 +372,32 @@ var (
 
 	// Rule to generate the elf mapping textproto file from the symbols file.
 	elfSymbolsToProto = pctx.AndroidStaticRule("elf_symbols_to_proto", blueprint.RuleParams{
-		Command:         `${symbols_map} -elf $in -write_if_changed $out`,
-		Restat:          true,
-		CommandDeps:     []string{"${symbols_map}"},
-		SandboxDisabled: true,
+		Command2: blueprint.NewCommand(
+			symbolsMapTool, ` -elf $in -write_if_changed $out`,
+		),
+		Restat: true,
 	})
+
+	lfiBind = pctx.AndroidStaticRule("lfi_bind", blueprint.RuleParams{
+		Command2: blueprint.NewCommand(
+			lfiBindTool, ` -verbose -no-constructor -no-sigaltstack -embed -gen-trampolines ${genDir}/trampolines.S -gen-init ${genDir}/init.c -lib ${name}_box -symbols-all $in && `,
+			// lfi-bind always generates the header next to the source file, move it to another
+			// folder so you can't #include init.c
+			android.Mv, ` ${genDir}/${name}_box.h ${includeDir}`,
+		),
+	}, "name", "genDir", "includeDir")
+
+	lfiVerify = pctx.AndroidStaticRule("lfi_verify", blueprint.RuleParams{
+		Command2: blueprint.NewCommand(
+			lfiVerifyTool, ` $in && `, android.Touch, ` $out`,
+		),
+	})
+
+	lfiBindRlbox = pctx.AndroidStaticRule("lfi_bind_rlbox", blueprint.RuleParams{
+		Command2: blueprint.NewCommand(
+			lfiBindTool, `-gen-inc ${genDir}/inc.S -lib ${name}_box $in`,
+		),
+	}, "name", "genDir")
 
 	// Function pointer for producting staticlibs from rlibs. Corresponds to
 	// rust.TransformRlibstoStaticlib(), initialized in soong-rust (rust/builder.go init())
@@ -396,8 +424,6 @@ func init() {
 	pctx.StaticVariable("relPwd", PwdPrefix())
 
 	pctx.HostBinToolVariable("SoongZipCmd", "soong_zip")
-
-	pctx.HostBinToolVariable("symbols_map", "symbols_map")
 
 	pctx.HostBinToolVariable("checkElfFileCmd", "check_elf_file")
 }
@@ -859,7 +885,6 @@ func transformObjToStaticLib(ctx android.ModuleContext,
 	objFiles android.Paths, wholeStaticLibs android.Paths,
 	flags builderFlags, outputFile android.ModuleOutPath, deps android.Paths, validations android.Paths) {
 
-	arCmd := "${config.ClangBin}/llvm-ar"
 	arFlags := ""
 	if !ctx.Darwin() {
 		arFlags += " --format=gnu"
@@ -875,7 +900,6 @@ func transformObjToStaticLib(ctx android.ModuleContext,
 			Validations: validations,
 			Args: map[string]string{
 				"arFlags": "crsPD" + arFlags,
-				"arCmd":   arCmd,
 			},
 		})
 
@@ -887,7 +911,6 @@ func transformObjToStaticLib(ctx android.ModuleContext,
 			Inputs:      append(objFiles, wholeStaticLibs...),
 			Implicits:   deps,
 			Args: map[string]string{
-				"arCmd":      arCmd,
 				"arObjFlags": "crsPD" + arFlags,
 				"arObjs":     strings.Join(objFiles.Strings(), " "),
 				"arLibFlags": "cqsL" + arFlags,
@@ -1189,33 +1212,24 @@ func transformObjsToObj(ctx android.ModuleContext, objFiles android.Paths,
 // Generate a rule for running objcopy --prefix-symbols on a binary
 func transformBinaryPrefixSymbols(ctx android.ModuleContext, prefix string, inputFile android.Path,
 	flags builderFlags, outputFile android.WritablePath) {
-
-	objcopyCmd := "${config.ClangBin}/llvm-objcopy"
-
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        prefixSymbols,
 		Description: "prefix symbols " + outputFile.Base(),
 		Output:      outputFile,
 		Input:       inputFile,
 		Args: map[string]string{
-			"objcopyCmd": objcopyCmd,
-			"prefix":     prefix,
+			"prefix": prefix,
 		},
 	})
 }
 
 // Generate a rule for running objcopy --remove-section=.llvm_addrsig on a partially linked object
 func transformObjectNoAddrSig(ctx android.ModuleContext, inputFile android.Path, outputFile android.WritablePath) {
-	objcopyCmd := "${config.ClangBin}/llvm-objcopy"
-
 	ctx.Build(pctx, android.BuildParams{
 		Rule:        noAddrSig,
 		Description: "remove addrsig " + outputFile.Base(),
 		Output:      outputFile,
 		Input:       inputFile,
-		Args: map[string]string{
-			"objcopyCmd": objcopyCmd,
-		},
 	})
 }
 
@@ -1308,4 +1322,54 @@ func transformArchiveRepack(ctx android.ModuleContext, inputFile android.Path,
 			"objects": strings.Join(objects, " "),
 		},
 	})
+}
+
+func transformToLFISandboxedSources(ctx ModuleContext, inputFile android.Path) lfiInfo {
+	verifyTimestamp := android.PathForModuleGen(ctx, "lfi_bind_gendir", "lfi_verify.stamp")
+	ctx.Build(pctx, android.BuildParams{
+		Rule:   lfiVerify,
+		Input:  inputFile,
+		Output: verifyTimestamp,
+	})
+
+	genDir := android.PathForModuleGen(ctx, "lfi_bind_gendir")
+	if ctx.lfiUseRlbox() {
+		initFile := genDir.Join(ctx, "inc.S")
+		ctx.Build(pctx, android.BuildParams{
+			Rule:   lfiBindRlbox,
+			Input:  inputFile,
+			Output: initFile,
+			Args: map[string]string{
+				"genDir": genDir.String(),
+				"name":   ctx.ModuleName(),
+			},
+			Validation: verifyTimestamp,
+		})
+		return lfiInfo{
+			srcs: android.Paths{initFile},
+		}
+	} else {
+		includeDir := android.PathForModuleGen(ctx, "lfi_bind_includedir")
+		srcs := android.WritablePaths{
+			genDir.Join(ctx, "init.c"),
+			genDir.Join(ctx, "trampolines.S"),
+		}
+		header := includeDir.Join(ctx, ctx.ModuleName()+"_box.h")
+		ctx.Build(pctx, android.BuildParams{
+			Rule:    lfiBind,
+			Input:   inputFile,
+			Outputs: append(srcs, header),
+			Args: map[string]string{
+				"genDir":     genDir.String(),
+				"includeDir": includeDir.String(),
+				"name":       ctx.ModuleName(),
+			},
+			Validation: verifyTimestamp,
+		})
+		return lfiInfo{
+			includeDir: includeDir,
+			header:     header,
+			srcs:       srcs.Paths(),
+		}
+	}
 }

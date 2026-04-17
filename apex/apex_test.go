@@ -574,7 +574,7 @@ func TestBasicApex(t *testing.T) {
 	found_foo_link_64 := false
 	found_foo := false
 	for _, cmd := range strings.Split(copyCmds, " && ") {
-		if strings.HasPrefix(cmd, "ln -sfn foo64") {
+		if strings.Contains(cmd, "ln -sfn foo64") {
 			if strings.HasSuffix(cmd, "bin/foo") {
 				found_foo = true
 			} else if strings.HasSuffix(cmd, "bin/foo_link_64") {
@@ -1490,6 +1490,7 @@ func TestApex_PlatformUsesLatestStubFromApex(t *testing.T) {
 				"libstub",
 				"libstub_rust",
 			],
+			split_all_variants: true,
 		}
 	`,
 		android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
@@ -2024,6 +2025,7 @@ func TestApexWithSystemLibsStubs(t *testing.T) {
 			srcs: ["mylib.cpp"],
 			stl: "none",
 			bootstrap: true,
+			split_all_variants: true,
 		}
 
 		rust_ffi {
@@ -2463,6 +2465,7 @@ func TestPlatformUsesLatestStubsFromApexes(t *testing.T) {
 			shared_libs: ["libx", "libx_rs",],
 			system_shared_libs: [],
 			stl: "none",
+			split_all_variants: true,
 		}
 	`)
 
@@ -3787,6 +3790,7 @@ func TestMacro(t *testing.T) {
 			static_libs: ["mylib3"],
 			recovery_available: true,
 			min_sdk_version: "29",
+			split_all_variants: true,
 		}
 		cc_library {
 			name: "mylib3",
@@ -3799,6 +3803,7 @@ func TestMacro(t *testing.T) {
 			],
 			recovery_available: true,
 			min_sdk_version: "29",
+			split_all_variants: true,
 		}
 	`)
 
@@ -3948,16 +3953,16 @@ func getFiles(t *testing.T, ctx *android.TestContext, moduleName, variant string
 		terms := strings.Split(cmd, " ")
 		var dst, src string
 		var isLink, isZip, isRm bool
-		switch terms[0] {
-		case "mkdir":
-		case "cp":
+		switch {
+		case strings.HasSuffix(terms[0], "mkdir"):
+		case strings.HasSuffix(terms[0], "cp"):
 			if len(terms) != 3 && len(terms) != 4 {
 				t.Fatal("copyCmds contains invalid cp command", cmd)
 			}
 			dst = terms[len(terms)-1]
 			src = terms[len(terms)-2]
 			isLink = false
-		case "ln":
+		case strings.HasSuffix(terms[0], "ln"):
 			if len(terms) != 3 && len(terms) != 4 {
 				// ln LINK TARGET or ln -s LINK TARGET
 				t.Fatal("copyCmds contains invalid ln command", cmd)
@@ -3965,14 +3970,14 @@ func getFiles(t *testing.T, ctx *android.TestContext, moduleName, variant string
 			dst = terms[len(terms)-1]
 			src = terms[len(terms)-2]
 			isLink = true
-		case "unzip":
-			if len(terms) != 5 {
-				t.Fatal("copyCmds contains invalid unzip command", cmd)
+		case strings.HasSuffix(terms[0], "zipsync"):
+			if len(terms) != 4 {
+				t.Fatal("copyCmds contains invalid zipsync command", cmd)
 			}
 			dst = terms[len(terms)-2]
 			src = path.Base(terms[len(terms)-1])
 			isZip = true
-		case "rm":
+		case strings.HasSuffix(terms[0], "rm"):
 			if len(terms) != 3 {
 				t.Fatal("copyCmds contains invalid rm command", cmd)
 			}
@@ -4760,6 +4765,7 @@ func TestApexWithTarget(t *testing.T) {
 				"//apex_available:platform",
 				"myapex",
 			],
+			split_all_variants: true,
 		}
 
 		cc_library {
@@ -4768,6 +4774,7 @@ func TestApexWithTarget(t *testing.T) {
 			system_shared_libs: [],
 			stl: "none",
 			compile_multilib: "first",
+			split_all_variants: true,
 		}
 	`)
 
@@ -7118,6 +7125,7 @@ func TestApexAvailable_CheckForPlatform(t *testing.T) {
 		system_shared_libs: [],
 		shared_libs: ["libbar"],
 		apex_available: ["//apex_available:platform"],
+		split_all_variants: true,
 	}
 
 	cc_library {
@@ -7126,6 +7134,7 @@ func TestApexAvailable_CheckForPlatform(t *testing.T) {
 		system_shared_libs: [],
 		shared_libs: ["libbaz"],
 		apex_available: ["//apex_available:platform"],
+		split_all_variants: true,
 	}
 
 	cc_library {
@@ -10351,7 +10360,9 @@ func TestCannedFsConfig(t *testing.T) {
 	generateFsRule := mod.Rule("generateFsConfig")
 	cmd := generateFsRule.RuleParams.Command
 
-	ensureContains(t, cmd, `( echo '/ 1000 1000 0755'; echo '/apex_manifest.json 1000 1000 0644'; echo '/apex_manifest.pb 1000 1000 0644'; ) >`)
+	ensureContains(t, cmd, `echo '/ 1000 1000 0755';`)
+	ensureContains(t, cmd, `echo '/apex_manifest.json 1000 1000 0644';`)
+	ensureContains(t, cmd, `echo '/apex_manifest.pb 1000 1000 0644'; ) >`)
 }
 
 func TestCannedFsConfig_HasCustomConfig(t *testing.T) {
@@ -10374,7 +10385,10 @@ func TestCannedFsConfig_HasCustomConfig(t *testing.T) {
 	cmd := generateFsRule.RuleParams.Command
 
 	// Ensure that canned_fs_config has "cat my_config" at the end
-	ensureContains(t, cmd, `( echo '/ 1000 1000 0755'; echo '/apex_manifest.json 1000 1000 0644'; echo '/apex_manifest.pb 1000 1000 0644'; cat my_config ) >`)
+	ensureContains(t, cmd, `echo '/ 1000 1000 0755';`)
+	ensureContains(t, cmd, `echo '/apex_manifest.json 1000 1000 0644';`)
+	ensureContains(t, cmd, `echo '/apex_manifest.pb 1000 1000 0644';`)
+	ensureContains(t, cmd, `cat my_config ) >`)
 }
 
 func TestStubLibrariesMultipleApexViolation(t *testing.T) {
@@ -10605,11 +10619,11 @@ func TestAconfigFilesJavaDeps(t *testing.T) {
 		t.Fatalf("Expected 14 commands, got %d in:\n%s", len(copyCmds), s)
 	}
 
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/aconfig_flags.pb .*/image.apex/etc/aconfig_flags.pb")
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/package.map .*/image.apex/etc/package.map")
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/flag.map .*/image.apex/etc/flag.map")
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/flag.val .*/image.apex/etc/flag.val")
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/flag.info.*/image.apex/etc/flag.info")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/aconfig_flags.pb .*/image.apex/etc/aconfig_flags.pb")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/package.map .*/image.apex/etc/package.map")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/flag.map .*/image.apex/etc/flag.map")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/flag.val .*/image.apex/etc/flag.val")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/flag.info.*/image.apex/etc/flag.info")
 
 	inputs := []string{
 		"my_aconfig_declarations_foo/aconfig-cache.pb",
@@ -10744,11 +10758,11 @@ func TestAconfigFilesJavaAndCcDeps(t *testing.T) {
 		t.Fatalf("Expected 18 commands, got %d in:\n%s", len(copyCmds), s)
 	}
 
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/aconfig_flags.pb .*/image.apex/etc/aconfig_flags.pb")
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/package.map .*/image.apex/etc/package.map")
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/flag.map .*/image.apex/etc/flag.map")
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/flag.val .*/image.apex/etc/flag.val")
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/flag.info .*/image.apex/etc/flag.info")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/aconfig_flags.pb .*/image.apex/etc/aconfig_flags.pb")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/package.map .*/image.apex/etc/package.map")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/flag.map .*/image.apex/etc/flag.map")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/flag.val .*/image.apex/etc/flag.val")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/flag.info .*/image.apex/etc/flag.info")
 
 	inputs := []string{
 		"my_aconfig_declarations_foo/aconfig-cache.pb",
@@ -10906,11 +10920,11 @@ func TestAconfigFilesRustDeps(t *testing.T) {
 		t.Fatalf("Expected 32 commands, got %d in:\n%s", len(copyCmds), s)
 	}
 
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/aconfig_flags.pb .*/image.apex/etc/aconfig_flags.pb")
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/package.map .*/image.apex/etc/package.map")
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/flag.map .*/image.apex/etc/flag.map")
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/flag.val .*/image.apex/etc/flag.val")
-	ensureListContainsMatch(t, copyCmds, "^cp -f .*/flag.info .*/image.apex/etc/flag.info")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/aconfig_flags.pb .*/image.apex/etc/aconfig_flags.pb")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/package.map .*/image.apex/etc/package.map")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/flag.map .*/image.apex/etc/flag.map")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/flag.val .*/image.apex/etc/flag.val")
+	ensureListContainsMatch(t, copyCmds, "cp -f .*/flag.info .*/image.apex/etc/flag.info")
 
 	inputs := []string{
 		"my_aconfig_declarations_foo/aconfig-cache.pb",
@@ -12004,6 +12018,7 @@ func TestPrebuiltStubNoinstall(t *testing.T) {
 		cc_library {
 			name: "installedlib",
 			shared_libs: ["libfoo"],
+			split_all_variants: true,
 		}
 	`)
 

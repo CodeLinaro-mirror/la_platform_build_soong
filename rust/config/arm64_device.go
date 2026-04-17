@@ -103,12 +103,7 @@ func init() {
 	pctx.StaticVariable("Arm64ToolchainLinkFlags", strings.Join(Arm64LinkFlags, " "))
 
 	for variant, rustFlags := range Arm64ArchVariantRustFlags {
-		pctx.VariableFunc("Arm64"+variant+"VariantRustFlags", func(ctx android.PackageVarContext) string {
-			if ctx.Config().ReleaseRustUseArmTargetArchVariant() {
-				return strings.Join(rustFlags, " ")
-			}
-			return ""
-		})
+		pctx.StaticVariable("Arm64"+variant+"VariantRustFlags", strings.Join(rustFlags, " "))
 	}
 
 	pctx.StaticVariable("DEVICE_ARM64_RUSTC_FLAGS", strings.Join(Arm64RustFlags, " "))
@@ -174,7 +169,7 @@ func Arm64ToolchainFactory(arch android.Arch) Toolchain {
 		toolchainRustFlags = append(toolchainRustFlags, Arm64ArchFeatureRustFlags[feature]...)
 	}
 
-	cc_toolchain := cc_config.FindToolchain(android.Android, arch)
+	cc_toolchain := cc_config.FindToolchain(android.Android, arch, false)
 	return &toolchainArm64{
 		toolchainRustFlags: strings.Join(toolchainRustFlags, " "),
 		cc_toolchain:       cc_toolchain,
