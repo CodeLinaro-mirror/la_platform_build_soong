@@ -11,6 +11,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+// Changes from Qualcomm Technologies, Inc. are provided under the following license:
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 
 package cc
 
@@ -580,6 +583,12 @@ func (library *libraryDecorator) compilerFlags(ctx ModuleContext, flags Flags, d
 
 		flags = AddStubLibraryCompilerFlags(flags)
 	}
+
+	libName := library.getLibName(ctx)
+	if  libName == "libinit" && ctx.Config().IsEnvTrue("BOARD_SUPPORTS_RAMDISK_EARLY_INIT") {
+		flags.Local.CFlags = append(flags.Local.CFlags , "-DENABLE_EARLY_SERVICES")
+	}
+
 	return flags
 }
 
