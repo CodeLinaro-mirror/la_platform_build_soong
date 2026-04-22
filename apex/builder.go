@@ -58,33 +58,6 @@ func init() {
 		})
 	}
 	hostBinToolVariableWithPrebuilt("aapt2", "prebuilts/sdk/tools", "aapt2")
-	pctx.HostBinToolVariable("avbtool", "avbtool")
-	pctx.HostBinToolVariable("e2fsdroid", "e2fsdroid")
-	pctx.HostBinToolVariable("merge_zips", "merge_zips")
-	pctx.HostBinToolVariable("mke2fs", "mke2fs")
-	pctx.HostBinToolVariable("resize2fs", "resize2fs")
-	pctx.HostBinToolVariable("sefcontext_compile", "sefcontext_compile")
-	pctx.HostBinToolVariable("soong_zip", "soong_zip")
-	pctx.HostBinToolVariable("zip2zip", "zip2zip")
-	pctx.HostBinToolVariable("zipalign", "zipalign")
-	pctx.HostBinToolVariable("jsonmodify", "jsonmodify")
-	pctx.HostBinToolVariable("conv_apex_manifest", "conv_apex_manifest")
-	pctx.HostBinToolVariable("extract_apks", "extract_apks")
-	pctx.HostBinToolVariable("make_f2fs", "make_f2fs")
-	pctx.HostBinToolVariable("sload_f2fs", "sload_f2fs")
-	pctx.HostBinToolVariable("make_erofs", "mkfs.erofs")
-	pctx.HostBinToolVariable("apex_compression_tool", "apex_compression_tool")
-	pctx.HostBinToolVariable("dexdeps", "dexdeps")
-	pctx.HostBinToolVariable("apex_ls", "apex-ls")
-	pctx.HostBinToolVariable("apex_sepolicy_tests", "apex_sepolicy_tests")
-	pctx.HostBinToolVariable("deapexer", "deapexer")
-	pctx.HostBinToolVariable("debugfs", "debugfs")
-	pctx.HostBinToolVariable("fsck_erofs", "fsck.erofs")
-	pctx.SourcePathVariable("genNdkUsedbyApexPath", "build/soong/scripts/gen_ndk_usedby_apex.sh")
-	pctx.HostBinToolVariable("conv_linker_config", "conv_linker_config")
-	pctx.HostBinToolVariable("apex_elf_checker", "apex_elf_checker")
-	pctx.HostBinToolVariable("aconfig", "aconfig")
-	pctx.HostBinToolVariable("host_apex_verifier", "host_apex_verifier")
 	pctx.SourcePathVariable("openssl", "prebuilts/build-tools/${android.HostPrebuiltTag}/bin/openssl")
 }
 
@@ -126,6 +99,7 @@ var (
 	conv_apex_manifest             = pctx.HostTool("conv_apex_manifest")
 	conv_linker_config             = pctx.HostTool("conv_linker_config")
 	extract_apks                   = pctx.HostTool("extract_apks")
+	gen_apex_symbols               = pctx.HostTool("gen_apex_symbols")
 
 	apexManifestRule = pctx.StaticRule("apexManifestRule", blueprint.RuleParams{
 		Command2: blueprint.NewCommand(
@@ -246,12 +220,15 @@ var (
 		Command2: blueprint.NewCommand(
 			android.Rm, ` -rf ${out}.image && `, android.Mkdir, ` -p ${out}.image && `,
 			android.ZipSync, ` -d ${out}.image ${image_zip} && `,
-			`$genNdkUsedbyApexPath ${out}.image ${readelf} ${out} && `,
+			gen_apex_symbols, ` ndk_usedby ${out}.image ${config.ClangBin}/llvm-readelf `, android.ZipSync, ` ${out} && `,
 			android.Rm, ` -rf ${out}.image`,
 		),
-		CommandDeps: []string{"${genNdkUsedbyApexPath}"},
+		CommandDeps: []string{
+			"${config.ClangBin}/llvm-readelf",
+			"${config.ClangBin}/llvm-readobj",
+		},
 		Description: "Generate symbol list used by Apex",
-	}, "image_zip", "readelf")
+	}, "image_zip")
 
 	apexSepolicyTestsRule = pctx.StaticRule("apexSepolicyTestsRule", blueprint.RuleParams{
 		Command2: blueprint.NewCommand(
@@ -270,7 +247,6 @@ var (
 			android.Touch, ` ${out} && `,
 			android.Rm, ` -rf ${out}.image`,
 		),
-		CommandDeps: []string{"${conv_linker_config}"},
 		Description: "run apex_linkerconfig_validation",
 	}, "image_zip")
 
@@ -1003,7 +979,6 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 		Output:      apisUsedbyOutputFile,
 		Args: map[string]string{
 			"image_zip": imageZipOut.String(),
-			"readelf":   "${config.ClangBin}/llvm-readelf",
 		},
 	})
 
@@ -1014,9 +989,10 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 		}
 	}
 	apisBackedbyOutputFile := android.PathForModuleOut(ctx, a.Name()+"_backing.txt")
-	rb := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
+	rb := android.NewRuleBuilder(pctx, ctx)
 	rb.Command().
-		Tool(android.PathForSource(ctx, "build/soong/scripts/gen_ndk_backedby_apex.sh")).
+		BuiltTool("gen_apex_symbols").
+		Text("ndk_backedby").
 		Output(apisBackedbyOutputFile).
 		Flags(nativeLibNames)
 	rb.Build("ndk_backedby_list", "Generate API libraries backed by Apex")
@@ -1028,9 +1004,10 @@ func (a *apexBundle) buildApex(ctx android.ModuleContext) {
 		}
 	}
 	javaApiUsedbyOutputFile := android.PathForModuleOut(ctx, a.Name()+"_using.xml")
-	javaUsedByRule := android.NewRuleBuilder(pctx, ctx).SandboxDisabled()
+	javaUsedByRule := android.NewRuleBuilder(pctx, ctx)
 	javaUsedByRule.Command().
-		Tool(android.PathForSource(ctx, "build/soong/scripts/gen_java_usedby_apex.sh")).
+		BuiltTool("gen_apex_symbols").
+		Text("java_usedby").
 		BuiltTool("dexdeps").
 		Output(javaApiUsedbyOutputFile).
 		Inputs(javaLibOrApkPath)

@@ -7,14 +7,16 @@ bootstrap_go_package {
     pkgPath: "android/soong/android/cipd",
     deps: [
         "blueprint",
+        "blueprint-gobtools",
         "blueprint-proptools",
         "soong-android",
     ],
     srcs: [
-        "cipd.go",
+        "cipd_package.go",
+        "cipd_enc.go",
     ],
     testSrcs: [
-        "cipd_test.go",
+        "cipd_package_test.go",
     ],
     pluginFor: ["soong_build"],
 }
