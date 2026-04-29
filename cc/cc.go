@@ -1632,6 +1632,22 @@ func (m *Module) NeedsLlndkVariants() bool {
 	return lib != nil && (lib.HasLLNDKStubs() || lib.HasLLNDKHeaders())
 }
 
+func (m *Module) SplitAllImageVariants() bool {
+	// llndk_libraries.txt is created by a singleton that collates all the
+	// llndk libraries using VisitAllModules in GenerateAndroidBuildActions.
+	//
+	// When only the primary "core" variants are created, the "vendor" variants
+	// of llndk libraries are not available in VisitAllModules.
+	// Keep the frontloaded variant creation for llndk libraries.
+	return m.NeedsLlndkVariants()
+}
+
+func (c *Module) SplitAllVariants() bool {
+	// The vndk libraries use AddReverseVariationDependency to add themselves as deps of vndk apex.
+	// This is currently not supported by the migration to non primary variant pruning.
+	return c.IsVndkPrebuiltLibrary() || c.ModuleBase.SplitAllVariants()
+}
+
 func (m *Module) NeedsVendorPublicLibraryVariants() bool {
 	lib := moduleVersionedInterface(m)
 	return lib != nil && (lib.HasVendorPublicLibrary())

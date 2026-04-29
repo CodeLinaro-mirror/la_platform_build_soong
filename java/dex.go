@@ -92,6 +92,8 @@ type DexProperties struct {
 
 		// If true, runs R8 in Proguard compatibility mode, otherwise runs R8 in full mode.
 		// Defaults to false.
+		//
+		// Deprecated: This will soon be removed and disabled universally. See b/215530220.
 		Proguard_compatibility proptools.Configurable[bool] `android:"replace_instead_of_append"`
 
 		// If true, R8 will not add public or protected members (fields or methods) to
@@ -804,6 +806,13 @@ func (d *dexer) r8Flags(ctx android.ModuleContext, dexParams *compileDexParams, 
 	flagFiles = append(flagFiles, proguardFlagsFiles.files...)
 	r8Deps = append(r8Deps, proguardFlagsFiles.included...)
 
+	// Note: This is a special case where we explicitly don't want SDK-injected
+	// proguard rules to propagate to other targets or cross library boundaries,
+	// otherwise we'd reuse existing propagation with ProguardSpecInfoProvider.
+	ctx.VisitDirectDepsProxyWithTag(sdkDepProguardTag, func(m android.ModuleProxy) {
+		flagFiles = append(flagFiles, android.OutputFilesForModule(ctx, m, "")...)
+	})
+
 	traceReferencesSources := android.Paths{}
 	ctx.VisitDirectDepsProxyWithTag(traceReferencesTag, func(m android.ModuleProxy) {
 		if dep, ok := android.OtherModuleProvider(ctx, m, JavaInfoProvider); ok {
@@ -839,7 +848,7 @@ func (d *dexer) r8Flags(ctx android.ModuleContext, dexParams *compileDexParams, 
 		r8Flags = append(r8Flags, "--keep-runtime-invisible-annotations")
 	}
 
-	if opt.Proguard_compatibility.GetOrDefault(ctx, !ctx.Config().UseR8FullModeByDefault()) {
+	if opt.Proguard_compatibility.GetOrDefault(ctx, false) {
 		r8Flags = append(r8Flags, "--force-proguard-compatibility")
 	}
 
@@ -874,13 +883,11 @@ func (d *dexer) r8Flags(ctx android.ModuleContext, dexParams *compileDexParams, 
 	// TODO(ccross): if this is an instrumentation test of an obfuscated app, use the
 	// dictionary of the app and move the app from libraryjars to injars.
 
-	// For now, only enable warnings by default if the target is optimized by default.
-	// This ensures at least nominal safety when apps rely on the default setting.
-	// TODO(b/229727645): Enable warnings by default for *any* optimized target.
-	// TODO(b/180878971): missing classes should be added to the relevant builds.
-	explicitOptimize := opt.Optimize.Get(ctx)
-	optimizingFromDefault := explicitOptimize.IsEmpty() && opt.OptimizeByDefault
-	ignoreWarningsByDefault := !optimizingFromDefault
+	// For now, only enable warnings by default if the target is optimized, as that is generally
+	// the riskiest scenario to ignore such warnings.
+	// TODO(b/180878971): Address missing classes in remaining builds and default to not ignoring
+	// warnings for all targets, not just fully optimized ones.
+	ignoreWarningsByDefault := !optimize
 	if proptools.BoolDefault(opt.Ignore_warnings, ignoreWarningsByDefault) {
 		r8Flags = append(r8Flags, "-ignorewarnings")
 	}

@@ -64,8 +64,6 @@ var PrepareForTestWithJavaBuildComponents = android.GroupFixturePreparers(
 			`),
 		// Needed for apps that do not provide their own.
 		"build/make/target/product/security/default_testkey.x509.pem": nil,
-		// Required to generate Java used-by API coverage
-		"build/soong/scripts/gen_java_usedby_apex.sh": nil,
 		"external/error_prone/Android.bp": []byte(`
 			java_plugin {
 				name: "error_prone_plugin",
@@ -112,6 +110,7 @@ var prepareForTestWithFrameworkDeps = android.GroupFixturePreparers(
 		"build/make/core/proguard/enumvalues.flags":  nil,
 		"build/make/core/proguard/kotlin.flags":      nil,
 		"prebuilts/cmdline-tools/shrinker.xml":       nil,
+		defaultJavaDir + "/framework-private.flags":  nil,
 	}.AddToFixture(),
 )
 
@@ -121,6 +120,10 @@ var prepareForTestWithJavaDefaultModulesBase = android.GroupFixturePreparers(
 	prepareForTestWithFrameworkDeps,
 	// Add dexpreopt compat libs (android.test.base, etc.) and a fake dex2oatd module.
 	dexpreopt.PrepareForTestWithDexpreoptCompatLibs,
+	android.PrepareForTestWithHostTools(
+		"dexdeps",
+		"gen_apex_symbols",
+	),
 )
 
 // Test fixture preparer that will define default java modules, e.g. standard prebuilt modules.
@@ -565,7 +568,13 @@ func gatherRequiredDepsForTest() string {
 		android_app {
 			name: "framework-res",
 			sdk_version: "core_platform",
-		}`
+		}
+
+		filegroup {
+			name: "framework-private-proguard",
+			srcs: ["framework-private.flags"],
+		}
+		`
 
 	systemModules := []string{
 		"core-public-stubs-system-modules",

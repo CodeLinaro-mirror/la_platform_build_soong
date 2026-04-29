@@ -256,7 +256,7 @@ var (
 			},
 			CommandOrderOnly: []string{"${config.SoongJavacWrapper}"},
 			Rspfile:          "$out.rsp",
-			RspfileContent:   "$classpath\n$in",
+			RspfileContent:   "$classpath $in",
 			SandboxDisabled:  true,
 		},
 		"javacFlags", "bootClasspath", "classpath", "processorpath", "processor", "srcJars", "srcJarDir",
@@ -492,6 +492,9 @@ type javaBuilderFlags struct {
 	// contains header jars for all static and non-static dependencies.
 	classpath classpath
 
+	// directClasspath contains just the direct dependencies (header jars) for strict deps verification.
+	directClasspath classpath
+
 	// dexClasspath is the list of jars that form the classpath for d8 and r8 rules.  It contains
 	// header jars for all non-static dependencies.  Static dependencies have already been
 	// combined into the program jar.
@@ -502,15 +505,18 @@ type javaBuilderFlags struct {
 	// are provided by systemModules.
 	java9Classpath classpath
 
-	processorPath classpath
-	processors    []string
-	systemModules *systemModules
-	aidlFlags     string
-	aidlDeps      android.Paths
-	javaVersion   javaVersion
+	processorPath   classpath
+	processors      []string
+	systemModules   *systemModules
+	aidlFlags       string
+	strictDepsLevel string
+	aidlDeps        android.Paths
+	javaVersion     javaVersion
 
-	errorProneExtraJavacFlags string
-	errorProneProcessorPath   classpath
+	errorProneExtraJavacFlags  string
+	errorProneProcessorPath    classpath
+	javaStrictDepsPluginJars   android.Paths
+	kotlinStrictDepsPluginJars android.Paths
 
 	kotlincFlags                string
 	kotlincPluginFlags          string
@@ -754,6 +760,20 @@ func TurbineApt(ctx android.ModuleContext, outputSrcJar, outputResJar android.Wr
 	})
 }
 
+func injectStrictDepsFlags(ctx android.ModuleContext, flags javaBuilderFlags, deps android.Paths, rspFile android.WritablePath) (javaBuilderFlags, android.Paths) {
+	// Inject the strict deps plugin into the javac execution
+	flags.processorPath = append(flags.processorPath, flags.javaStrictDepsPluginJars...)
+	deps = append(deps, flags.javaStrictDepsPluginJars...)
+
+	android.WriteFileRule(ctx, rspFile, strings.Join(flags.directClasspath.Strings(), "\n"))
+	deps = append(deps, rspFile)
+	flags.javacFlags += " -Xplugin:\"JavaStrictDeps " + rspFile.String() + " " + flags.strictDepsLevel + "\""
+	flags.javacFlags += " -J--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED"
+	flags.javacFlags += " -J--add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED"
+	flags.javacFlags += " -J--add-exports=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED"
+	return flags, deps
+}
+
 // Similar to transformJavaToClasses, with additional tweaks to make java
 // compilation work incrementally (i.e. work with a smaller subset of src java files
 // rather than the full set)
@@ -873,6 +893,11 @@ func transformJavaToClassesInc(ctx android.ModuleContext, outputFile android.Wri
 
 	deps = append(deps, flags.javacFlagsDeps...)
 
+	if flags.strictDepsLevel == "warn" || flags.strictDepsLevel == "error" {
+		rspFile := outputFile.ReplaceExtension(ctx, "strict_deps.rsp")
+		flags, deps = injectStrictDepsFlags(ctx, flags, deps, rspFile)
+	}
+
 	rule := javacInc
 	ctx.Build(pctx, android.BuildParams{
 		Rule:           rule,
@@ -974,6 +999,16 @@ func transformJavaToClasses(ctx android.ModuleContext, outputFile android.Writab
 	deps = append(deps, flags.processorPath...)
 	deps = append(deps, genAnnoSrcJars...)
 	deps = append(deps, flags.javacFlagsDeps...)
+
+	if flags.strictDepsLevel == "warn" || flags.strictDepsLevel == "error" {
+		var rspFile android.WritablePath
+		if shardIdx >= 0 {
+			rspFile = android.PathForModuleOut(ctx, intermediatesDir, "shard"+strconv.Itoa(shardIdx), "strict_deps.rsp")
+		} else {
+			rspFile = android.PathForModuleOut(ctx, intermediatesDir, "strict_deps.rsp")
+		}
+		flags, deps = injectStrictDepsFlags(ctx, flags, deps, rspFile)
+	}
 
 	processor := "-proc:none"
 	if len(flags.processors) > 0 {

@@ -929,6 +929,7 @@ func buildConfig(config Config) *smpb.BuildConfig {
 	ensure().SoongNinja = proto.String(config.ninjaCommand.String())
 	c := &smpb.BuildConfig{
 		UseRbe:                       proto.Bool(config.UseRBE()),
+		UseRewrapper:                 proto.Bool(config.UseRewrapper()),
 		NinjaWeightListSource:        getNinjaWeightListSourceInMetric(config.NinjaWeightListSource()),
 		SoongEnvVars:                 soongEnvVars,
 		SoongOnly:                    proto.Bool(config.soongOnlyRequested),
@@ -1745,6 +1746,15 @@ func (c *configImpl) rbeProxyLogsDir() string {
 		}
 	}
 	return c.rbeTmpDir()
+}
+
+func (c *configImpl) rbePlatform() string {
+	for _, f := range []string{"RBE_platform", "FLAG_platform"} {
+		if v, ok := c.environ.Get(f); ok {
+			return v
+		}
+	}
+	return defaultRBEPlatform
 }
 
 func (c *configImpl) rbeDownloadTmpDir() string {

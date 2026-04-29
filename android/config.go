@@ -1021,6 +1021,26 @@ func (c *config) HostToolPath(ctx PathContext, tool string) Path {
 	return path
 }
 
+func (c *config) HostToolAndDepsPathsFromHostTool(ctx PathContext, tool blueprint.HostTool) Paths {
+	_, deps, _ := tool.GetValueAndDeps(ctx.Config())
+
+	getPath := func(path string) Path {
+		if relPath, err := filepath.Rel(ctx.Config().OutDir(), path); err == nil && !strings.HasPrefix(relPath, "../") {
+			return PathForArbitraryOutput(ctx, relPath)
+		}
+		if strings.HasSuffix(path, "-deps") {
+			return PathForPhony(ctx, path)
+		}
+		return PathForSource(ctx, path)
+	}
+
+	var paths Paths
+	for _, dep := range deps {
+		paths = append(paths, getPath(dep))
+	}
+	return paths
+}
+
 func (c *config) HostJNIToolPath(ctx PathContext, lib string) Path {
 	ext := ".so"
 	if runtime.GOOS == "darwin" {
@@ -1532,6 +1552,15 @@ func (c *config) MainlineSepolicyDevCertificatesDir(ctx ModuleContext) SourcePat
 // Certificate for the Bluetooth module sepolicy context
 func (c *config) MainlineBluetoothSepolicyDevCertificatesDir(ctx ModuleContext) SourcePath {
 	cert := String(c.productVariables.MainlineBluetoothSepolicyDevCertificates)
+	if cert != "" {
+		return PathForSource(ctx, cert)
+	}
+	return c.DefaultAppCertificateDir(ctx)
+}
+
+// Certificate for the Nfc module sepolicy context
+func (c *config) MainlineNfcSepolicyDevCertificatesDir(ctx ModuleContext) SourcePath {
+	cert := String(c.productVariables.MainlineNfcSepolicyDevCertificates)
 	if cert != "" {
 		return PathForSource(ctx, cert)
 	}
@@ -2591,10 +2620,6 @@ func (c *config) UseOptimizedResourceShrinkingByDefault() bool {
 
 func (c *config) EnableAppOptimizationByDefault() bool {
 	return c.productVariables.GetBuildFlagBool("RELEASE_R8_OPTIMIZE_BY_DEFAULT")
-}
-
-func (c *config) UseR8FullModeByDefault() bool {
-	return c.productVariables.GetBuildFlagBool("RELEASE_R8_FULL_MODE_BY_DEFAULT")
 }
 
 func (c *config) UseR8OnlyRuntimeVisibleAnnotations() bool {

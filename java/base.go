@@ -134,6 +134,11 @@ type CommonProperties struct {
 	// If not blank, set the java version passed to javac as -source and -target
 	Java_version *string
 
+	// If set to "warn" or "error", enables strict dependency checking for this module.
+	// This ensures that the module only references classes that are provided by its direct
+	// dependencies, preventing accidental usage of transitive dependencies.
+	Strict_deps *string // "off", "warn", "error" (default: "off")
+
 	// If set to true, allow this module to be dexed and installed on devices.  Has no
 	// effect on host modules, which are always considered installable.
 	Installable *bool
@@ -523,6 +528,9 @@ type Module struct {
 	srcJarArgs []string
 	srcJarDeps android.Paths
 
+	// directClasspath contains just the direct dependencies for strict deps verification.
+	directClasspath classpath
+
 	kSnapshotFiles     map[string]android.Path
 	skipKSnapshotFiles map[string]bool
 
@@ -774,6 +782,9 @@ func setOutputFiles(ctx android.ModuleContext, m *Module) {
 	if m.dexer.proguardDictionary.Valid() {
 		ctx.SetOutputFiles(android.Paths{m.dexer.proguardDictionary.Path()}, ".proguard_map")
 	}
+	if m.dexpreopter.outputProfilePathOnHost != nil {
+		ctx.SetOutputFiles(android.Paths{m.dexpreopter.outputProfilePathOnHost}, ".dexpreopt_prof")
+	}
 	ctx.SetOutputFiles(m.properties.Generated_srcjars, ".generated_srcjars")
 }
 
@@ -957,6 +968,12 @@ func (j *Module) deps(ctx android.BottomUpMutatorContext) {
 	ctx.AddFarVariationDependencies(ctx.Config().BuildOSCommonTarget.Variations(), pluginTag, j.properties.Plugins...)
 	ctx.AddFarVariationDependencies(ctx.Config().BuildOSCommonTarget.Variations(), kotlinPluginTag, j.properties.Kotlin_plugins...)
 	ctx.AddFarVariationDependencies(ctx.Config().BuildOSCommonTarget.Variations(), exportedPluginTag, j.properties.Exported_plugins...)
+
+	if j.properties.Strict_deps != nil && (*j.properties.Strict_deps == "warn" || *j.properties.Strict_deps == "error") {
+		ctx.AddFarVariationDependencies(ctx.Config().BuildOSCommonTarget.Variations(), javaStrictDepsPluginTag, "soong_java_strict_deps_plugin")
+		ctx.AddFarVariationDependencies(ctx.Config().BuildOSCommonTarget.Variations(), kotlinStrictDepsPluginTag, "soong_kotlin_strict_deps_plugin")
+	}
+
 	epEnabled := j.properties.Errorprone.Enabled
 	if (ctx.Config().RunErrorProne() && epEnabled == nil) || Bool(epEnabled) {
 		ctx.AddFarVariationDependencies(ctx.Config().BuildOSCommonTarget.Variations(), errorpronePluginTag, "error_prone_plugin")
@@ -1121,9 +1138,16 @@ func (j *Module) collectBuilderFlags(ctx android.ModuleContext, deps deps) javaB
 			"'" + strings.Join(errorProneFlags, " ") + "'"
 	}
 
+	if j.properties.Strict_deps != nil && (*j.properties.Strict_deps == "warn" || *j.properties.Strict_deps == "error") {
+		flags.strictDepsLevel = *j.properties.Strict_deps
+	}
+
 	// classpath
 	flags.bootClasspath = append(flags.bootClasspath, deps.bootClasspath...)
 	flags.classpath = append(flags.classpath, deps.classpath...)
+	flags.directClasspath = append(flags.directClasspath, deps.directClasspath...)
+	flags.javaStrictDepsPluginJars = append(flags.javaStrictDepsPluginJars, deps.javaStrictDepsPluginJars...)
+	flags.kotlinStrictDepsPluginJars = append(flags.kotlinStrictDepsPluginJars, deps.kotlinStrictDepsPluginJars...)
 	flags.dexClasspath = append(flags.dexClasspath, deps.dexClasspath...)
 	flags.java9Classpath = append(flags.java9Classpath, deps.java9Classpath...)
 	flags.processorPath = append(flags.processorPath, deps.processorPath...)
@@ -1260,6 +1284,7 @@ func (j *Module) compile(ctx android.ModuleContext) *JavaInfo {
 	}
 
 	deps := j.collectDeps(ctx)
+	j.directClasspath = deps.directClasspath
 	j.kSnapshotFiles = deps.kSnapshotFiles
 	j.skipKSnapshotFiles = make(map[string]bool)
 	if j.extraClasspathJars != nil {
@@ -1379,15 +1404,21 @@ func (j *Module) compile(ctx android.ModuleContext) *JavaInfo {
 			j.extraCombinedJars, manifest)
 
 		combinedHeaderJarFile, jarjared := j.jarjarIfNecessary(ctx, preJarjarHeaderJarFile, jarName, "turbine", false)
+		combinedHeaderJarFile, _ = j.repackageFlagsIfNecessary(ctx, combinedHeaderJarFile, jarName, "repackage-turbine")
 		if jarjared {
 			localHeaderJars = android.Paths{combinedHeaderJarFile}
 			transitiveStaticLibsHeaderJars = nil
+		} else {
+			// Repackaging rules (from jarjar_prefix) are strictly renames, making it safe
+			// to process on individual thin jars without pruning or atomicity conflicts
+			// (unlike explicit `jarjar_rules` which can contain `keep`/`zap` rules).
+			for i, jar := range localHeaderJars {
+				distinctName := strings.TrimSuffix(jarName, ".jar") + "." + strconv.Itoa(i) + ".jar"
+				repackagedJar, _ := j.repackageFlagsIfNecessary(ctx, jar, distinctName, "repackage-turbine")
+				localHeaderJars[i] = repackagedJar
+			}
 		}
-		combinedHeaderJarFile, repackaged := j.repackageFlagsIfNecessary(ctx, combinedHeaderJarFile, jarName, "repackage-turbine")
-		if repackaged {
-			localHeaderJars = android.Paths{combinedHeaderJarFile}
-			transitiveStaticLibsHeaderJars = nil
-		}
+
 		if ctx.Failed() {
 			return nil
 		}
@@ -1677,15 +1708,22 @@ func (j *Module) compile(ctx android.ModuleContext) *JavaInfo {
 			localHeaderJars = android.Paths{j.headerJarFile}
 			transitiveStaticLibsHeaderJars = nil
 		}
-		var repackaged bool
-		repackagedHeaderJarFile, repackaged = j.repackageFlagsIfNecessary(ctx, j.headerJarFile, jarName, "turbine")
-		if repackaged {
-			// repackage modifies transitive static dependencies, use the combined header jar and drop the transitive
-			// static libs header jars.
+		repackagedHeaderJarFile, _ = j.repackageFlagsIfNecessary(ctx, j.headerJarFile, jarName, "turbine")
+		updatedLocalHeaderJars := android.Paths{}
+		// Repackaging rules (from jarjar_prefix) are strictly renames, making it safe
+		// to process on individual thin jars without pruning or atomicity conflicts
+		// (unlike explicit `jarjar_rules` which can contain `keep`/`zap` rules).
+		for i, jar := range localHeaderJars {
 			// TODO(b/356688296): this shouldn't export both the unmodified and repackaged header jars
-			localHeaderJars = android.Paths{j.headerJarFile, repackagedHeaderJarFile}
-			transitiveStaticLibsHeaderJars = nil
+			distinctName := strings.TrimSuffix(jarName, ".jar") + "." + strconv.Itoa(i) + ".jar"
+			repackagedJar, repackaged := j.repackageFlagsIfNecessary(ctx, jar, distinctName, "repackage-turbine")
+			if repackaged {
+				updatedLocalHeaderJars = append(updatedLocalHeaderJars, jar, repackagedJar)
+			} else {
+				updatedLocalHeaderJars = append(updatedLocalHeaderJars, jar)
+			}
 		}
+		localHeaderJars = updatedLocalHeaderJars
 	}
 	if len(uniqueJavaFiles) > 0 || len(srcJars) > 0 {
 		// turbine is disabled when API generating APs are present, in which case,
@@ -2826,6 +2864,7 @@ func (j *Module) checkSdkLinkType(
 func (j *Module) collectDeps(ctx android.ModuleContext) deps {
 	var deps deps
 
+	enableStrictDeps := j.properties.Strict_deps != nil && (*j.properties.Strict_deps == "warn" || *j.properties.Strict_deps == "error")
 	sdkLinkType, _ := j.getSdkLinkType(ctx, ctx.ModuleName())
 
 	j.collectTransitiveHeaderJarsForR8(ctx)
@@ -2879,6 +2918,9 @@ func (j *Module) collectDeps(ctx android.ModuleContext) deps {
 					ctx.ModuleErrorf("a java_plugin (%s) cannot be used as a libs dependency", otherName)
 				}
 				deps.classpath = append(deps.classpath, dep.HeaderJars...)
+				if enableStrictDeps {
+					deps.directClasspath = append(deps.directClasspath, dep.LocalHeaderJars...)
+				}
 				deps.dexClasspath = append(deps.dexClasspath, dep.HeaderJars...)
 				if len(dep.RepackagedHeaderJars) == 1 && !slices.Contains(dep.HeaderJars, dep.RepackagedHeaderJars[0]) {
 					deps.classpath = append(deps.classpath, dep.RepackagedHeaderJars...)
@@ -2897,6 +2939,9 @@ func (j *Module) collectDeps(ctx android.ModuleContext) deps {
 				} else {
 					deps.headerJarOverride = android.OptionalPathForPath(dep.HeaderJars[0])
 					deps.headerJarOverridePreJarjar = android.OptionalPathForPath(dep.LocalHeaderJarsPreJarjar[0])
+					if enableStrictDeps {
+						deps.directClasspath = append(deps.directClasspath, dep.LocalHeaderJars...)
+					}
 				}
 			case java9LibTag:
 				deps.java9Classpath = append(deps.java9Classpath, dep.HeaderJars...)
@@ -2906,6 +2951,9 @@ func (j *Module) collectDeps(ctx android.ModuleContext) deps {
 					ctx.ModuleErrorf("a java_plugin (%s) cannot be used as a static_libs dependency", otherName)
 				}
 				deps.classpath = append(deps.classpath, dep.HeaderJars...)
+				if enableStrictDeps {
+					deps.directClasspath = append(deps.directClasspath, dep.LocalHeaderJars...)
+				}
 				deps.staticJars = append(deps.staticJars, dep.ImplementationJars...)
 				deps.staticHeaderJars = append(deps.staticHeaderJars, dep.HeaderJars...)
 				deps.staticResourceJars = append(deps.staticResourceJars, dep.ResourceJars...)
@@ -2940,6 +2988,18 @@ func (j *Module) collectDeps(ctx android.ModuleContext) deps {
 					deps.errorProneProcessorPath = append(deps.errorProneProcessorPath, dep.ImplementationAndResourcesJars...)
 				} else {
 					ctx.PropertyErrorf("plugins", "%q is not a java_plugin module", otherName)
+				}
+			case javaStrictDepsPluginTag:
+				if _, ok := android.OtherModuleProvider(ctx, module, JavaPluginInfoProvider); ok {
+					deps.javaStrictDepsPluginJars = append(deps.javaStrictDepsPluginJars, dep.ImplementationAndResourcesJars...)
+				} else {
+					ctx.PropertyErrorf("plugins", "%q is not a java_plugin module", otherName)
+				}
+			case kotlinStrictDepsPluginTag:
+				if _, ok := android.OtherModuleProvider(ctx, module, KotlinPluginInfoProvider); ok {
+					deps.kotlinStrictDepsPluginJars = append(deps.kotlinStrictDepsPluginJars, dep.ImplementationAndResourcesJars...)
+				} else {
+					ctx.PropertyErrorf("plugins", "%q is not a kotlin_plugin module", otherName)
 				}
 			case exportedPluginTag:
 				if plugin, ok := android.OtherModuleProvider(ctx, module, JavaPluginInfoProvider); ok {

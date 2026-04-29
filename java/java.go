@@ -227,15 +227,6 @@ var (
 			PropertyName: "java_tests",
 		},
 	}
-
-	// Rule for generating device binary default wrapper
-	deviceBinaryWrapper = pctx.StaticRule("deviceBinaryWrapper", blueprint.RuleParams{
-		Command: `printf '#!/system/bin/sh\n` +
-			`export CLASSPATH=/system/framework/$jar_name\n` +
-			`exec app_process /$partition/bin $main_class "$$@"\n'> ${out}`,
-		Description:     "Generating device binary wrapper ${jar_name}",
-		SandboxDisabled: true,
-	}, "jar_name", "partition", "main_class")
 )
 
 // @auto-generate: gob
@@ -639,6 +630,8 @@ var (
 	sdkLibTag                  = dependencyTag{name: "sdklib", runtimeLinked: true}
 	java9LibTag                = dependencyTag{name: "java9lib", runtimeLinked: true}
 	pluginTag                  = dependencyTag{name: "plugin", toolchain: true}
+	javaStrictDepsPluginTag    = dependencyTag{name: "java-strict-deps-plugin", toolchain: true}
+	kotlinStrictDepsPluginTag  = dependencyTag{name: "kotlin-strict-deps-plugin", toolchain: true}
 	errorpronePluginTag        = dependencyTag{name: "errorprone-plugin", toolchain: true}
 	exportedPluginTag          = dependencyTag{name: "exported-plugin", toolchain: true}
 	bootClasspathTag           = dependencyTag{name: "bootclasspath", runtimeLinked: true}
@@ -648,6 +641,9 @@ var (
 	composeEmbeddablePluginTag = dependencyTag{name: "compose-embeddable-plugin", toolchain: true}
 	composePluginTag           = dependencyTag{name: "compose-plugin", toolchain: true}
 	proguardRaiseTag           = dependencyTag{name: "proguard-raise"}
+	// Note: SDK-specific Proguard modules are intentionally locked down for visibility, and usage
+	// should only be allowed via explicit tags orchestrated by the build system.
+	sdkDepProguardTag = excludeFromVisibilityEnforcementDependencyTag{dependencyTag{name: "sdk-dep-proguard"}}
 	//TODO(b/465840743): Enable the visibility enforcement for certificateTag dependency.
 	certificateTag          = excludeFromVisibilityEnforcementDependencyTag{dependencyTag{name: "certificate"}}
 	headerJarOverrideTag    = dependencyTag{name: "header-jar-override"}
@@ -690,6 +686,7 @@ var (
 		syspropPublicStubDepTag,
 		instrumentationForTag,
 		traceReferencesTag,
+		sdkDepProguardTag,
 	}
 )
 
@@ -741,6 +738,9 @@ type sdkDep struct {
 	aidl android.OptionalPath
 
 	noStandardLibs, noFrameworksLibs bool
+
+	// Custom Proguard file modules to apply based on the target SDK.
+	proguardFlags []string
 }
 
 func (s sdkDep) hasStandardLibs() bool {
@@ -776,6 +776,9 @@ func sdkDeps(ctx android.BottomUpMutatorContext, sdkContext android.SdkContext, 
 		if addR8DexDeps && sdkDep.hasFrameworkLibs() {
 			ctx.AddVariationDependencies(nil, proguardRaiseTag, config.FrameworkLibraries...)
 		}
+		if addR8DexDeps {
+			ctx.AddVariationDependencies(nil, sdkDepProguardTag, sdkDep.proguardFlags...)
+		}
 	}
 	if sdkDep.systemModules != "" {
 		ctx.AddVariationDependencies(nil, systemModulesTag, sdkDep.systemModules)
@@ -791,6 +794,9 @@ type deps struct {
 	// classpath is the list of jars that form the classpath for javac and kotlinc rules.  It
 	// contains header jars for all static and non-static dependencies.
 	classpath classpath
+
+	// directClasspath contains just the direct dependencies (header jars) for strict deps verification.
+	directClasspath classpath
 
 	// dexClasspath is the list of jars that form the classpath for d8 and r8 rules.  It contains
 	// header jars for all non-static dependencies.  Static dependencies have already been
@@ -821,6 +827,9 @@ type deps struct {
 
 	headerJarOverride          android.OptionalPath
 	headerJarOverridePreJarjar android.OptionalPath
+
+	javaStrictDepsPluginJars   android.Paths
+	kotlinStrictDepsPluginJars android.Paths
 
 	disableTurbine bool
 
@@ -2006,9 +2015,7 @@ func (j *Test) generateAndroidBuildActionsWithConfig(ctx android.ModuleContext, 
 	j.data = append(j.data, android.PathsForModuleSrc(ctx, j.testProperties.Host_first_data)...)
 
 	if Bool(j.testProperties.Enable_static_aconfig_pb) {
-		if pb := getCombinedAconfigProtoFile(ctx); pb != nil {
-			j.extraResources = append(j.extraResources, pb)
-		}
+		addStaticAconfigProto(ctx, &j.extraResources)
 	}
 
 	j.extraTestConfigs = android.PathsForModuleSrc(ctx, j.testProperties.Test_options.Extra_test_configs)
@@ -2365,15 +2372,12 @@ func (j *Binary) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 				wrapper := android.PathForModuleOut(ctx, ctx.ModuleName()+".sh")
 				jarName := j.Stem() + ".jar"
 				partition := j.PartitionTag(ctx.DeviceConfig())
-				ctx.Build(pctx, android.BuildParams{
-					Rule:   deviceBinaryWrapper,
-					Output: wrapper,
-					Args: map[string]string{
-						"jar_name":   jarName,
-						"partition":  partition,
-						"main_class": String(j.binaryProperties.Main_class),
-					},
-				})
+				mainClass := String(j.binaryProperties.Main_class)
+				content := fmt.Sprintf("#!/system/bin/sh\n"+
+					"export CLASSPATH=/system/framework/%s\n"+
+					"exec app_process /%s/bin %s \"$@\"\n",
+					jarName, partition, mainClass)
+				android.WriteFileRule(ctx, wrapper, content)
 				j.wrapperFile = wrapper
 			}
 		} else {
@@ -4163,4 +4167,10 @@ func getCombinedAconfigProtoFile(ctx android.ModuleContext) android.Path {
 		return combinedAconfigProtoFile
 	}
 	return nil
+}
+
+func addStaticAconfigProto(ctx android.ModuleContext, extraResources *android.Paths) {
+	if pb := getCombinedAconfigProtoFile(ctx); pb != nil {
+		*extraResources = append(*extraResources, pb)
+	}
 }
