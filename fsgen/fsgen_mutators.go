@@ -447,28 +447,41 @@ func collectDepsMutator(mctx android.BottomUpMutatorContext) {
 
 	if _, ok := fsGenState.depCandidatesMap[moduleName]; ok {
 		installPartition := m.PartitionTag(mctx.DeviceConfig())
-		if isEligibleForFsDeps(mctx) {
+		systemPartitionFalsePositive := installPartition == "system" && android.InList(m.ImageVariation().Variation, []string{
+			// cc/image.go marks some ramdisk and recovery modules as platform.
+			// https://cs.android.com/android/platform/superproject/main/+/main:build/soong/cc/image.go;l=514-522?q=MakeAsPlatform%20f:build%2Fsoong&ss=android%2Fplatform%2Fsuperproject%2Fmain
+			// Skip them in fsgen.
+			android.RamdiskVariation,
+			android.VendorRamdiskVariation,
+			android.RecoveryVariation,
+		})
+		if isEligibleForFsDeps(mctx) && !systemPartitionFalsePositive {
 			appendDepIfAppropriate(mctx, fsGenState.fsDeps[installPartition], installPartition, android.NativeBridgeDisabled, mctx.ModuleName())
 		}
 	}
 
 	if _, ok := fsGenState.depCandidatesMap[mctx.ModuleName()+".native_bridge"]; ok {
 		installPartition := m.PartitionTag(mctx.DeviceConfig())
-		if isEligibleForFsDeps(mctx) {
+		// Native bridge is only supported for system partition modules.
+		// https://cs.android.com/android/_/android/platform/build/soong/+/d046c2afef086a35d24222b09f4d2c4914e8a2a5:android/arch.go;l=604;drc=92ac46d1fe04a94d94025554bcecc5f8cb2416ae;bpv=1;bpt=0
+		if isEligibleForFsDeps(mctx) && installPartition == "system" {
 			appendDepIfAppropriate(mctx, fsGenState.fsDeps[installPartition], installPartition, android.NativeBridgeEnabled, mctx.ModuleName())
 		}
 	} else if _, ok := fsGenState.depCandidatesMap[mctx.ModuleName()+".bootstrap.native_bridge"]; ok {
 		installPartition := m.PartitionTag(mctx.DeviceConfig())
-		if isEligibleForFsDeps(mctx) {
+		// Native bridge is only supported for system partition modules.
+		// https://cs.android.com/android/_/android/platform/build/soong/+/d046c2afef086a35d24222b09f4d2c4914e8a2a5:android/arch.go;l=604;drc=92ac46d1fe04a94d94025554bcecc5f8cb2416ae;bpv=1;bpt=0
+		if isEligibleForFsDeps(mctx) && installPartition == "system" {
 			appendDepIfAppropriate(mctx, fsGenState.fsDeps[installPartition], installPartition, android.NativeBridgeEnabled, mctx.ModuleName())
 		}
-	} else if _, ok := fsGenState.depCandidatesMap[mctx.ModuleName()+".vendor_ramdisk"]; ok && imageOk && image.VendorRamdiskVariantNeeded(mctx) {
+	}
+	if _, ok := fsGenState.depCandidatesMap[mctx.ModuleName()+".vendor_ramdisk"]; ok && imageOk && image.VendorRamdiskVariantNeeded(mctx) {
 		installPartition := "vendor_ramdisk"
 		if isEligibleForFsDeps(mctx) {
 			appendDepIfAppropriate(mctx, fsGenState.fsDeps[installPartition], installPartition, android.NativeBridgeDisabled, mctx.ModuleName())
-			appendDepIfAppropriate(mctx, fsGenState.fsDeps["vendor_ramdisk-debug"], installPartition, android.NativeBridgeDisabled, mctx.ModuleName())
 		}
-	} else if _, ok := fsGenState.depCandidatesMap[mctx.ModuleName()+".recovery"]; ok && imageOk && image.RecoveryVariantNeeded(mctx) {
+	}
+	if _, ok := fsGenState.depCandidatesMap[mctx.ModuleName()+".recovery"]; ok && imageOk && image.RecoveryVariantNeeded(mctx) {
 		installPartition := "recovery"
 		if isEligibleForFsDeps(mctx) {
 			appendDepIfAppropriate(mctx, fsGenState.fsDeps[installPartition], installPartition, android.NativeBridgeDisabled, mctx.ModuleName())

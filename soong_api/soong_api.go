@@ -16,6 +16,7 @@ package soong_api
 
 import (
 	"android/soong/android"
+	"android/soong/android/cipd"
 	"android/soong/cc"
 	"android/soong/java"
 	"android/soong/rust"
@@ -43,8 +44,9 @@ var soongApiPctx = android.NewPackageContext("android/soong/android/soong_api")
 // rather than a functional Soong module object.
 type SoongApiModuleRecord struct {
 	// Identity
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	BaseType string `json:"base_type,omitempty"`
 
 	// Location
 	Path string `json:"path"`
@@ -56,14 +58,19 @@ type SoongApiModuleRecord struct {
 	Variant       string `json:"variant,omitempty"`
 
 	// Status
-	Enabled bool `json:"enabled"`
+	Enabled *bool `json:"enabled,omitempty"`
 
 	// Artifacts
 	TrendyTeamId                     string   `json:"trendy_team_id,omitempty"`
 	InstallFiles                     []string `json:"install_files,omitempty"`
 	BuiltFiles                       []string `json:"built_files,omitempty"`
 	Licenses                         []string `json:"license,omitempty"`
+	LicenseKinds                     []string `json:"license_kinds,omitempty"`
+	LicenseText                      []string `json:"license_text,omitempty"`
+	LicensePackageName               string   `json:"license_package_name,omitempty"`
 	PackageDefaultApplicableLicenses []string `json:"package_default_applicable_licenses,omitempty"` // module_type=package
+	LicenseKindConditions            []string `json:"license_kind_conditions,omitempty"`
+	LicenseKindUrl                   string   `json:"license_kind_url,omitempty"`
 
 	// Test related
 	TestOnly       bool `json:"test_only,omitempty"`
@@ -83,6 +90,10 @@ type SoongApiModuleRecord struct {
 	// CRT
 	CrtLibs     []string `json:"crt_libs,omitempty"`
 	CrtLibFiles []string `json:"crt_lib_files,omitempty"`
+
+	// CIPD
+	CipdVersion     string `json:"cipd_version,omitempty"`
+	CipdPackageName string `json:"cipd_package_name,omitempty"`
 }
 
 func soongApiSingletonFactory() android.Singleton {
@@ -105,86 +116,132 @@ func (c *soongApiSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 			Name:          ctx.ModuleName(m),
 			Type:          ctx.ModuleType(m),
 			Path:          ctx.ModuleDir(m),
-			Enabled:       commonInfo.Enabled,
 			Variant:       ctx.ModuleSubDir(m),
 			IsPrimaryArch: ctx.IsPrimaryModule(m),
 		}
 
-		if record.Type == "package" && commonInfo.PackageInfo != nil {
-			record.PackageDefaultApplicableLicenses = commonInfo.PackageInfo.PrimaryLicenses
+		// Fill metadata by categories
+		c.fillCommonMetadata(&record, commonInfo)
+		c.fillLicenseMetadata(ctx, m, &record, commonInfo)
+		c.fillTeamMetadata(ctx, m, &record)
+		c.fillTestMetadata(&record, commonInfo)
+		c.fillLanguageMetadata(ctx, m, &record)
+		c.fillCipdMetadata(ctx, m, &record)
+
+		// Final data deduplication and cleanup
+		c.cleanupRecord(&record)
+
+		records = append(records, record)
+	})
+
+	// Export collected data to JSON, ZIP and DB
+	c.exportRecords(ctx, records)
+}
+
+// fillCommonMetadata extracts basic platform and build artifact information.
+func (c *soongApiSingleton) fillCommonMetadata(record *SoongApiModuleRecord, common *android.CommonModuleInfo) {
+	if !common.Enabled {
+		record.Enabled = proptools.BoolPtr(false)
+	}
+	if common.BaseModuleType != "" {
+		record.BaseType = common.BaseModuleType
+	}
+
+	record.Os = common.Target.Os.Name
+	record.Arch = common.Target.ArchVariation()
+
+	if common.InstallFiles != nil {
+		record.InstallFiles = pathsToStrings(common.InstallFiles.InstallFiles)
+	}
+	if common.OutputFiles != nil {
+		record.BuiltFiles = pathsToStrings(common.OutputFiles.DefaultOutputFiles)
+	}
+}
+
+// fillLicenseMetadata extracts licensing, package and team ownership information.
+func (c *soongApiSingleton) fillLicenseMetadata(ctx android.SingletonContext, m android.ModuleProxy, record *SoongApiModuleRecord, common *android.CommonModuleInfo) {
+	if licInfo, ok := android.OtherModuleProvider(ctx, m, android.LicenseInfoProvider); ok {
+		record.LicensePackageName = proptools.String(licInfo.PackageName)
+		record.LicenseKinds = licInfo.EffectiveLicenseKinds
+		record.LicenseText = licInfo.EffectiveLicenseText.Strings()
+	}
+
+	if record.Type == "package" && common.PackageInfo != nil {
+		record.PackageDefaultApplicableLicenses = common.PackageInfo.PrimaryLicenses
+	}
+
+	if common.Licenses != nil {
+		record.Licenses = common.Licenses.Licenses
+	}
+
+	if kindInfo, ok := android.OtherModuleProvider(ctx, m, android.LicenseKindInfoProvider); ok {
+		record.LicenseKindConditions = kindInfo.Conditions
+		record.LicenseKindUrl = kindInfo.Url
+	}
+}
+
+// fillTeamMetadata extracts team ownership information.
+func (c *soongApiSingleton) fillTeamMetadata(ctx android.SingletonContext, m android.ModuleProxy, record *SoongApiModuleRecord) {
+	if team, ok := android.OtherModuleProvider(ctx, m, android.TeamInfoProvider); ok {
+		record.TrendyTeamId = proptools.String(team.Properties.Trendy_team_id)
+	}
+}
+
+// fillTestMetadata extracts test-specific flags.
+func (c *soongApiSingleton) fillTestMetadata(record *SoongApiModuleRecord, common *android.CommonModuleInfo) {
+	if common.TestModuleInfo != nil {
+		record.TestOnly = common.TestModuleInfo.TestOnly
+		record.TopLevelTarget = common.TestModuleInfo.TopLevelTarget
+	}
+}
+
+// fillLanguageMetadata handles Java, CC, and Rust specific logic including dependency analysis.
+func (c *soongApiSingleton) fillLanguageMetadata(ctx android.SingletonContext, m android.ModuleProxy, record *SoongApiModuleRecord) {
+	_, isJava := android.OtherModuleProvider(ctx, m, java.JavaInfoProvider)
+	_, isCc := android.OtherModuleProvider(ctx, m, cc.CcInfoProvider)
+	_, isRust := android.OtherModuleProvider(ctx, m, rust.RustInfoProvider)
+
+	// If CC, enhance BuiltFiles with precise output path
+	if isCc {
+		if linkableInfo, ok := android.OtherModuleProvider(ctx, m, cc.LinkableInfoProvider); ok {
+			if linkableInfo.OutputFile.Valid() {
+				record.BuiltFiles = append(record.BuiltFiles, linkableInfo.OutputFile.Path().String())
+			}
 		}
+	}
 
-		// Extract OS / Arch
-		record.Os = commonInfo.Target.Os.Name
-		record.Arch = commonInfo.Target.Arch.ArchType.Name
+	// Optimization: Only visit dependencies if the module is a known compiled type
+	if !isJava && !isCc && !isRust {
+		return
+	}
 
-		if team, ok := android.OtherModuleProvider(ctx, m, android.TeamInfoProvider); ok {
-			record.TrendyTeamId = proptools.String(team.Properties.Trendy_team_id)
-		}
+	// Single pass dependency visitor for all language types
+	ctx.VisitDirectDepsProxies(m, func(dep android.ModuleProxy) {
+		tag := ctx.OtherModuleDependencyTag(dep)
+		depName := ctx.ModuleName(dep)
 
-		if commonInfo.InstallFiles != nil {
-			record.InstallFiles = pathsToStrings(commonInfo.InstallFiles.InstallFiles)
-		}
-
-		if commonInfo.OutputFiles != nil {
-			record.BuiltFiles = pathsToStrings(commonInfo.OutputFiles.DefaultOutputFiles)
-		}
-
-		if commonInfo.Licenses != nil {
-			record.Licenses = commonInfo.Licenses.Licenses
-		}
-
-		if _, ok := android.OtherModuleProvider(ctx, m, java.JavaInfoProvider); ok {
-
-			// Module name of Java libs and staitc_libs
-			ctx.VisitDirectDepsProxies(m, func(dep android.ModuleProxy) {
-				tag := ctx.OtherModuleDependencyTag(dep)
-				depName := ctx.ModuleName(dep)
-
-				// Get direct dep's Provider
-				if depJavaInfo, ok := android.OtherModuleProvider(ctx, dep, java.JavaInfoProvider); ok {
-					// Collect only the direct dep's own output files (non-transitive)
-					depFiles := depJavaInfo.ImplementationJars.Strings()
-
-					// Use refined property-based helpers to categorize dependencies.
-					if java.IsStaticLibDepTag(tag) {
-						record.StaticLibs = append(record.StaticLibs, depName)
-						record.StaticLibFiles = append(record.StaticLibFiles, depFiles...)
-					} else if java.IsRuntimeDepTag(tag) {
-						// This will now correctly catch libTag, sdkLibTag, jniLibTag, etc.
-						record.Libs = append(record.Libs, depName)
-						record.LibFiles = append(record.LibFiles, depFiles...)
-					}
+		if isJava {
+			if depJavaInfo, ok := android.OtherModuleProvider(ctx, dep, java.JavaInfoProvider); ok {
+				depFiles := depJavaInfo.ImplementationJars.Strings()
+				if java.IsStaticLibDepTag(tag) {
+					record.StaticLibs = append(record.StaticLibs, depName)
+					record.StaticLibFiles = append(record.StaticLibFiles, depFiles...)
+				} else if java.IsRuntimeDepTag(tag) {
+					record.Libs = append(record.Libs, depName)
+					record.LibFiles = append(record.LibFiles, depFiles...)
 				}
-			})
+			}
 		}
 
-		if commonInfo.TestModuleInfo != nil {
-			record.TestOnly = commonInfo.TestModuleInfo.TestOnly
-			record.TopLevelTarget = commonInfo.TestModuleInfo.TopLevelTarget
-		}
-
-		if _, ok := android.OtherModuleProvider(ctx, m, cc.CcInfoProvider); ok {
-			// Enhance BuiltFiles (retrieve more precise output paths from LinkableInfoProvider)
-			if linkableInfo, ok := android.OtherModuleProvider(ctx, m, cc.LinkableInfoProvider); ok {
-				if linkableInfo.OutputFile.Valid() {
-					record.BuiltFiles = append(record.BuiltFiles, linkableInfo.OutputFile.Path().String())
+		if isCc || isRust {
+			var depFiles []string
+			if depLinkable, ok := android.OtherModuleProvider(ctx, dep, cc.LinkableInfoProvider); ok {
+				if depLinkable.OutputFile.Valid() {
+					depFiles = append(depFiles, depLinkable.OutputFile.Path().String())
 				}
 			}
 
-			// Get direct dep's Provider
-			ctx.VisitDirectDepsProxies(m, func(dep android.ModuleProxy) {
-				tag := ctx.OtherModuleDependencyTag(dep)
-				depName := ctx.ModuleName(dep)
-
-				// Retrieve output paths for dependencies via LinkableInfo
-				var depFiles []string
-				if depLinkable, ok := android.OtherModuleProvider(ctx, dep, cc.LinkableInfoProvider); ok {
-					if depLinkable.OutputFile.Valid() {
-						depFiles = append(depFiles, depLinkable.OutputFile.Path().String())
-					}
-				}
-
+			if isCc {
 				if cc.IsWholeStaticDepTag(tag) {
 					record.WholeStaticLibs = append(record.WholeStaticLibs, depName)
 					record.WholeStaticLibFiles = append(record.WholeStaticLibFiles, depFiles...)
@@ -200,55 +257,44 @@ func (c *soongApiSingleton) GenerateBuildActions(ctx android.SingletonContext) {
 				} else if cc.IsHeaderDepTag(tag) {
 					record.HeaderLibs = append(record.HeaderLibs, depName)
 				}
-			})
-		}
+			}
 
-		// Collect Rust modules information
-		if _, ok := android.OtherModuleProvider(ctx, m, rust.RustInfoProvider); ok {
-			ctx.VisitDirectDepsProxies(m, func(dep android.ModuleProxy) {
-				tag := ctx.OtherModuleDependencyTag(dep)
-				depName := ctx.ModuleName(dep)
-
-				// Retrieve output paths via LinkableInfoProvider, as Rust shares this with other native modules.
-				var depFiles []string
-				if depLinkable, ok := android.OtherModuleProvider(ctx, dep, cc.LinkableInfoProvider); ok {
-					if depLinkable.OutputFile.Valid() {
-						depFiles = append(depFiles, depLinkable.OutputFile.Path().String())
-					}
-				}
-
-				// For rust modules, treat rust_library and cc_static_lib as static deps.
-				if rust.IsRlibDepTag(tag) {
+			if isRust {
+				if rust.IsRlibDepTag(tag) || cc.IsStaticDepTag(tag) {
 					record.StaticLibs = append(record.StaticLibs, depName)
 					record.StaticLibFiles = append(record.StaticLibFiles, depFiles...)
 				}
-
-				if cc.IsStaticDepTag(tag) {
-					record.StaticLibs = append(record.StaticLibs, depName)
-					record.StaticLibFiles = append(record.StaticLibFiles, depFiles...)
-				}
-
 				if cc.IsWholeStaticDepTag(tag) {
 					record.WholeStaticLibs = append(record.WholeStaticLibs, depName)
 					record.WholeStaticLibFiles = append(record.WholeStaticLibFiles, depFiles...)
 				}
-			})
+			}
 		}
-
-		// --- Final data deduplication and cleanup ---
-		record.BuiltFiles = android.FirstUniqueStrings(record.BuiltFiles)
-		record.StaticLibs = android.FirstUniqueStrings(record.StaticLibs)
-		record.StaticLibFiles = android.FirstUniqueStrings(record.StaticLibFiles)
-		record.Libs = android.FirstUniqueStrings(record.Libs)
-		record.LibFiles = android.FirstUniqueStrings(record.LibFiles)
-		record.WholeStaticLibs = android.FirstUniqueStrings(record.WholeStaticLibs)
-		record.WholeStaticLibFiles = android.FirstUniqueStrings(record.WholeStaticLibFiles)
-		record.HeaderLibs = android.FirstUniqueStrings(record.HeaderLibs)
-
-		records = append(records, record)
 	})
+}
 
-	// Serialize the records into JSON format in memory.
+// fillCipdMetadata extracts CIPD version and package name.
+func (c *soongApiSingleton) fillCipdMetadata(ctx android.SingletonContext, m android.ModuleProxy, record *SoongApiModuleRecord) {
+	if cipdInfo, ok := android.OtherModuleProvider(ctx, m, cipd.CipdPackageInfoProvider); ok {
+		record.CipdVersion = cipdInfo.Version
+		record.CipdPackageName = cipdInfo.FullPackageName
+	}
+}
+
+// cleanupRecord performs final deduplication of collected strings.
+func (c *soongApiSingleton) cleanupRecord(record *SoongApiModuleRecord) {
+	record.BuiltFiles = android.FirstUniqueStrings(record.BuiltFiles)
+	record.StaticLibs = android.FirstUniqueStrings(record.StaticLibs)
+	record.StaticLibFiles = android.FirstUniqueStrings(record.StaticLibFiles)
+	record.Libs = android.FirstUniqueStrings(record.Libs)
+	record.LibFiles = android.FirstUniqueStrings(record.LibFiles)
+	record.WholeStaticLibs = android.FirstUniqueStrings(record.WholeStaticLibs)
+	record.WholeStaticLibFiles = android.FirstUniqueStrings(record.WholeStaticLibFiles)
+	record.HeaderLibs = android.FirstUniqueStrings(record.HeaderLibs)
+}
+
+// exportRecords serializes the metadata and sets up the build rules for the zip and database.
+func (c *soongApiSingleton) exportRecords(ctx android.SingletonContext, records []SoongApiModuleRecord) {
 	jsonData, err := json.MarshalIndent(records, "", "  ")
 	if err != nil {
 		ctx.Errorf("Failed to marshal soong api records: %s", err)
