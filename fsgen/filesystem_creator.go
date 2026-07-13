@@ -1329,6 +1329,7 @@ func (f *filesystemCreator) createPrebuiltKernelModules(ctx android.LoadHookCont
 			props.Zip.Blocklist_file = proptools.StringPtr("system_dlkm.modules.blocklist")
 		} else {
 			setSrcs(android.ExistentPathsForSources(ctx, partitionVars.SystemKernelModules).Strings())
+			props.Srcs_16k = android.ExistentPathsForSources(ctx, partitionVars.SystemKernelModules2ndStage16kbMode).Strings()
 			if len(partitionVars.SystemKernelLoadModules) == 0 {
 				// Create empty modules.load file for system
 				// https://source.corp.google.com/h/googleplex-android/platform/build/+/ef55daac9954896161b26db4f3ef1781b5a5694c:core/Makefile;l=695-700;drc=549fe2a5162548bd8b47867d35f907eb22332023;bpv=1;bpt=0

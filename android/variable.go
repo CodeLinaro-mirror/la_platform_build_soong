@@ -815,6 +815,7 @@ type PartitionVariables struct {
 	SystemKernelModules                                []string `json:",omitempty"`
 	SystemKernelBlocklistFile                          string   `json:",omitempty"`
 	SystemKernelLoadModules                            []string `json:",omitempty"`
+	SystemKernelModules2ndStage16kbMode                []string `json:",omitempty"`
 	BuildingVendorDlkmImage                            bool     `json:",omitempty"`
 	VendorKernelModules                                []string `json:",omitempty"`
 	VendorKernelModulesLoad                            []string `json:",omitempty"`
